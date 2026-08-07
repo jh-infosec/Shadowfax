@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+
+shadowfax.db
+test_shadowfax.db
+
+.vscode/
+.idea/
+.env
