@@ -20,7 +20,8 @@ alerts, but never blocks or modifies events.
 
 from __future__ import annotations
 import sqlite3
-from typing import Any, Optional
+from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,24 +34,10 @@ from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 APP_NAME = "Shadowfax API"
 VERSION = "0.1.0"
 
-app = FastAPI(
-    title=APP_NAME,
-    version=VERSION,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    # Fine for local development.
-    # Restrict this before exposing the API outside your machine.
-    allow_origins=["*"],  
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Application startup
 
-@app.on_event("startup")
-def initialise_application() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     db.init_db()
     with db.get_conn() as conn:
         if db.get_policy(conn) is None:
@@ -59,6 +46,23 @@ def initialise_application() -> None:
         if not db.get_all_events(conn):
             _load_events(conn, SAMPLE_EVENTS)
             conn.commit()
+    yield
+
+
+app = FastAPI(
+    title=APP_NAME,
+    version=VERSION,
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    # Fine for local development.
+    # Restrict this before exposing the API outside your machine.
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # Request models
@@ -67,7 +71,7 @@ class EventRequest(BaseModel):
     timestamp: str
     actor_id: str
     actor_type: str
-    task: Optional[str] = None
+    task: str | None = None
     event_type: str
     target: str
     metadata: dict[str, Any] = {}
@@ -114,7 +118,7 @@ def ingest_events(events: list[EventRequest]):
 
 
 @app.get("/events")
-def list_events(actor_id: Optional[str] = None):
+def list_events(actor_id: str | None = None):
     with db.get_conn() as conn:
         if actor_id:
             return db.get_events_for_actor(conn, actor_id)
@@ -125,11 +129,11 @@ def list_events(actor_id: Optional[str] = None):
 
 @app.get("/alerts")
 def list_alerts(
-    severity: Optional[list[str]] = Query(None),
-    actor_type: Optional[list[str]] = Query(None),
-    actor_id: Optional[str] = None,
-    category: Optional[list[str]] = Query(None),
-    search: Optional[str] = None,
+    severity: list[str] | None = Query(None),
+    actor_type: list[str] | None = Query(None),
+    actor_id: str | None = None,
+    category: list[str] | None = Query(None),
+    search: str | None = None,
     limit: int = 500,
 ):
     with db.get_conn() as conn:

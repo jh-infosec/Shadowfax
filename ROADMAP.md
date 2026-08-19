@@ -27,13 +27,14 @@
 Defects found reviewing the v0.2 dashboard. Small, and worth clearing before
 new work.
 
-- [ ] Unticking every severity or actor type shows all alerts instead of none
-- [ ] Debounce the search box, which currently fires a request per keystroke
-- [ ] Wire category filtering to the sidebar, the API already supports it
-- [ ] Fix `cd ../backend` in the frontend README, the backend is at the root
-- [ ] Replace the deprecated `@app.on_event("startup")` with a lifespan
+- [x] Unticking every severity or actor type shows all alerts instead of none
+- [x] Debounce the search box, which currently fires a request per keystroke
+- [x] Wire category filtering to the sidebar, the API already supports it
+- [x] Fix `cd ../backend` in the frontend README, the backend is at the root
+      (already corrected in the V2 README; the path now points to the root)
+- [x] Replace the deprecated `@app.on_event("startup")` with a lifespan
       handler
-- [ ] Align `Optional[str]` in app.py with `str | None` used elsewhere
+- [x] Align `Optional[str]` in app.py with `str | None` used elsewhere
 
 ---
 

@@ -34,6 +34,7 @@ export function getAlerts(filters = {}) {
   const params = new URLSearchParams();
   (filters.severity || []).forEach((s) => params.append("severity", s));
   (filters.actorType || []).forEach((t) => params.append("actor_type", t));
+  (filters.category || []).forEach((c) => params.append("category", c));
   if (filters.search) params.append("search", filters.search);
   const qs = params.toString();
   return request(`/alerts${qs ? `?${qs}` : ""}`);

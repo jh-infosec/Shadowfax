@@ -67,15 +67,12 @@ volume or alert-to-response time demands it and not before.
 
 ## Known issues
 
-Tracked as v0.2.1 in the root `ROADMAP.md`:
+The v0.2.1 filter and search defects are now fixed (see the root
+`CHANGELOG.md`). One known issue remains, tracked for v0.3:
 
-- Unticking every severity or actor type shows all alerts instead of none,
-  because an empty filter set sends no query parameter and the API treats
-  absent as unfiltered
-- The search box fires a request per keystroke and needs debouncing
-- Category filtering is not wired up, though `/alerts` already supports it
 - Rows are keyed on `alert.id`, which changes on every rescan, so the table
-  rebuilds rather than updates on each poll
+  rebuilds rather than updates on each poll. This is the stable-alert-identity
+  work and blocks per-alert analyst state.
 
 ## Not built yet
 

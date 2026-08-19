@@ -1,5 +1,36 @@
 # Changelog
 
+## Version 0.2.1
+
+Defect-clearing pass over the v0.2 dashboard and backend. No new features.
+
+### Fixed
+
+- Unticking every severity or actor type now shows no alerts instead of all.
+  An empty selection short-circuits the alert request rather than sending no
+  parameter, which the API reads as unfiltered.
+- The search box is debounced (300 ms), so typing fires one request after it
+  settles instead of one per keystroke. The input stays responsive; only the
+  settled value drives a fetch.
+- Category filtering is wired to the sidebar. "Categories seen" is now a set
+  of checkboxes that filter server-side via the `category` parameter `/alerts`
+  already supported. The list is accumulated from alerts ever seen, so options
+  don't vanish when a category filter narrows the view. Empty selection means
+  all categories (opt-in narrowing, since the category set is discovered, not
+  fixed).
+
+### Changed
+
+- Backend startup migrated from the deprecated `@app.on_event("startup")` to a
+  `lifespan` context manager.
+- `app.py` type hints aligned to the `str | None` style used elsewhere;
+  dropped the `Optional` import.
+
+### Notes
+
+Alert identity is still keyed on `alerts.id`, which changes on every rescan.
+That is the v0.3 stable-alert-identity item, not part of this pass.
+
 ## Version 0.2.0
 
 Dashboard release. The backend is unchanged.
