@@ -42,9 +42,11 @@ investigation and explainability.
 - Rule-based detection engine across twelve alert categories
 - Policy management with full rescan on change
 - Actor risk scoring
+- Stable, deterministic alert identity that survives a rescan
+- Acknowledge and assign alerts, with analyst state that persists across rescans
 - React dashboard with a live alert table
 - Actor timelines, showing alerts attached to the events that produced them
-- Filtering by severity, actor type and free-text search
+- Filtering by severity, actor type, category and free-text search
 - Policy editing from the dashboard
 - Automated API testing
 
@@ -116,7 +118,8 @@ Planned
 
 ### v0.3
 
-- Stable Alert Identity
+- Stable Alert Identity — shipped
+- Acknowledge & Assign — shipped
 - Authentication
 - WebSocket Push
 
@@ -188,8 +191,10 @@ The dashboard has no automated tests yet.
 
 ## Security
 
-Neither the API nor the dashboard has authentication, and CORS is open to all
-origins. Shadowfax is intended for local development only until v0.3.
+Neither the API nor the dashboard has authentication yet, and CORS is open to
+all origins. Because there is no sign-in, an acknowledgement or assignment
+records a placeholder analyst rather than a real user. Shadowfax is intended
+for local development only until authentication lands, the next v0.3 item.
 
 ---
 
