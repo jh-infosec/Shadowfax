@@ -1,10 +1,22 @@
-venv/
-__pycache__/
-*.pyc
-
+# Databases are generated. Committing one causes confusing diffs and ships
+# sample data as if it were real.
+*.db
 shadowfax.db
 test_shadowfax.db
 
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.pytest_cache/
+
+# Frontend
+node_modules/
+dist/
+.env
+.env.local
+
+# Editor
 .vscode/
 .idea/
-.env

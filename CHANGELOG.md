@@ -1,5 +1,57 @@
 # Changelog
 
+## Version 0.3.0
+
+Stable alert identity, and the analyst state it unblocks. First backend change
+since v0.1.
+
+### Added
+
+- Deterministic alert ids. An alert's id is now
+  `sha256("shadowfax|{actor}|{category}|{event_id}")[:16]` rather than an
+  autoincrement integer, so recomputing the same alert from the same input
+  yields the same id. `detectors.alert_identity` is the single source of the
+  rule, and it follows the shared findings-envelope id form (actor as subject,
+  `category` as the machine-stable key, event as the discriminator).
+- `alert_state` table holding per-alert acknowledgement, assignment and notes,
+  keyed on the deterministic id. It is deliberately not foreign-keyed to
+  `alerts`, so a rescan's delete-and-reinsert leaves it untouched and the state
+  re-attaches to the same alert when it is rebuilt.
+- `PATCH /alerts/{id}/state` to acknowledge, assign or annotate an alert.
+  Unknown ids 404. Alert responses (`/alerts`, `/actors/{id}`) now carry
+  `acknowledged`, `acknowledged_by`, `assigned_to` and `note`.
+- Startup rebuilds alerts when events exist but the alerts table is empty
+  (after a restart or the schema migration below).
+
+### Changed
+
+- `alerts.id` is now `TEXT PRIMARY KEY`. A pre-v0.3 database with an integer
+  `alerts.id` is migrated on startup by dropping the alerts table (alerts are
+  derived data) and rebuilding it with deterministic ids; `alert_state` is
+  keyed by id and is preserved.
+- Backend version is now `0.3.0`.
+
+### Why message is excluded from the id
+
+The roadmap and `architecture.md` originally described the id as a hash of
+"actor, event, category and message". Including the human-readable message
+would mean that editing a detector's wording silently changed every historical
+alert's id and destroyed any acknowledgement attached to it -- the exact
+failure the findings envelope warns against for titles. The id therefore hashes
+the machine-stable `category` (the envelope's "key") and excludes `message`.
+
+### Dashboard
+
+- The alert table has a Status column with per-row **Acknowledge** and
+  **Assign** controls, wired to `PATCH /alerts/{id}/state` through the single
+  `api.js` client. Acknowledged rows are dimmed and show who acknowledged them;
+  assignment shows an `@user` tag. Updates are optimistic and reconciled on the
+  next poll.
+- Acting analyst is a placeholder (`CURRENT_USER` in `constants.js`) until
+  authentication lands; it fills `acknowledged_by` / `assigned_to`.
+- Because ids are now stable, `AlertTable` and `ActorDrawer` update rows in
+  place instead of tearing them down each poll.
+
 ## Version 0.2.1
 
 Defect-clearing pass over the v0.2 dashboard and backend. No new features.

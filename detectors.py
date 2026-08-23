@@ -6,13 +6,35 @@ returns any alerts that should be raised.
 """
 
 from __future__ import annotations
+import hashlib
 from collections import deque
 from datetime import datetime, timedelta, time as dtime
 from typing import Any
 
+TOOL_NAME = "shadowfax"
 
-def _mk_alert(event: dict, severity: str, category: str, message: str) -> dict:
+
+def alert_identity(actor_id: str, category: str, event_id: int, discriminator: str = "") -> str:
+    """Deterministic alert id: the same alert recomputed from the same input
+    yields the same id, so per-alert analyst state survives a rescan.
+
+    This mirrors the findings-envelope id rule
+    (sha256(tool | subject | key | discriminator)). Here the subject is the
+    actor, the *key* is the machine-stable ``category``, and the discriminator
+    is the event that produced the alert. ``message`` is deliberately excluded:
+    it is the human-readable sentence, and rewording it must not change what a
+    dashboard has been counting or reset an acknowledgement. If a detector ever
+    needs to raise two alerts of one category on a single event, it passes an
+    extra ``discriminator`` to keep them distinct.
+    """
+    raw = f"{TOOL_NAME}|{actor_id}|{category}|{event_id}|{discriminator}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _mk_alert(event: dict, severity: str, category: str, message: str,
+              discriminator: str = "") -> dict:
     return {
+        "id": alert_identity(event["actor_id"], category, event["id"], discriminator),
         "event_id": event["id"],
         "actor_id": event["actor_id"],
         "actor_type": event["actor_type"],

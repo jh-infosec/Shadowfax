@@ -91,6 +91,53 @@ check("PUT /policy returns 200", r.status_code == 200)
 r = client.get("/alerts", params={"actor_id": "user-newthreat", "category": ["brute_force_auth"]})
 check("brute_force alert disappears after loosening threshold + rescan", len(r.json()) == 0)
 
+print("\n== stable alert identity ==")
+import re
+import detectors
+
+r = client.get("/alerts", params={"actor_id": "eval-agent-7"})
+agent_alerts = r.json()
+check("eval-agent-7 has alerts to work with", len(agent_alerts) > 0)
+target_alert = agent_alerts[0]
+alert_id = target_alert["id"]
+print("  chosen alert id:", alert_id, "category:", target_alert["category"])
+
+check("alert id is a 16-char hex string", bool(re.fullmatch(r"[0-9a-f]{16}", str(alert_id))))
+
+# The id is a pure function of actor, category and event -- not the message.
+expected_id = detectors.alert_identity(
+    target_alert["actor_id"], target_alert["category"], target_alert["event_id"]
+)
+check("alert id matches the deterministic derivation (message excluded)", alert_id == expected_id)
+check("alerts carry analyst state, unacknowledged by default", target_alert["acknowledged"] is False)
+
+# Acknowledge and assign it.
+r = client.patch(f"/alerts/{alert_id}/state",
+                 json={"acknowledged": True, "acknowledged_by": "analyst-1", "assigned_to": "analyst-2"})
+check("PATCH /alerts/{id}/state returns 200", r.status_code == 200)
+check("state reports acknowledged", r.json()["acknowledged"] is True)
+
+# Patching a bogus id is a 404, not a silent create.
+r = client.patch("/alerts/deadbeefdeadbeef/state", json={"acknowledged": True})
+check("PATCH on unknown alert id 404s", r.status_code == 404)
+
+# Now ingest a NEW, later event for the same actor. This rescans eval-agent-7,
+# deleting and rebuilding all of its alerts. The acknowledged alert must come
+# back with the SAME id and its acknowledgement intact.
+r = client.post("/events", json=[
+    {"timestamp": "2026-12-31T12:00:00", "actor_id": "eval-agent-7", "actor_type": "ai_agent",
+     "event_type": "heartbeat", "target": "status_page", "metadata": {}},
+])
+check("rescan-triggering ingest returns 200", r.status_code == 200)
+
+r = client.get("/alerts", params={"actor_id": "eval-agent-7"})
+after_rescan = {a["id"]: a for a in r.json()}
+check("acknowledged alert still exists with the same id after rescan", alert_id in after_rescan)
+survivor = after_rescan.get(alert_id, {})
+check("acknowledgement survived the rescan", survivor.get("acknowledged") is True)
+check("acknowledged_by survived the rescan", survivor.get("acknowledged_by") == "analyst-1")
+check("assignment survived the rescan", survivor.get("assigned_to") == "analyst-2")
+
 print("\n== reset ==")
 r = client.post("/reset")
 check("POST /reset returns 200", r.status_code == 200)

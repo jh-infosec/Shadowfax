@@ -32,7 +32,7 @@ import detectors
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.1.0"
+VERSION = "0.3.0"
 
 # Application startup
 
@@ -45,6 +45,12 @@ async def lifespan(app: FastAPI):
             conn.commit()
         if not db.get_all_events(conn):
             _load_events(conn, SAMPLE_EVENTS)
+            conn.commit()
+        elif db.alert_row_count(conn) == 0:
+            # Events survived a restart or a schema migration but alerts did
+            # not (the pre-v0.3 alerts table is dropped on upgrade). Rebuild
+            # them: alerts are a pure function of events and the active policy.
+            _rescan_all(conn)
             conn.commit()
     yield
 
@@ -75,6 +81,15 @@ class EventRequest(BaseModel):
     event_type: str
     target: str
     metadata: dict[str, Any] = {}
+
+
+class AlertStateUpdate(BaseModel):
+    """Analyst state for an alert. Every field is optional; only those provided
+    are changed. Keyed on the stable alert id, so it survives a rescan."""
+    acknowledged: bool | None = None
+    acknowledged_by: str | None = None
+    assigned_to: str | None = None
+    note: str | None = None
 
 
 # Internal helpers
@@ -138,6 +153,29 @@ def list_alerts(
 ):
     with db.get_conn() as conn:
         return db.query_alerts(conn, severity, actor_type, actor_id, category, search, limit)
+
+
+@app.patch("/alerts/{alert_id}/state")
+def update_alert_state(alert_id: str, update: AlertStateUpdate):
+    """Acknowledge, assign or annotate a single alert.
+
+    State attaches to the alert's deterministic id and lives in its own table,
+    so it persists across the rescans that rebuild the alert on every new event
+    for that actor.
+    """
+    with db.get_conn() as conn:
+        if db.get_alert(conn, alert_id) is None:
+            raise HTTPException(404, f"no alert with id '{alert_id}'")
+        state = db.set_alert_state(
+            conn,
+            alert_id,
+            acknowledged=update.acknowledged,
+            acknowledged_by=update.acknowledged_by,
+            assigned_to=update.assigned_to,
+            note=update.note,
+        )
+        conn.commit()
+    return state
 
 
 @app.get("/stats")

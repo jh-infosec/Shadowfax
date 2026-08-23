@@ -56,6 +56,21 @@ This trades a little CPU for correctness and restart-safety. There is no
 in-memory sliding-window state to reconstruct after a crash, and no
 possibility of stale alerts surviving a policy change.
 
+### Alert identity is deterministic
+
+An alert's id is a hash of the actor, the machine-stable `category` and the
+event that produced it (`detectors.alert_identity`): the same alert recomputed
+from the same input always gets the same id. The human-readable `message` is
+deliberately excluded, so rewording a detector's message never changes an
+alert's identity or what a dashboard has been counting.
+
+This is what makes recompute-never-patch compatible with per-alert analyst
+state. Acknowledgement, assignment and notes live in a separate `alert_state`
+table keyed on that id, and a rescan never touches it, so they re-attach to the
+same alert when it is rebuilt. The derivation follows the shared
+findings-envelope id rule (`findings-envelope.md`), so an ingested envelope
+finding and a locally-raised alert identify the same way.
+
 ### Detectors are pure functions
 
 `detectors.run_for_actor` is a pure function of `(that actor's ordered event
@@ -112,8 +127,8 @@ alert-to-response time demands it and not before.
 
 #### app.py
 
-The REST API. Ingests events, retrieves alerts, manages policy and exposes
-statistics.
+The REST API. Ingests events, retrieves alerts, manages policy, records
+per-alert analyst state (`PATCH /alerts/{id}/state`) and exposes statistics.
 
 Also owns orchestration: `_rescan_actor` loads an actor's history, runs the
 detection engine and writes the resulting alerts back. `_rescan_all` does the
@@ -123,15 +138,24 @@ same for every known actor.
 
 All SQLite interaction. No other module imports `sqlite3`.
 
-Three tables:
+Four tables:
 
 - `events`, raw ingested activity, one row per event
-- `alerts`, detector output, one row per fired alert, referencing an event
+- `alerts`, detector output, one row per fired alert, referencing an event.
+  The primary key is the deterministic id described above, not an
+  autoincrement.
+- `alert_state`, per-alert analyst state (acknowledgement, assignment, notes),
+  keyed on the alert id. Deliberately not foreign-keyed to `alerts`, so it
+  survives the delete-and-reinsert of a rescan.
 - `policy`, a single-row table holding the current policy as JSON
 
-Also provides alert querying, severity counts and actor risk scoring. Risk
-score is a weighted sum of an actor's alerts: critical 10, high 5, medium 2,
-low 1.
+Also provides alert querying (left-joining `alert_state`), severity counts and
+actor risk scoring. Risk score is a weighted sum of an actor's alerts: critical
+10, high 5, medium 2, low 1.
+
+On startup, if events exist but the alerts table is empty -- after a restart or
+the pre-v0.3 schema migration -- every actor is rescanned to rebuild alerts,
+which is safe because alerts are a pure function of events and policy.
 
 #### detectors.py
 
@@ -232,6 +256,15 @@ the severity colours that `constants.js` refers to by variable name.
 A policy change therefore rebuilds the entire alert table. Alerts that no
 longer fire under the new policy disappear.
 
+### On acknowledgement
+
+1. `PATCH /alerts/{id}/state` sets acknowledgement, assignment or a note
+2. The alert must currently exist, otherwise 404
+3. State is written to `alert_state`, keyed on the deterministic alert id
+4. Because that id is reproduced on every rescan and `alert_state` is never
+   touched by a rescan, the state stays attached across future ingestions for
+   that actor
+
 ### On dashboard refresh
 
 1. Timer fires, or filter state changes
@@ -245,22 +278,6 @@ longer fire under the new policy disappear.
 
 These are accepted limitations of the current design, recorded so they are
 not rediscovered as bugs.
-
-### Alert identity is not stable
-
-Alert rows use an autoincrement primary key and are deleted and reinserted on
-every rescan. An alert's `id` therefore changes whenever its actor receives a
-new event.
-
-This is now load-bearing for the dashboard. `AlertTable` and `ActorDrawer`
-both use `alert.id` as a React key, so rows are torn down and rebuilt on
-every poll rather than updated in place.
-
-More importantly, any per-alert state an analyst creates, acknowledgement,
-assignment or triage notes, cannot be keyed on `alerts.id` and would be
-destroyed by the next ingestion for that actor. Adding analyst state requires
-a stable alert identity first, for example a deterministic hash of actor,
-event, category and message.
 
 ### Rescan cost grows with actor history
 
@@ -279,12 +296,6 @@ local development only until then.
 SQLite with the default configuration. Concurrent writers are not supported.
 PostgreSQL is planned for v1.0.
 
-### Category filtering is not wired to the UI
-
-`/alerts` accepts a `category` parameter and `db.query_alerts` implements it,
-but the sidebar only displays the categories present rather than offering
-them as filters.
-
 ### Up to five seconds of alert latency
 
 The consequence of polling. A new alert appears on the next refresh, not
@@ -298,7 +309,7 @@ The following files are part of the project structure and must be preserved:
 app.py                  db.py                   detectors.py
 seed_data.py            test_api.py             requirements.txt
 architecture.md         README.md               CHANGELOG.md
-ROADMAP.md              .gitignore
+ROADMAP.md              findings-envelope.md    .gitignore
 
 frontend/index.html                 frontend/package.json
 frontend/vite.config.js             frontend/README.md
