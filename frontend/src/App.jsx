@@ -4,7 +4,7 @@ import Sidebar from "./components/Sidebar.jsx";
 import AlertTable from "./components/AlertTable.jsx";
 import ActorDrawer from "./components/ActorDrawer.jsx";
 import PolicyEditor from "./components/PolicyEditor.jsx";
-import { SEVERITIES, ACTOR_TYPES } from "./constants.js";
+import { SEVERITIES, ACTOR_TYPES, CURRENT_USER } from "./constants.js";
 import * as api from "./api.js";
 
 // How often the dashboard polls the API for fresh alerts and stats.
@@ -124,6 +124,36 @@ export default function App() {
     refresh();
   };
 
+  // Write analyst state for one alert. Optimistically patch the row so the UI
+  // responds instantly, then persist and reconcile on the next refresh. The
+  // alert id is stable, so the change survives the rescans that rebuild alerts.
+  const handleSetAlertState = useCallback(async (alertId, patch) => {
+    setAlerts((prev) => prev.map((a) => (a.id === alertId ? { ...a, ...patch } : a)));
+    if (actorDetail) {
+      setActorDetail((prev) =>
+        prev ? { ...prev, alerts: prev.alerts.map((a) => (a.id === alertId ? { ...a, ...patch } : a)) } : prev
+      );
+    }
+    try {
+      await api.setAlertState(alertId, patch);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      refresh();
+    }
+  }, [refresh, actorDetail]);
+
+  const acknowledgeAlert = (alertId, acknowledged) =>
+    handleSetAlertState(
+      alertId,
+      acknowledged
+        ? { acknowledged: true, acknowledged_by: CURRENT_USER }
+        : { acknowledged: false }
+    );
+
+  const assignAlertToMe = (alertId) =>
+    handleSetAlertState(alertId, { assigned_to: CURRENT_USER });
+
   return (
     <div className="app">
       <TopBar stats={stats} connected={connected} onReset={handleReset} />
@@ -138,7 +168,12 @@ export default function App() {
         />
         <div className="main">
           <div className="table-wrap">
-            <AlertTable alerts={alerts} onSelectActor={setSelectedActorId} />
+            <AlertTable
+              alerts={alerts}
+              onSelectActor={setSelectedActorId}
+              onAcknowledge={acknowledgeAlert}
+              onAssign={assignAlertToMe}
+            />
           </div>
         </div>
       </div>

@@ -126,6 +126,24 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .msg-cell { color: var(--muted); max-width: 360px; }
 .cat-badge { font-family: var(--mono); font-size: 11px; color: var(--text); }
 
+/* Per-alert analyst state: acknowledge / assign controls in the Status column */
+.status-cell { white-space: nowrap; }
+.ack-btn, .assign-btn {
+  font-size: 10.5px; padding: 2px 8px; border-radius: 4px;
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.ack-btn:hover, .assign-btn:hover { border-color: var(--accent); color: var(--accent); }
+.assign-btn { margin-left: 6px; }
+.ack-badge {
+  font-size: 10.5px; padding: 2px 8px; border-radius: 4px; font-family: var(--mono);
+  background: var(--low-dim); border: 1px solid var(--low); color: var(--low);
+}
+.ack-badge:hover { filter: brightness(1.15); }
+.assigned-tag { margin-left: 6px; font-family: var(--mono); font-size: 10.5px; color: var(--accent); }
+.alert-table tbody tr.acknowledged td:not(.status-cell) { opacity: 0.5; }
+.alert-table tbody tr.acknowledged:hover td:not(.status-cell) { opacity: 0.75; }
+
 .empty-state { padding: 60px 20px; text-align: center; color: var(--muted-2); }
 .error-banner { background: var(--crit-dim); color: var(--crit); padding: 8px 20px; font-size: 12.5px; font-family: var(--mono); }
 

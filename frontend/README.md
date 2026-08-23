@@ -67,12 +67,11 @@ volume or alert-to-response time demands it and not before.
 
 ## Known issues
 
-The v0.2.1 filter and search defects are now fixed (see the root
-`CHANGELOG.md`). One known issue remains, tracked for v0.3:
-
-- Rows are keyed on `alert.id`, which changes on every rescan, so the table
-  rebuilds rather than updates on each poll. This is the stable-alert-identity
-  work and blocks per-alert analyst state.
+The v0.2.1 filter and search defects are fixed, and the v0.3 stable-alert-
+identity work is done (see the root `CHANGELOG.md`). Alert ids are now
+deterministic, so rows update in place instead of rebuilding on each poll, and
+the alert table carries per-alert acknowledge and assign controls backed by
+`PATCH /alerts/{id}/state`. No known dashboard defects are open.
 
 ## Not built yet
 

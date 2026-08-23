@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { SEVERITY_COLOUR, SEVERITY_ORDER } from "../constants.js";
 
-export default function AlertTable({ alerts, onSelectActor }) {
+export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAssign }) {
   const [sortKey, setSortKey] = useState("timestamp");
   const [sortDir, setSortDir] = useState("desc");
 
@@ -37,11 +37,16 @@ export default function AlertTable({ alerts, onSelectActor }) {
           <th onClick={() => handleSort("timestamp")}>Time</th>
           <th>Target</th>
           <th>Detail</th>
+          <th>Status</th>
         </tr>
       </thead>
       <tbody>
         {sorted.map((a) => (
-          <tr key={a.id} onClick={() => onSelectActor(a.actor_id)}>
+          <tr
+            key={a.id}
+            className={a.acknowledged ? "acknowledged" : undefined}
+            onClick={() => onSelectActor(a.actor_id)}
+          >
             <td>
               <div className="sev-cell" style={{ color: SEVERITY_COLOUR[a.severity] }}>
                 <span className="dot" style={{ background: SEVERITY_COLOUR[a.severity] }} />
@@ -56,6 +61,32 @@ export default function AlertTable({ alerts, onSelectActor }) {
             <td className="time-cell">{a.timestamp.replace("T", " ").slice(0, 16)}</td>
             <td className="target-cell">{a.target}</td>
             <td className="msg-cell">{a.message}</td>
+            {/* Analyst state. stopPropagation keeps these clicks from opening
+                the actor drawer that the row click triggers. */}
+            <td className="status-cell" onClick={(e) => e.stopPropagation()}>
+              {a.acknowledged ? (
+                <button
+                  className="ack-badge"
+                  title={a.acknowledged_by ? `acknowledged by ${a.acknowledged_by} — click to undo` : "click to undo"}
+                  onClick={() => onAcknowledge(a.id, false)}
+                >
+                  ✓ ack{a.acknowledged_by ? ` · ${a.acknowledged_by}` : ""}
+                </button>
+              ) : (
+                <button className="ack-btn" onClick={() => onAcknowledge(a.id, true)}>
+                  Ack
+                </button>
+              )}
+              {a.assigned_to ? (
+                <span className="assigned-tag" title={`assigned to ${a.assigned_to}`}>
+                  @{a.assigned_to}
+                </span>
+              ) : (
+                <button className="assign-btn" onClick={() => onAssign(a.id)}>
+                  Assign
+                </button>
+              )}
+            </td>
           </tr>
         ))}
       </tbody>

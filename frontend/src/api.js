@@ -56,4 +56,15 @@ export function ingestEvents(events) {
   return request("/events", { method: "POST", body: JSON.stringify(events) });
 }
 
+// Acknowledge, assign or annotate an alert. `patch` may carry any of
+// { acknowledged, acknowledged_by, assigned_to, note }; only the fields
+// present are changed. The alert's id is stable, so this state persists
+// across the rescans that rebuild the alert.
+export function setAlertState(alertId, patch) {
+  return request(`/alerts/${encodeURIComponent(alertId)}/state`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
 export { API_BASE };
