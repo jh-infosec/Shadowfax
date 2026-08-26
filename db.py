@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -76,7 +77,47 @@ CREATE TABLE IF NOT EXISTS policy (
     data TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Authentication (v0.3). Analysts sign in; agents and services use API keys.
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    role TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Opaque bearer tokens. Only the token's SHA-256 fingerprint is stored, so the
+-- database never holds a usable session token.
+CREATE TABLE IF NOT EXISTS sessions (
+    token_fp TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- API keys for programmatic ingest. Same rule: only the fingerprint is stored.
+CREATE TABLE IF NOT EXISTS api_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_fp TEXT UNIQUE NOT NULL,
+    prefix TEXT NOT NULL,
+    label TEXT,
+    role TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT
+);
 """
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat()
 
 
 def init_db(path: Path | None = None) -> None:
@@ -349,7 +390,106 @@ def get_alert(conn: sqlite3.Connection, alert_id: str) -> dict[str, Any] | None:
 
 
 def wipe_all(conn: sqlite3.Connection) -> None:
+    # Reset clears activity data only. Users, sessions and API keys are left
+    # alone -- a data reset should not log you out or delete your admin account.
     conn.execute("DELETE FROM alerts")
     conn.execute("DELETE FROM alert_state")
     conn.execute("DELETE FROM events")
     conn.execute("DELETE FROM policy")
+
+
+# Authentication: users
+
+def count_users(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+
+
+def create_user(conn: sqlite3.Connection, username: str, password_hash: str,
+                salt: str, role: str) -> dict[str, Any]:
+    cur = conn.execute(
+        "INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)",
+        (username, password_hash, salt, role),
+    )
+    return {"id": cur.lastrowid, "username": username, "role": role}
+
+
+def get_user_by_username(conn: sqlite3.Connection, username: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_users(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT id, username, role, created_at FROM users ORDER BY username"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# Authentication: sessions
+
+def create_session(conn: sqlite3.Connection, token_fp: str, user_id: int, expires_at: str) -> None:
+    conn.execute(
+        "INSERT INTO sessions (token_fp, user_id, expires_at) VALUES (?, ?, ?)",
+        (token_fp, user_id, expires_at),
+    )
+
+
+def get_session_user(conn: sqlite3.Connection, token_fp: str) -> dict[str, Any] | None:
+    """The user behind a live session token, or None if unknown or expired.
+
+    Expired sessions are deleted as they are encountered, so the table does not
+    accumulate dead tokens over time.
+    """
+    row = conn.execute(
+        """SELECT s.expires_at, u.id, u.username, u.role
+           FROM sessions s JOIN users u ON u.id = s.user_id
+           WHERE s.token_fp = ?""",
+        (token_fp,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        expired = datetime.fromisoformat(row["expires_at"]) <= _utc_now()
+    except ValueError:
+        expired = True
+    if expired:
+        conn.execute("DELETE FROM sessions WHERE token_fp = ?", (token_fp,))
+        conn.commit()
+        return None
+    return {"id": row["id"], "username": row["username"], "role": row["role"]}
+
+
+def delete_session(conn: sqlite3.Connection, token_fp: str) -> None:
+    conn.execute("DELETE FROM sessions WHERE token_fp = ?", (token_fp,))
+
+
+# Authentication: API keys
+
+def create_api_key(conn: sqlite3.Connection, key_fp: str, prefix: str,
+                   label: str | None, role: str) -> dict[str, Any]:
+    cur = conn.execute(
+        "INSERT INTO api_keys (key_fp, prefix, label, role) VALUES (?, ?, ?, ?)",
+        (key_fp, prefix, label, role),
+    )
+    return {"id": cur.lastrowid, "prefix": prefix, "label": label, "role": role}
+
+
+def get_api_key(conn: sqlite3.Connection, key_fp: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM api_keys WHERE key_fp = ?", (key_fp,)).fetchone()
+    return dict(row) if row else None
+
+
+def touch_api_key(conn: sqlite3.Connection, key_id: int) -> None:
+    conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (_iso(_utc_now()), key_id))
+
+
+def list_api_keys(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT id, prefix, label, role, created_at, last_used_at FROM api_keys ORDER BY id"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_api_key(conn: sqlite3.Connection, key_id: int) -> bool:
+    cur = conn.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+    return cur.rowcount > 0

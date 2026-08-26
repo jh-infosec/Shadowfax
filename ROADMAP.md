@@ -51,12 +51,12 @@ new work.
       an `alert_state` table that survives rescans, plus per-row Acknowledge and
       Assign controls in the dashboard. (Acting analyst is a placeholder until
       authentication lands.)
-- [ ] Authentication
-- [ ] User accounts
-- [ ] API keys
-- [ ] Role-based access control
+- [x] Authentication (opaque bearer tokens, 12h sessions, PBKDF2 passwords)
+- [x] User accounts (admin-managed, created via `POST /users`)
+- [x] API keys (ingest-only, for agents and harnesses)
+- [x] Role-based access control (admin > analyst > viewer)
 - [ ] WebSocket or SSE push, replacing the poll loop
-- [ ] Restrict CORS to the dashboard origin
+- [x] Restrict CORS to the dashboard origin
 
 ---
 

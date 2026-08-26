@@ -32,14 +32,15 @@ vite.config.js
 package.json
 src/
   main.jsx              entry point
-  App.jsx               top-level state, poll loop, wiring
-  api.js                the only file that calls fetch
+  App.jsx               top-level state, auth gate, poll loop, wiring
+  api.js                the only file that calls fetch; holds the auth token
   constants.js          severity colours and ordering
   styles.css            all styling, palette defined as CSS variables
   components/
-    TopBar.jsx          branding, connection status, severity counts
+    Login.jsx           sign-in screen
+    TopBar.jsx          branding, connection status, severity counts, user
     Sidebar.jsx         filters and the policy button
-    AlertTable.jsx      sortable alert table
+    AlertTable.jsx      sortable alert table with acknowledge/assign
     ActorDrawer.jsx     actor timeline and risk composition
     PolicyEditor.jsx    JSON policy editor
 ```
@@ -73,9 +74,13 @@ deterministic, so rows update in place instead of rebuilding on each poll, and
 the alert table carries per-alert acknowledge and assign controls backed by
 `PATCH /alerts/{id}/state`. No known dashboard defects are open.
 
+Sign-in is required: the dashboard gates the console behind `Login.jsx`, keeps
+the bearer token in `localStorage`, and hides actions the signed-in role
+cannot perform. A 401 returns to the login screen.
+
 ## Not built yet
 
-- No authentication, matching the backend, both v0.3
+- No UI for managing users or API keys (created via the API by an admin)
 - No UI for ingesting events, though `api.ingestEvents` is already wired up
 - No automated tests
 - Electron wrapper is v1.0. This is a standard Vite app, so it amounts to

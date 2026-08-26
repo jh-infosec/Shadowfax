@@ -4,7 +4,8 @@ import Sidebar from "./components/Sidebar.jsx";
 import AlertTable from "./components/AlertTable.jsx";
 import ActorDrawer from "./components/ActorDrawer.jsx";
 import PolicyEditor from "./components/PolicyEditor.jsx";
-import { SEVERITIES, ACTOR_TYPES, CURRENT_USER } from "./constants.js";
+import Login from "./components/Login.jsx";
+import { SEVERITIES, ACTOR_TYPES } from "./constants.js";
 import * as api from "./api.js";
 
 // How often the dashboard polls the API for fresh alerts and stats.
@@ -16,6 +17,12 @@ const POLL_INTERVAL_MS = 5000;
 const SEARCH_DEBOUNCE_MS = 300;
 
 export default function App() {
+  // Auth: `user` is the signed-in {username, role}, or null when logged out.
+  // `authChecked` guards the first render until we know whether a stored token
+  // is still valid.
+  const [user, setUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const [stats, setStats] = useState(null);
   const [alerts, setAlerts] = useState([]);
   const [connected, setConnected] = useState(true);
@@ -45,6 +52,28 @@ export default function App() {
 
   const [policyOpen, setPolicyOpen] = useState(false);
   const [policy, setPolicy] = useState(null);
+
+  // Role helpers. admin > analyst > viewer.
+  const canAnalyst = user && (user.role === "analyst" || user.role === "admin");
+  const canAdmin = user && user.role === "admin";
+
+  // A 401 anywhere (an expired or revoked session) drops us back to login.
+  useEffect(() => {
+    api.setUnauthorizedHandler(() => setUser(null));
+  }, []);
+
+  // On load, if a token is stored, confirm it still identifies a user.
+  useEffect(() => {
+    if (!api.getToken()) {
+      setAuthChecked(true);
+      return;
+    }
+    api
+      .getMe()
+      .then(setUser)
+      .catch(() => setUser(null))
+      .finally(() => setAuthChecked(true));
+  }, []);
 
   const refresh = useCallback(async () => {
     // An empty severity or actor-type selection means nothing matches, so
@@ -80,12 +109,14 @@ export default function App() {
     return () => clearTimeout(id);
   }, [filters.search]);
 
-  // Poll on an interval, and immediately whenever filters change.
+  // Poll on an interval, and immediately whenever filters change. Only while
+  // signed in.
   useEffect(() => {
+    if (!user) return;
     refresh();
     const id = setInterval(refresh, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [refresh, user]);
 
   // Load the full timeline whenever an actor is selected from the table.
   useEffect(() => {
@@ -106,6 +137,11 @@ export default function App() {
       return merged.size === prev.length ? prev : [...merged].sort();
     });
   }, [alerts]);
+
+  const handleLogout = async () => {
+    await api.logout();
+    setUser(null);
+  };
 
   const handleReset = async () => {
     await api.resetData();
@@ -143,20 +179,41 @@ export default function App() {
     }
   }, [refresh, actorDetail]);
 
+  // acknowledged_by is set server-side from the session, so the client only
+  // needs the optimistic label; the server's value wins on the next refresh.
   const acknowledgeAlert = (alertId, acknowledged) =>
     handleSetAlertState(
       alertId,
       acknowledged
-        ? { acknowledged: true, acknowledged_by: CURRENT_USER }
+        ? { acknowledged: true, acknowledged_by: user?.username }
         : { acknowledged: false }
     );
 
   const assignAlertToMe = (alertId) =>
-    handleSetAlertState(alertId, { assigned_to: CURRENT_USER });
+    handleSetAlertState(alertId, { assigned_to: user?.username });
+
+  if (!authChecked) {
+    return (
+      <div className="app">
+        <div className="empty-state">Connecting…</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login onAuthenticated={setUser} />;
+  }
 
   return (
     <div className="app">
-      <TopBar stats={stats} connected={connected} onReset={handleReset} />
+      <TopBar
+        stats={stats}
+        connected={connected}
+        onReset={handleReset}
+        canReset={canAdmin}
+        user={user}
+        onLogout={handleLogout}
+      />
       {error && <div className="error-banner">{error}</div>}
 
       <div className="body">
@@ -165,6 +222,7 @@ export default function App() {
           onFiltersChange={setFilters}
           categories={knownCategories}
           onOpenPolicy={handleOpenPolicy}
+          canEditPolicy={canAnalyst}
         />
         <div className="main">
           <div className="table-wrap">
@@ -173,6 +231,7 @@ export default function App() {
               onSelectActor={setSelectedActorId}
               onAcknowledge={acknowledgeAlert}
               onAssign={assignAlertToMe}
+              canAct={canAnalyst}
             />
           </div>
         </div>

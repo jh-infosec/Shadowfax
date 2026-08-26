@@ -121,6 +121,18 @@ delay is invisible to an analyst reading a screen.
 WebSocket or SSE push is a v0.3 item, worth doing when event volume or
 alert-to-response time demands it and not before.
 
+### Every endpoint is authenticated, and identity is server-side
+
+No route is anonymous. A caller is either a signed-in user (a bearer token from
+`POST /auth/login`) or a service holding an API key (`X-API-Key`, ingest only).
+Access is role-ranked -- `admin` > `analyst` > `viewer` -- and checked by a
+FastAPI dependency on every route, so authorisation lives next to the endpoint
+rather than in the client. Anything that records who acted, such as an alert's
+`acknowledged_by`, is taken from the authenticated session and never from the
+request body: the client cannot claim to be someone else. Passwords are hashed
+(PBKDF2 + per-user salt) and only credential fingerprints are stored, so the
+database never holds a usable secret.
+
 ## Components
 
 ### Backend
@@ -128,17 +140,27 @@ alert-to-response time demands it and not before.
 #### app.py
 
 The REST API. Ingests events, retrieves alerts, manages policy, records
-per-alert analyst state (`PATCH /alerts/{id}/state`) and exposes statistics.
+per-alert analyst state (`PATCH /alerts/{id}/state`), handles authentication
+and exposes statistics. Every endpoint carries an authentication dependency
+(`require_role`, `allow_ingest`); see Authentication below.
 
 Also owns orchestration: `_rescan_actor` loads an actor's history, runs the
 detection engine and writes the resulting alerts back. `_rescan_all` does the
 same for every known actor.
 
+#### auth.py
+
+Pure, dependency-free authentication primitives: PBKDF2 password hashing and
+verification, opaque session-token and API-key generation, credential
+fingerprinting, and role comparison (`role_at_least`). No database access and
+no FastAPI here, so the crypto is unit-reachable on its own. The storage lives
+in `db.py` and the request wiring in `app.py`.
+
 #### db.py
 
 All SQLite interaction. No other module imports `sqlite3`.
 
-Four tables:
+Tables:
 
 - `events`, raw ingested activity, one row per event
 - `alerts`, detector output, one row per fired alert, referencing an event.
@@ -148,10 +170,15 @@ Four tables:
   keyed on the alert id. Deliberately not foreign-keyed to `alerts`, so it
   survives the delete-and-reinsert of a rescan.
 - `policy`, a single-row table holding the current policy as JSON
+- `users`, accounts with a role and a PBKDF2 password hash + salt
+- `sessions`, live bearer tokens (stored as a SHA-256 fingerprint) with an
+  expiry, referencing a user
+- `api_keys`, ingest keys (also stored as a fingerprint) with a display prefix
 
 Also provides alert querying (left-joining `alert_state`), severity counts and
 actor risk scoring. Risk score is a weighted sum of an actor's alerts: critical
-10, high 5, medium 2, low 1.
+10, high 5, medium 2, low 1. `wipe_all` (used by reset) clears activity data
+only, never users, sessions or keys.
 
 On startup, if events exist but the alerts table is empty -- after a restart or
 the pre-v0.3 schema migration -- every actor is rescanned to rebuild alerts,
@@ -265,6 +292,16 @@ longer fire under the new policy disappear.
    touched by a rescan, the state stays attached across future ingestions for
    that actor
 
+### On sign-in
+
+1. `POST /auth/login` verifies the password against the stored PBKDF2 hash
+2. A random bearer token is issued; only its SHA-256 fingerprint is stored,
+   with a 12-hour expiry
+3. The dashboard keeps the token in `localStorage` and sends it as
+   `Authorization: Bearer <token>` on every request
+4. Each protected route resolves the token to a user and checks the role; an
+   expired or revoked token yields 401, which returns the dashboard to login
+
 ### On dashboard refresh
 
 1. Timer fires, or filter state changes
@@ -285,11 +322,14 @@ Each rescan replays an actor's complete event history. This is acceptable at
 development scale but is linear in history length, and a policy change is
 linear in total events across all actors.
 
-### No authentication anywhere
+### Local-development security posture
 
-Every endpoint is unauthenticated and CORS is open to all origins. The
-dashboard has no login. Both are v0.3 items, and the API is intended for
-local development only until then.
+Authentication, roles, API keys and CORS restriction now exist (see the
+Authentication principle above), so the endpoints are no longer open. What
+keeps Shadowfax a local-development tool is narrower: passwords use stdlib
+PBKDF2 rather than bcrypt/argon2, there is no rate limiting or account
+lockout, tokens are bearer tokens without rotation, and the store is
+single-writer SQLite. Harden these before running it anywhere shared.
 
 ### Single-writer database
 
@@ -307,9 +347,10 @@ The following files are part of the project structure and must be preserved:
 
 ```
 app.py                  db.py                   detectors.py
-seed_data.py            test_api.py             requirements.txt
-architecture.md         README.md               CHANGELOG.md
-ROADMAP.md              findings-envelope.md    .gitignore
+auth.py                 seed_data.py            test_api.py
+requirements.txt        architecture.md         README.md
+CHANGELOG.md            ROADMAP.md              findings-envelope.md
+.gitignore
 
 frontend/index.html                 frontend/package.json
 frontend/vite.config.js             frontend/README.md
@@ -321,4 +362,5 @@ frontend/src/components/Sidebar.jsx
 frontend/src/components/AlertTable.jsx
 frontend/src/components/ActorDrawer.jsx
 frontend/src/components/PolicyEditor.jsx
+frontend/src/components/Login.jsx
 ```

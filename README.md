@@ -44,6 +44,8 @@ investigation and explainability.
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
 - Acknowledge and assign alerts, with analyst state that persists across rescans
+- Authentication with user accounts, roles (admin / analyst / viewer) and API keys
+- Dashboard sign-in, with the UI adapting to the signed-in user's role
 - React dashboard with a live alert table
 - Actor timelines, showing alerts attached to the events that produced them
 - Filtering by severity, actor type, category and free-text search
@@ -169,11 +171,14 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`.
+Open `http://localhost:5173` and sign in. On a fresh database the default
+login is `admin` / `admin` (see Security); create further accounts from the
+API as an admin.
 
 The dashboard reads `VITE_API_BASE` for the backend URL, defaulting to
 `http://127.0.0.1:8000`. Set it in `frontend/.env` if the backend runs
-elsewhere.
+elsewhere. If you serve the dashboard from another origin, add it to
+`SHADOWFAX_CORS_ORIGINS` on the backend.
 
 ---
 
@@ -191,10 +196,19 @@ The dashboard has no automated tests yet.
 
 ## Security
 
-Neither the API nor the dashboard has authentication yet, and CORS is open to
-all origins. Because there is no sign-in, an acknowledgement or assignment
-records a placeholder analyst rather than a real user. Shadowfax is intended
-for local development only until authentication lands, the next v0.3 item.
+Every endpoint requires authentication. Analysts sign in for a bearer token
+(12-hour sessions); agents and harnesses ingest events with an API key. Access
+is role-based: `viewer` reads, `analyst` acknowledges, assigns and edits
+policy, `admin` manages users, keys and resets. Passwords are hashed with
+PBKDF2 and a per-user salt, and only credential fingerprints are stored, never
+the secrets. CORS is restricted to the dashboard origin.
+
+On a fresh database the first admin comes from `SHADOWFAX_ADMIN_USERNAME` and
+`SHADOWFAX_ADMIN_PASSWORD`. If those are unset, a default `admin` / `admin` is
+created and a warning is printed — fine for local development, but set real
+credentials and change the password before exposing the API. Hashing is
+stdlib PBKDF2 rather than bcrypt/argon2; that, and the still-single-writer
+SQLite backend, are the reasons Shadowfax remains a local-development tool.
 
 ---
 

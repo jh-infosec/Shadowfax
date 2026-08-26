@@ -2,8 +2,36 @@
 
 ## Version 0.3.0
 
-Stable alert identity, and the analyst state it unblocks. First backend change
-since v0.1.
+Stable alert identity and the analyst state it unblocks, plus authentication,
+roles and API keys. First backend change since v0.1.
+
+### Authentication & access control
+
+- **Sign-in with user accounts.** `POST /auth/login` issues an opaque bearer
+  token; `POST /auth/logout` revokes it; `GET /auth/me` returns the current
+  user. Sessions expire after 12 hours. Passwords are hashed with PBKDF2 and a
+  per-user salt; only token and API-key fingerprints are stored, never the
+  secrets themselves. Stdlib only -- no new dependencies.
+- **Roles.** `admin` > `analyst` > `viewer`. Reads need `viewer`; acknowledge,
+  assign and policy edits need `analyst`; reset, user management and API-key
+  management need `admin`. Every previously open endpoint is now protected.
+- **API keys for ingest.** Agents and harnesses push events with an
+  `X-API-Key` header. `POST /api-keys` (admin) returns the key once; it is
+  ingest-only and cannot read alerts.
+- **`acknowledged_by` is server-set** from the session, so an acknowledgement
+  always records who really made it -- the request body can no longer spoof it.
+- **First admin** is created on a fresh database from
+  `SHADOWFAX_ADMIN_USERNAME` / `SHADOWFAX_ADMIN_PASSWORD`; with none set, a
+  default `admin`/`admin` is created and a loud console warning is printed.
+- **CORS is locked down** to the dashboard origin (default
+  `http://localhost:5173`, override with `SHADOWFAX_CORS_ORIGINS`) instead of
+  being open to all origins.
+- **Dashboard login.** A sign-in screen gates the console; the token is kept in
+  `localStorage` so a reload stays signed in, and a 401 drops back to login.
+  The top bar shows the current user and role with a sign-out button, and the
+  UI hides actions a role cannot perform (a viewer sees state read-only).
+
+### Added
 
 ### Added
 

@@ -1,6 +1,6 @@
 import React from "react";
 
-export default function TopBar({ stats, connected, onReset }) {
+export default function TopBar({ stats, connected, onReset, canReset, user, onLogout }) {
   return (
     <div className="topbar">
       <div className="brand">
@@ -20,9 +20,11 @@ export default function TopBar({ stats, connected, onReset }) {
         {connected ? "connected to API" : "API unreachable"}
       </div>
 
-      <button className="btn" onClick={onReset}>
-        Reset to sample data
-      </button>
+      {canReset && (
+        <button className="btn" onClick={onReset}>
+          Reset to sample data
+        </button>
+      )}
 
       <div className="stats">
         <div className="stat crit">CRIT <b>{stats?.alert_counts?.critical ?? 0}</b></div>
@@ -30,6 +32,16 @@ export default function TopBar({ stats, connected, onReset }) {
         <div className="stat med">MED <b>{stats?.alert_counts?.medium ?? 0}</b></div>
         <div className="stat low">LOW <b>{stats?.alert_counts?.low ?? 0}</b></div>
       </div>
+
+      {user && (
+        <div className="user-box">
+          <div className="user-id">
+            {user.username}
+            <span className="user-role">{user.role}</span>
+          </div>
+          <button className="btn" onClick={onLogout}>Sign out</button>
+        </div>
+      )}
     </div>
   );
 }

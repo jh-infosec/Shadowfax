@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from app import app
 
 client = TestClient(app)
-client.__enter__()  # trigger startup lifespan event so seed data loads
+client.__enter__()  # trigger startup lifespan event so seed data + admin load
 
 
 def check(label, condition):
@@ -28,7 +28,28 @@ def check(label, condition):
         sys.exit(1)
 
 
-print("== startup / seed data ==")
+def as_user(username, password):
+    """A TestClient authenticated as the given user."""
+    tok = client.post("/auth/login", json={"username": username, "password": password}).json()["token"]
+    c = TestClient(app)
+    c.headers.update({"Authorization": f"Bearer {tok}"})
+    return c
+
+
+print("== authentication ==")
+# Endpoints are protected now: an unauthenticated read is rejected.
+anon = TestClient(app)
+check("unauthenticated GET /alerts is 401", anon.get("/alerts").status_code == 401)
+# The bootstrap created a default admin (admin/admin) because no env vars are set.
+r = client.post("/auth/login", json={"username": "admin", "password": "admin"})
+check("admin login returns 200", r.status_code == 200)
+check("bad password is rejected", client.post("/auth/login", json={"username": "admin", "password": "nope"}).status_code == 401)
+admin_token = r.json()["token"]
+# From here the main client acts as admin for every subsequent call.
+client.headers.update({"Authorization": f"Bearer {admin_token}"})
+check("/auth/me reports the admin role", client.get("/auth/me").json()["role"] == "admin")
+
+print("\n== startup / seed data ==")
 r = client.get("/stats")
 check("GET /stats returns 200", r.status_code == 200)
 stats = r.json()
@@ -111,11 +132,14 @@ expected_id = detectors.alert_identity(
 check("alert id matches the deterministic derivation (message excluded)", alert_id == expected_id)
 check("alerts carry analyst state, unacknowledged by default", target_alert["acknowledged"] is False)
 
-# Acknowledge and assign it.
+# Acknowledge and assign it. acknowledged_by is set from the session (admin
+# here), not from the request body, even though the body tries to spoof it.
 r = client.patch(f"/alerts/{alert_id}/state",
-                 json={"acknowledged": True, "acknowledged_by": "analyst-1", "assigned_to": "analyst-2"})
+                 json={"acknowledged": True, "acknowledged_by": "spoofed", "assigned_to": "analyst-2"})
 check("PATCH /alerts/{id}/state returns 200", r.status_code == 200)
 check("state reports acknowledged", r.json()["acknowledged"] is True)
+check("acknowledged_by is the session user, not the client-supplied value",
+      r.json()["acknowledged_by"] == "admin")
 
 # Patching a bogus id is a 404, not a silent create.
 r = client.patch("/alerts/deadbeefdeadbeef/state", json={"acknowledged": True})
@@ -135,8 +159,48 @@ after_rescan = {a["id"]: a for a in r.json()}
 check("acknowledged alert still exists with the same id after rescan", alert_id in after_rescan)
 survivor = after_rescan.get(alert_id, {})
 check("acknowledgement survived the rescan", survivor.get("acknowledged") is True)
-check("acknowledged_by survived the rescan", survivor.get("acknowledged_by") == "analyst-1")
+check("acknowledged_by survived the rescan", survivor.get("acknowledged_by") == "admin")
 check("assignment survived the rescan", survivor.get("assigned_to") == "analyst-2")
+
+print("\n== roles and access control ==")
+client.post("/users", json={"username": "analyst1", "password": "pw", "role": "analyst"})
+client.post("/users", json={"username": "viewer1", "password": "pw", "role": "viewer"})
+analyst = as_user("analyst1", "pw")
+viewer = as_user("viewer1", "pw")
+
+check("duplicate username is rejected (409)",
+      client.post("/users", json={"username": "analyst1", "password": "x", "role": "analyst"}).status_code == 409)
+check("invalid role is rejected (400)",
+      client.post("/users", json={"username": "bad", "password": "x", "role": "superuser"}).status_code == 400)
+
+check("viewer can read alerts", viewer.get("/alerts").status_code == 200)
+some_alert = client.get("/alerts").json()[0]["id"]
+check("viewer cannot acknowledge (403)",
+      viewer.patch(f"/alerts/{some_alert}/state", json={"acknowledged": True}).status_code == 403)
+check("analyst can acknowledge (200)",
+      analyst.patch(f"/alerts/{some_alert}/state", json={"acknowledged": True}).status_code == 200)
+acked = next(a for a in client.get("/alerts").json() if a["id"] == some_alert)
+check("acknowledged_by recorded as the acting analyst", acked["acknowledged_by"] == "analyst1")
+check("analyst cannot reset (403)", analyst.post("/reset").status_code == 403)
+check("analyst cannot create users (403)",
+      analyst.post("/users", json={"username": "z", "password": "z", "role": "viewer"}).status_code == 403)
+check("viewer cannot create API keys (403)", viewer.post("/api-keys", json={}).status_code == 403)
+
+print("\n== api keys ==")
+r = client.post("/api-keys", json={"label": "agent-harness"})
+check("admin creates an API key", r.status_code == 200)
+key = r.json()["api_key"]
+check("API key is returned once, in the sk_shadowfax_ form", key.startswith("sk_shadowfax_"))
+check("listing API keys never exposes the secret",
+      all("api_key" not in k for k in client.get("/api-keys").json()))
+svc_event = [{"timestamp": "2026-09-01T10:00:00", "actor_id": "svc-harness", "actor_type": "service_account",
+              "event_type": "auth_failure", "target": "vpn_gateway", "metadata": {}}]
+check("ingest with a valid API key works (200)",
+      TestClient(app).post("/events", headers={"X-API-Key": key}, json=svc_event).status_code == 200)
+check("ingest with a bad API key is 401",
+      TestClient(app).post("/events", headers={"X-API-Key": "sk_shadowfax_nope"}, json=svc_event).status_code == 401)
+check("an API key cannot read alerts (403)",
+      TestClient(app).get("/alerts", headers={"X-API-Key": key}).status_code == 403)
 
 print("\n== reset ==")
 r = client.post("/reset")
