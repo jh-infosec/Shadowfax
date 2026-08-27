@@ -55,7 +55,7 @@ new work.
 - [x] User accounts (admin-managed, created via `POST /users`)
 - [x] API keys (ingest-only, for agents and harnesses)
 - [x] Role-based access control (admin > analyst > viewer)
-- [ ] WebSocket or SSE push, replacing the poll loop
+- [x] WebSocket or SSE push, replacing the poll loop (SSE: `GET /stream`)
 - [x] Restrict CORS to the dashboard origin
 
 ---

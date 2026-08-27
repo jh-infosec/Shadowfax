@@ -19,6 +19,8 @@ alerts, but never blocks or modifies events.
 """
 
 from __future__ import annotations
+import asyncio
+import json
 import os
 import sqlite3
 from contextlib import asynccontextmanager
@@ -27,9 +29,11 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import auth
+import bus
 import db
 import detectors
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
@@ -42,6 +46,9 @@ SESSION_TTL_HOURS = 12
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Capture the running loop so bus.publish() can signal it from the sync
+    # threadpool where the mutating endpoints run.
+    bus.set_loop(asyncio.get_running_loop())
     db.init_db()
     with db.get_conn() as conn:
         _bootstrap_admin(conn)
@@ -202,6 +209,18 @@ def allow_ingest(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any
     raise HTTPException(403, "ingest requires a service API key or an analyst (or higher) user")
 
 
+def _user_from_token(token: str | None) -> dict[str, Any] | None:
+    """Resolve a session token to a user, for the SSE stream where the browser
+    EventSource cannot send an Authorization header."""
+    if not token:
+        return None
+    with db.get_conn() as conn:
+        user = db.get_session_user(conn, auth.token_fingerprint(token))
+    if user is None:
+        return None
+    return {"kind": "user", "id": user["id"], "username": user["username"], "role": user["role"]}
+
+
 # Internal helpers
 
 def _rescan_actor(conn: sqlite3.Connection, actor_id: str) -> list[dict[str, Any]]:
@@ -239,6 +258,7 @@ def ingest_events(events: list[EventRequest], identity: dict = Depends(allow_ing
         for actor_id in affected_actors:
             new_alerts.extend(_rescan_actor(conn, actor_id))
         conn.commit()
+    bus.publish({"type": "change", "reason": "ingest", "actors": list(affected_actors)})
     return {"ingested": len(events), "affected_actors": list(affected_actors), "alerts": new_alerts}
 
 
@@ -288,6 +308,7 @@ def update_alert_state(alert_id: str, update: AlertStateUpdate,
             note=update.note,
         )
         conn.commit()
+    bus.publish({"type": "change", "reason": "alert_state", "alert_id": alert_id})
     return state
 
 
@@ -299,6 +320,43 @@ def stats(identity: dict = Depends(require_role("viewer"))):
             "actor_count": len(db.distinct_actors(conn)),
             "event_count": len(db.get_all_events(conn)),
         }
+
+
+# Live stream
+
+@app.get("/stream")
+async def stream(token: str | None = None, authorization: str | None = Header(None)):
+    """Server-Sent Events: a `change` event is pushed whenever alerts change,
+    replacing the dashboard's poll loop.
+
+    Auth is by `?token=<bearer>` because the browser EventSource API cannot set
+    an Authorization header; a Bearer header is accepted too, for non-browser
+    clients. Any signed-in user may stream; service API keys may not.
+    """
+    tok = token
+    if not tok and authorization and authorization.lower().startswith("bearer "):
+        tok = authorization[7:].strip()
+    if _user_from_token(tok) is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+
+    queue = bus.subscribe()
+
+    async def gen():
+        try:
+            # An immediate hello confirms the connection is open.
+            yield "event: hello\ndata: {}\n\n"
+            while True:
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield f"event: change\ndata: {json.dumps(message)}\n\n"
+                except asyncio.TimeoutError:
+                    # A comment line keeps proxies and the browser from timing
+                    # the idle connection out.
+                    yield ": keepalive\n\n"
+        finally:
+            bus.unsubscribe(queue)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 # Actor endpoints
@@ -348,6 +406,7 @@ def update_policy(policy: dict[str, Any], identity: dict = Depends(require_role(
         db.set_policy(conn, policy)
         _rescan_all(conn)
         conn.commit()
+    bus.publish({"type": "change", "reason": "policy"})
     return {"status": "policy updated, all actors rescanned"}
 
 
@@ -360,6 +419,7 @@ def reset(identity: dict = Depends(require_role("admin"))):
         db.set_policy(conn, DEFAULT_POLICY)
         _load_events(conn, SAMPLE_EVENTS)
         conn.commit()
+    bus.publish({"type": "change", "reason": "reset"})
     return {"status": "reset to bundled sample data"}
 
 

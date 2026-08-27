@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import TopBar from "./components/TopBar.jsx";
 import Sidebar from "./components/Sidebar.jsx";
 import AlertTable from "./components/AlertTable.jsx";
@@ -8,13 +8,12 @@ import Login from "./components/Login.jsx";
 import { SEVERITIES, ACTOR_TYPES } from "./constants.js";
 import * as api from "./api.js";
 
-// How often the dashboard polls the API for fresh alerts and stats.
-// A real "live" feel without needing a websocket for v0.2.
-const POLL_INTERVAL_MS = 5000;
-
 // How long to wait after the last keystroke before searching, so typing
 // fires a single request instead of one per character.
 const SEARCH_DEBOUNCE_MS = 300;
+
+// Coalesce a burst of stream events (e.g. a batch ingest) into one refetch.
+const STREAM_REFRESH_DEBOUNCE_MS = 200;
 
 export default function App() {
   // Auth: `user` is the signed-in {username, role}, or null when logged out.
@@ -103,20 +102,44 @@ export default function App() {
     }
   }, [filters.severity, filters.actorType, filters.category, debouncedSearch]);
 
+  // Keep a live handle to the latest refresh so the stream can call it without
+  // re-subscribing every time the filters (and thus refresh) change.
+  const refreshRef = useRef(refresh);
+  useEffect(() => {
+    refreshRef.current = refresh;
+  }, [refresh]);
+
   // Debounce the search text: only the settled value drives a fetch.
   useEffect(() => {
     const id = setTimeout(() => setDebouncedSearch(filters.search), SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(id);
   }, [filters.search]);
 
-  // Poll on an interval, and immediately whenever filters change. Only while
-  // signed in.
+  // Fetch on sign-in and whenever the filters change.
   useEffect(() => {
     if (!user) return;
     refresh();
-    const id = setInterval(refresh, POLL_INTERVAL_MS);
-    return () => clearInterval(id);
   }, [refresh, user]);
+
+  // Live updates over Server-Sent Events, replacing the old poll loop. The
+  // stream carries a lightweight "change" signal; the dashboard re-queries with
+  // its own filters, so per-client filtering stays server-side.
+  useEffect(() => {
+    if (!user) return;
+    let debounce;
+    const onChange = () => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => refreshRef.current(), STREAM_REFRESH_DEBOUNCE_MS);
+    };
+    const es = new EventSource(api.streamUrl());
+    es.onopen = () => setConnected(true);
+    es.addEventListener("change", onChange);
+    es.onerror = () => setConnected(false); // EventSource auto-reconnects
+    return () => {
+      clearTimeout(debounce);
+      es.close();
+    };
+  }, [user]);
 
   // Load the full timeline whenever an actor is selected from the table.
   useEffect(() => {

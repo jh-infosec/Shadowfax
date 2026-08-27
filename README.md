@@ -46,6 +46,7 @@ investigation and explainability.
 - Acknowledge and assign alerts, with analyst state that persists across rescans
 - Authentication with user accounts, roles (admin / analyst / viewer) and API keys
 - Dashboard sign-in, with the UI adapting to the signed-in user's role
+- Live push over Server-Sent Events — the dashboard updates the instant data changes
 - React dashboard with a live alert table
 - Actor timelines, showing alerts attached to the events that produced them
 - Filtering by severity, actor type, category and free-text search
@@ -94,7 +95,6 @@ Current stack
 
 Planned
 
-- WebSockets
 - PostgreSQL
 - MITRE ATT&CK mapping
 - Electron desktop client
@@ -118,12 +118,12 @@ Planned
 - Alert Filtering
 - Policy Editor
 
-### v0.3
+### v0.3 — shipped
 
-- Stable Alert Identity — shipped
-- Acknowledge & Assign — shipped
-- Authentication
-- WebSocket Push
+- Stable Alert Identity
+- Acknowledge & Assign
+- Authentication, roles and API keys
+- Live push (Server-Sent Events), replacing the poll loop
 
 ### v0.4
 

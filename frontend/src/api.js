@@ -79,6 +79,13 @@ export function getMe() {
   return request("/auth/me");
 }
 
+// URL for the Server-Sent Events stream. The browser EventSource can't set
+// headers, so the token rides as a query parameter.
+export function streamUrl() {
+  const qs = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+  return `${API_BASE}/stream${qs}`;
+}
+
 export function getStats() {
   return request("/stats");
 }

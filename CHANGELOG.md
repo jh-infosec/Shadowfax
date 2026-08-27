@@ -2,8 +2,23 @@
 
 ## Version 0.3.0
 
-Stable alert identity and the analyst state it unblocks, plus authentication,
-roles and API keys. First backend change since v0.1.
+Stable alert identity and the analyst state it unblocks, authentication, roles
+and API keys, and live push. First backend change since v0.1.
+
+### Live updates (Server-Sent Events)
+
+- **The poll loop is gone.** The dashboard opens one `EventSource` to
+  `GET /stream` and refreshes on demand instead of fetching every five seconds.
+  Ingesting an event, editing policy, resetting, or acknowledging an alert now
+  reaches every open dashboard in well under a second (measured ~0.3s), and the
+  browser holds one long-lived connection rather than a request every 5s.
+- A small in-process bus (`bus.py`) fans a `change` signal to each subscriber;
+  the stream carries only the signal, so each client re-queries with its own
+  server-side filters. `publish()` is safe to call from the sync endpoints.
+- The stream authenticates by `?token=` (the browser `EventSource` cannot set
+  an `Authorization` header) or a Bearer header for non-browser clients; a
+  15-second keepalive comment holds the connection open. Service API keys
+  cannot stream. The connection indicator now reflects the live stream.
 
 ### Authentication & access control
 

@@ -111,15 +111,19 @@ The dashboard sends filter state to `/alerts` as query parameters rather than
 fetching everything and filtering in the browser. The API already supports
 this, and it keeps the client honest about where the data lives.
 
-### Polling, not push
+### Push, not polling
 
-The dashboard refreshes on a fixed interval rather than holding a socket
-open. This is a deliberate v0.2 choice: it needs no backend changes, no
-connection lifecycle handling, and no reconnect logic, and a five second
-delay is invisible to an analyst reading a screen.
+The dashboard holds one Server-Sent Events connection to `GET /stream` and
+refreshes when the server says something changed, rather than fetching on a
+timer. A mutating endpoint calls `bus.publish(...)`, which fans a lightweight
+`change` signal to every open stream; each dashboard then re-queries `/alerts`
+and `/stats` with its own filters. The stream carries only the signal, never
+alert payloads, so per-client filtering stays server-side and one broadcast
+serves every viewer.
 
-WebSocket or SSE push is a v0.3 item, worth doing when event volume or
-alert-to-response time demands it and not before.
+This replaced the v0.2 five-second poll. It was a deliberate sequence: polling
+first (no backend, no connection lifecycle) until per-alert state and multiple
+analysts made sub-second, shared updates worth the stream.
 
 ### Every endpoint is authenticated, and identity is server-side
 
@@ -155,6 +159,16 @@ verification, opaque session-token and API-key generation, credential
 fingerprinting, and role comparison (`role_at_least`). No database access and
 no FastAPI here, so the crypto is unit-reachable on its own. The storage lives
 in `db.py` and the request wiring in `app.py`.
+
+#### bus.py
+
+An in-process publish/subscribe bus for change notifications. Each open
+`GET /stream` connection holds a subscriber queue; mutating endpoints call
+`bus.publish(...)`, which hops onto the event loop captured at startup (so it
+is safe to call from the sync threadpool) and fans the message to every queue.
+Not durable and single-process by design -- the smallest thing that turns the
+poll into a push, replaced by a real broker if Shadowfax ever runs as more
+than one process.
 
 #### db.py
 
@@ -302,9 +316,17 @@ longer fire under the new policy disappear.
 4. Each protected route resolves the token to a user and checks the role; an
    expired or revoked token yields 401, which returns the dashboard to login
 
+### On a change (push)
+
+1. A mutating endpoint (ingest, policy, reset, alert state) commits, then calls
+   `bus.publish({"type": "change", ...})`
+2. The bus fans the message to every open `/stream` subscriber queue
+3. Each dashboard's `EventSource` receives a `change` event and triggers a
+   refresh (debounced, so a batch collapses into one)
+
 ### On dashboard refresh
 
-1. Timer fires, or filter state changes
+1. The stream signals a change, or filter state changes
 2. `/stats` and `/alerts` requested in parallel, with current filters as
    query parameters
 3. Success updates the table and marks the connection live
@@ -336,10 +358,11 @@ single-writer SQLite. Harden these before running it anywhere shared.
 SQLite with the default configuration. Concurrent writers are not supported.
 PostgreSQL is planned for v1.0.
 
-### Up to five seconds of alert latency
+### Sub-second alert latency
 
-The consequence of polling. A new alert appears on the next refresh, not
-immediately.
+With SSE push a new alert reaches open dashboards in well under a second. The
+remaining latency is the change signal plus the follow-up `/alerts` fetch, not
+a fixed polling interval.
 
 ## Required Files
 
@@ -347,10 +370,10 @@ The following files are part of the project structure and must be preserved:
 
 ```
 app.py                  db.py                   detectors.py
-auth.py                 seed_data.py            test_api.py
-requirements.txt        architecture.md         README.md
-CHANGELOG.md            ROADMAP.md              findings-envelope.md
-.gitignore
+auth.py                 bus.py                  seed_data.py
+test_api.py             requirements.txt        architecture.md
+README.md               CHANGELOG.md            ROADMAP.md
+findings-envelope.md    .gitignore
 
 frontend/index.html                 frontend/package.json
 frontend/vite.config.js             frontend/README.md

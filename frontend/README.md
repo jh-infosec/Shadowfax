@@ -56,15 +56,17 @@ never whether it exists. Severity colours and sort order in `constants.js`
 are presentation. Anything that decides whether something is worth alerting
 on belongs in `detectors.py`, where the policy governs it and tests reach it.
 
-## Why polling
+## Live updates
 
-`POLL_INTERVAL_MS` in `App.jsx` refreshes `/stats` and `/alerts` every five
-seconds. That is a deliberate v0.2 choice: no backend changes, no connection
-lifecycle, no reconnect logic, and five seconds is invisible to someone
-reading a screen.
+`App.jsx` opens one `EventSource` to `GET /stream` (via `api.streamUrl()`) and
+refreshes `/stats` and `/alerts` whenever the server pushes a `change` event,
+rather than polling. The refetch is debounced so a burst of changes collapses
+into one, and `EventSource` reconnects on its own if the stream drops. The
+connection indicator reflects the stream's open/error state.
 
-WebSocket or SSE push is on the roadmap for v0.3, worth doing when event
-volume or alert-to-response time demands it and not before.
+The v0.2 five-second poll this replaced was a deliberate first step; push
+arrived in v0.3 once per-alert state and multiple analysts made sub-second,
+shared updates worth a live connection.
 
 ## Known issues
 

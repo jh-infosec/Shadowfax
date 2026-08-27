@@ -202,6 +202,21 @@ check("ingest with a bad API key is 401",
 check("an API key cannot read alerts (403)",
       TestClient(app).get("/alerts", headers={"X-API-Key": key}).status_code == 403)
 
+print("\n== server-sent events ==")
+import bus
+
+# The auth gate returns before any streaming, so these don't open a stream.
+# (The live hello/push path is exercised end-to-end in the browser, since the
+# sync TestClient cannot cleanly consume an open-ended SSE stream.)
+check("unauthenticated /stream is 401", anon.get("/stream").status_code == 401)
+check("/stream with a bad token is 401", TestClient(app).get("/stream?token=nope").status_code == 401)
+
+# The bus fans a published change out to every subscriber.
+q = bus.subscribe()
+bus._deliver({"type": "change", "reason": "unit-test"})
+check("bus delivers a published change to subscribers", q.get_nowait().get("reason") == "unit-test")
+bus.unsubscribe(q)
+
 print("\n== reset ==")
 r = client.post("/reset")
 check("POST /reset returns 200", r.status_code == 200)
