@@ -1,11 +1,8 @@
 # Changelog
 
-## Version 0.3.0
+## Version 0.3.2
 
-Stable alert identity and the analyst state it unblocks, authentication, roles
-and API keys, and live push. First backend change since v0.1.
-
-### Live updates (Server-Sent Events)
+Live updates over Server-Sent Events, replacing the poll loop.
 
 - **The poll loop is gone.** The dashboard opens one `EventSource` to
   `GET /stream` and refreshes on demand instead of fetching every five seconds.
@@ -19,8 +16,11 @@ and API keys, and live push. First backend change since v0.1.
   an `Authorization` header) or a Bearer header for non-browser clients; a
   15-second keepalive comment holds the connection open. Service API keys
   cannot stream. The connection indicator now reflects the live stream.
+- Backend version is now `0.3.2`.
 
-### Authentication & access control
+## Version 0.3.1
+
+Authentication, roles and API keys.
 
 - **Sign-in with user accounts.** `POST /auth/login` issues an opaque bearer
   token; `POST /auth/logout` revokes it; `GET /auth/me` returns the current
@@ -45,8 +45,12 @@ and API keys, and live push. First backend change since v0.1.
   `localStorage` so a reload stays signed in, and a 401 drops back to login.
   The top bar shows the current user and role with a sign-out button, and the
   UI hides actions a role cannot perform (a viewer sees state read-only).
+- Backend version is now `0.3.1`.
 
-### Added
+## Version 0.3.0
+
+Stable alert identity and the analyst state it unblocks. First backend change
+since v0.1.
 
 ### Added
 
