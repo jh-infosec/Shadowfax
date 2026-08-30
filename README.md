@@ -39,7 +39,7 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across twelve alert categories
+- Rule-based detection engine across fourteen alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
@@ -47,6 +47,7 @@ investigation and explainability.
 - Authentication with user accounts, roles (admin / analyst / viewer) and API keys
 - Dashboard sign-in, with the UI adapting to the signed-in user's role
 - Live push over Server-Sent Events — the dashboard updates the instant data changes
+- Agent-trace ingest — flags destructive tool calls and out-of-scope actions by AI agents
 - React dashboard with a live alert table
 - Actor timelines, showing alerts attached to the events that produced them
 - Filtering by severity, actor type, category and free-text search
@@ -130,6 +131,12 @@ Planned
 - MITRE ATT&CK Mapping
 - Correlation Engine
 - Incident Reports
+
+### v0.4.5 — shipped
+
+- Agent-trace ingest (`tool_call` events)
+- Destructive-action detectors
+- Engagement scope in policy (`out_of_scope_action`)
 
 ### v0.5
 

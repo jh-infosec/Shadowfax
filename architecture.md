@@ -207,7 +207,16 @@ Current categories: `allowlist_violation`, `canary_triggered`,
 `blocked_target_access`, `dormant_reappearance`, `capability_resurrection`,
 `brute_force_auth`, `impossible_travel`, `privilege_escalation`,
 `lateral_movement`, `off_hours_access`, `exfiltration_volume`,
-`rate_anomaly`.
+`rate_anomaly`, and -- for AI-agent tool calls (`event_type: "tool_call"`) --
+`destructive_action` and `out_of_scope_action`.
+
+The two tool-call detectors are policy-driven like the rest:
+`destructive_action` matches `policy.destructive_action_rules` (label,
+severity, substring patterns) against the tool, its arguments and target;
+`out_of_scope_action` checks a call's network destination against
+`policy.engagement_scope` (allowed domains, IP ranges, ports), using the stdlib
+`ipaddress` module. Only calls with a real network destination are
+scope-checked, so filesystem and symbolic targets are left alone.
 
 Severity levels are `critical`, `high`, `medium` and `low`.
 
@@ -340,9 +349,18 @@ not rediscovered as bugs.
 
 ### Rescan cost grows with actor history
 
-Each rescan replays an actor's complete event history. This is acceptable at
-development scale but is linear in history length, and a policy change is
-linear in total events across all actors.
+Each rescan replays an actor's complete event history. This is linear in
+history length, and a policy change is linear in total events across all
+actors.
+
+This was reviewed when agent traces landed in v0.4.5, where one recon session
+can be a single actor with hundreds of tool calls. The decision was to accept
+the linear cost for now rather than bound the replay window: the stateful
+detectors (capability resurrection, privilege tracking, dormant reappearance)
+depend on the full history, so a naive recompute-window cap would silently
+change their results. When trace volume makes this hurt, the fix is incremental
+detector state that survives between runs, not a shorter replay. Recorded here
+so it stays a deliberate trade-off.
 
 ### Local-development security posture
 

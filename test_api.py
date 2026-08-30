@@ -54,14 +54,14 @@ r = client.get("/stats")
 check("GET /stats returns 200", r.status_code == 200)
 stats = r.json()
 print("  stats:", stats)
-check("seed data loaded (22 events)", stats["event_count"] == 22)
+check("seed data loaded (27 events)", stats["event_count"] == 27)
 check("critical alerts present from seed scenario", stats["alert_counts"]["critical"] >= 5)
 
 print("\n== actors ==")
 r = client.get("/actors")
 actors = r.json()
 check("GET /actors returns 200", r.status_code == 200)
-check("3 actors present", len(actors) == 3)
+check("4 actors present", len(actors) == 4)
 top_actor = actors[0]
 print("  top risk actor:", top_actor["actor_id"], "score:", top_actor["risk_score"])
 check("actors sorted by risk descending", actors[0]["risk_score"] >= actors[-1]["risk_score"])
@@ -202,6 +202,33 @@ check("ingest with a bad API key is 401",
 check("an API key cannot read alerts (403)",
       TestClient(app).get("/alerts", headers={"X-API-Key": key}).status_code == 403)
 
+print("\n== agent traces (v0.4.5) ==")
+trace_events = [
+    # in scope + benign
+    {"timestamp": "2026-09-02T09:00:00", "actor_id": "trace-test", "actor_type": "ai_agent",
+     "task": "engagement_alpha", "event_type": "tool_call", "target": "10.10.5.20",
+     "metadata": {"tool": "nmap", "arguments": "-sV -p 443 10.10.5.20", "host": "10.10.5.20", "port": 443}},
+    # out-of-scope destination host
+    {"timestamp": "2026-09-02T09:01:00", "actor_id": "trace-test", "actor_type": "ai_agent",
+     "task": "engagement_alpha", "event_type": "tool_call", "target": "http://evil.example/x",
+     "metadata": {"tool": "curl", "arguments": "http://evil.example/x", "url": "http://evil.example/x"}},
+    # destructive command
+    {"timestamp": "2026-09-02T09:02:00", "actor_id": "trace-test", "actor_type": "ai_agent",
+     "task": "engagement_alpha", "event_type": "tool_call", "target": "/data",
+     "metadata": {"tool": "bash", "arguments": "rm -rf /data"}},
+]
+r = client.post("/events", json=trace_events)
+check("tool-call ingest returns 200", r.status_code == 200)
+produced = r.json()["alerts"]
+cats = [a["category"] for a in produced]
+check("destructive_action fires on 'rm -rf'", "destructive_action" in cats)
+check("destructive_action is critical",
+      any(a["severity"] == "critical" for a in produced if a["category"] == "destructive_action"))
+check("out_of_scope_action fires on an off-scope host", "out_of_scope_action" in cats)
+check("in-scope tool call raises no destructive/scope alert",
+      all(a["category"] not in ("destructive_action", "out_of_scope_action")
+          for a in produced if a["target"] == "10.10.5.20"))
+
 print("\n== server-sent events ==")
 import bus
 
@@ -221,6 +248,6 @@ print("\n== reset ==")
 r = client.post("/reset")
 check("POST /reset returns 200", r.status_code == 200)
 r = client.get("/stats")
-check("reset restores 22 seed events", r.json()["event_count"] == 22)
+check("reset restores 27 seed events", r.json()["event_count"] == 27)
 
 print("\nAll checks passed.")

@@ -1,5 +1,43 @@
 # Changelog
 
+## Version 0.4.5
+
+Agent traces as events. Shadowfax now watches an AI agent's tool calls, not just
+human-style activity. No schema change: a tool call is an event with
+`event_type: "tool_call"` and its shape (`tool`, `arguments`, `exit_status`,
+`duration_ms`, optional `host`/`port`/`url`) in `metadata`.
+
+### Added
+
+- **Destructive-action detection.** A new `destructive_action` category fires
+  when a tool call matches a policy pattern -- recursive delete, database drop,
+  credential write, disk wipe, system shutdown. Rules live in
+  `policy.destructive_action_rules` (label + severity + case-insensitive
+  substrings), so the patterns are governed by policy and reachable by tests,
+  and detection stays deterministic. First matching rule wins; one alert per
+  call.
+- **Engagement scope.** `policy.engagement_scope` (allowed domains, IP ranges,
+  ports) defines the rules of engagement. A tool call whose destination host,
+  IP or port falls outside it fires `out_of_scope_action`. IP ranges are
+  matched with the stdlib `ipaddress` module; only calls with a real network
+  destination are checked, so filesystem and symbolic targets are left alone.
+- Sample agent traces in the seed data (an offensive-security agent that runs
+  in-scope, out-of-scope and destructive tool calls), visible after `/reset`.
+
+Detectors remain a pure function of `(actor history, policy)`; both new
+categories are just rules in `detectors.py`. The dashboard needed no change --
+the new categories flow through the existing table and category filter.
+
+### Note on rescan cost
+
+A recon session is one actor with potentially hundreds of tool calls, and a
+rescan replays an actor's full history (linear in its length). This is accepted
+deliberately for now rather than bounded: the stateful detectors
+(capability resurrection, privilege tracking) need the whole history, so a
+naive recompute-window cap would break them. When trace volume makes this hurt,
+the fix is incremental detector state, not a shorter replay -- recorded here so
+it is a decision, not a surprise in v0.5.
+
 ## Version 0.3.2
 
 Live updates over Server-Sent Events, replacing the poll loop.

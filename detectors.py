@@ -7,9 +7,11 @@ returns any alerts that should be raised.
 
 from __future__ import annotations
 import hashlib
+import ipaddress
 from collections import deque
 from datetime import datetime, timedelta, time as dtime
 from typing import Any
+from urllib.parse import urlparse
 
 TOOL_NAME = "shadowfax"
 
@@ -44,6 +46,106 @@ def _mk_alert(event: dict, severity: str, category: str, message: str,
         "message": message,
         "target": event["target"],
     }
+
+
+# Agent-trace helpers (v0.4.5)
+#
+# An AI agent's activity arrives as event_type == "tool_call", with the call's
+# shape in metadata: tool, arguments, exit_status, duration_ms, and optionally a
+# network destination (host/port/url). These helpers keep the two tool-call
+# detectors below small and pure.
+
+def _stringify_args(args: Any) -> str:
+    if isinstance(args, (list, tuple)):
+        return " ".join(str(a) for a in args)
+    if isinstance(args, dict):
+        return " ".join(f"{k} {v}" for k, v in args.items())
+    return str(args) if args is not None else ""
+
+
+def _tool_call_text(event: dict, meta: dict) -> str:
+    """Lower-cased haystack of the tool, its arguments and the target, for
+    substring matching against destructive-action patterns."""
+    return " ".join([
+        str(meta.get("tool", "")),
+        _stringify_args(meta.get("arguments", "")),
+        str(event.get("target", "")),
+    ]).lower()
+
+
+def _first_match(haystack: str, patterns: list[str]) -> str | None:
+    for p in patterns:
+        if p and p.lower() in haystack:
+            return p
+    return None
+
+
+def _tool_call_destination(event: dict, meta: dict) -> tuple[str | None, int | None]:
+    """A tool call's network destination as (host, port), or (None, None) when
+    the call has no host/IP/URL to check against the engagement scope."""
+    host = meta.get("host")
+    port = meta.get("port")
+    url = meta.get("url")
+    if url and not host:
+        parsed = urlparse(url if "://" in url else "//" + url)
+        host = parsed.hostname
+        port = port or parsed.port
+    if not host:
+        target = str(event.get("target", ""))
+        if "://" in target:
+            parsed = urlparse(target)
+            host = parsed.hostname
+            port = port or parsed.port
+        elif (
+            "/" not in target and "\\" not in target and " " not in target
+            and not target.startswith("~") and "." in target
+        ):
+            # A bare host or host:port (a dotted domain or an IP). Filesystem
+            # paths and symbolic targets are deliberately excluded, so only real
+            # network destinations are scope-checked.
+            parsed = urlparse("//" + target)
+            host = parsed.hostname
+            port = port or parsed.port
+    return (host.lower() if isinstance(host, str) else None,
+            int(port) if isinstance(port, int) else None)
+
+
+def _scope_violation(event: dict, meta: dict, scope: dict) -> str | None:
+    """Message describing how a tool call left the engagement scope, or None."""
+    host, port = _tool_call_destination(event, meta)
+    if not host:
+        return None
+
+    allowed_domains = scope.get("allowed_domains", [])
+    allowed_ranges = scope.get("allowed_ip_ranges", [])
+    allowed_ports = scope.get("allowed_ports", [])
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+
+    in_scope = False
+    if ip is not None:
+        for r in allowed_ranges:
+            try:
+                if ip in ipaddress.ip_network(r, strict=False):
+                    in_scope = True
+                    break
+            except ValueError:
+                continue
+    else:
+        for d in allowed_domains:
+            d = d.lower().lstrip(".")
+            if host == d or host.endswith("." + d):
+                in_scope = True
+                break
+
+    if not in_scope:
+        return f"tool call reached '{host}', outside the engagement scope"
+    if port is not None and allowed_ports and port not in allowed_ports:
+        return f"tool call reached '{host}:{port}', a port outside the engagement scope"
+    return None
 
 
 def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[dict[str, Any]]:
@@ -161,6 +263,23 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 dest = "external" if external else "internal"
                 alerts.append(_mk_alert(e, sev, "exfiltration_volume",
                     f"{size:,} bytes transferred to {dest} destination (threshold {threshold:,})"))
+
+        # agent tool calls: destructive actions and engagement-scope breaches
+        if e["event_type"] == "tool_call":
+            haystack = _tool_call_text(e, meta)
+            for rule in policy.get("destructive_action_rules", []):
+                match = _first_match(haystack, rule.get("patterns", []))
+                if match:
+                    alerts.append(_mk_alert(e, rule.get("severity", "high"), "destructive_action",
+                        f"{rule.get('label', 'destructive action')} (tool call matched '{match}')"))
+                    break  # one destructive-action alert per tool call
+
+            scope = policy.get("engagement_scope")
+            if scope and scope.get("enabled"):
+                violation = _scope_violation(e, meta, scope)
+                if violation:
+                    alerts.append(_mk_alert(e, scope.get("severity", "high"),
+                        "out_of_scope_action", violation))
 
         # rate anomaly
         recent_events.append(ts)

@@ -78,22 +78,20 @@ Agent traces as events. The current event schema describes what an actor did
 to a system; an AI agent produces a different shape, and this release ingests
 it.
 
-- [ ] Agent-trace event type: tool name, arguments, target, exit status,
-      duration, emitted by a harness or parsed from a session log
-- [ ] Destructive-action detectors: shutdown, delete, drop, recursive remove,
-      credential writes, outbound requests to hosts outside the allowlist,
-      rule-based and evaluated against policy
-- [ ] Engagement scope as a policy object: allowed domains, IP ranges, ports;
-      an action touching anything outside it fires `out_of_scope_action`. Scope
-      lives in policy because `detectors.run_for_actor` is a pure function of
-      an actor's history and the policy, and policy is the only input a user
-      is meant to change.
-- [ ] Settle the rescan-cost strategy before trace volume forces it: bound the
-      recompute window or accept the linear cost deliberately and record the
-      decision. "Rescan cost grows with actor history" in `architecture.md` is
-      linear in history, and a recon session is one actor with hundreds of
-      tool calls, so what is invisible at a dozen events per actor is not at
-      trace scale.
+- [x] Agent-trace event type: `event_type: "tool_call"` carrying tool,
+      arguments, exit status, duration (and optional host/port/url) in metadata,
+      emitted by a harness or parsed from a session log. No schema change.
+- [x] Destructive-action detectors: recursive delete, database drop, credential
+      write, disk wipe, system shutdown, rule-based via
+      `policy.destructive_action_rules`.
+- [x] Engagement scope as a policy object (`policy.engagement_scope`): allowed
+      domains, IP ranges, ports; an out-of-scope destination fires
+      `out_of_scope_action`. Scope lives in policy because
+      `detectors.run_for_actor` is a pure function of history and policy.
+- [x] Settled the rescan-cost strategy: accepted the linear cost deliberately
+      (the stateful detectors need full history, so a recompute-window cap would
+      break them) and recorded it in `architecture.md` and `CHANGELOG.md`. The
+      real fix, when volume demands it, is incremental detector state.
 
 ---
 
