@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     category TEXT NOT NULL,
     message TEXT NOT NULL,
     target TEXT NOT NULL,
+    attack TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_actor ON alerts(actor_id);
@@ -140,11 +141,14 @@ def _migrate_legacy_alerts(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if not exists:
         return
-    id_col = next(
-        (c for c in conn.execute("PRAGMA table_info(alerts)").fetchall() if c["name"] == "id"),
-        None,
-    )
-    if id_col is not None and (id_col["type"] or "").upper() == "INTEGER":
+    cols = conn.execute("PRAGMA table_info(alerts)").fetchall()
+    id_col = next((c for c in cols if c["name"] == "id"), None)
+    has_attack = any(c["name"] == "attack" for c in cols)
+    outdated = (id_col is not None and (id_col["type"] or "").upper() == "INTEGER") or not has_attack
+    if outdated:
+        # Old schema (integer id, or pre-v0.4 without the attack column). Alerts
+        # are derived, so dropping is lossless: startup rescans and rebuilds them
+        # with the current shape. alert_state (keyed by deterministic id) stays.
         conn.execute("DROP TABLE alerts")
 
 
@@ -223,11 +227,12 @@ def replace_alerts_for_actor(conn: sqlite3.Connection, actor_id: str, alerts: li
     conn.execute("DELETE FROM alerts WHERE actor_id = ?", (actor_id,))
     for a in alerts:
         conn.execute(
-            """INSERT INTO alerts (id, event_id, actor_id, actor_type, timestamp, severity, category, message, target)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO alerts (id, event_id, actor_id, actor_type, timestamp, severity, category, message, target, attack)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 a["id"], a["event_id"], a["actor_id"], a["actor_type"], a["timestamp"],
                 a["severity"], a["category"], a["message"], a["target"],
+                json.dumps(a.get("attack", [])),
             ),
         )
 
@@ -276,6 +281,7 @@ def query_alerts(
     for r in rows:
         d = dict(r)
         d["acknowledged"] = bool(d["acknowledged"])
+        d["attack"] = json.loads(d.get("attack") or "[]")
         out.append(d)
     return out
 
@@ -386,6 +392,7 @@ def get_alert(conn: sqlite3.Connection, alert_id: str) -> dict[str, Any] | None:
         return None
     d = dict(row)
     d["acknowledged"] = bool(d["acknowledged"])
+    d["attack"] = json.loads(d.get("attack") or "[]")
     return d
 
 

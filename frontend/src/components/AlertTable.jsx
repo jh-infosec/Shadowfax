@@ -60,7 +60,26 @@ export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAss
             </td>
             <td className="time-cell">{a.timestamp.replace("T", " ").slice(0, 16)}</td>
             <td className="target-cell">{a.target}</td>
-            <td className="msg-cell">{a.message}</td>
+            <td className="msg-cell">
+              {a.message}
+              {a.attack && a.attack.length > 0 && (
+                <span className="attack-badges">
+                  {a.attack.map((t) => (
+                    <a
+                      key={t.id}
+                      className="attack-badge"
+                      href={t.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`${t.id} · ${t.name} (${t.tactic})`}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {t.id}
+                    </a>
+                  ))}
+                </span>
+              )}
+            </td>
             {/* Analyst state. stopPropagation keeps these clicks from opening
                 the actor drawer that the row click triggers. Viewers see the
                 same state read-only, without the action buttons. */}

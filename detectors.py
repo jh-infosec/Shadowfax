@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, time as dtime
 from typing import Any
 from urllib.parse import urlparse
 
+import attack
+
 TOOL_NAME = "shadowfax"
 
 
@@ -34,7 +36,12 @@ def alert_identity(actor_id: str, category: str, event_id: int, discriminator: s
 
 
 def _mk_alert(event: dict, severity: str, category: str, message: str,
-              discriminator: str = "") -> dict:
+              discriminator: str = "", technique_ids: list[str] | None = None) -> dict:
+    # ATT&CK techniques: use the ids the detector supplied (destructive rules
+    # carry their own), otherwise fall back to the category's mapping. Ids are
+    # resolved against the shared registry; unknown ones are dropped.
+    techniques = (attack.enrich(technique_ids) if technique_ids is not None
+                  else attack.for_category(category))
     return {
         "id": alert_identity(event["actor_id"], category, event["id"], discriminator),
         "event_id": event["id"],
@@ -45,6 +52,7 @@ def _mk_alert(event: dict, severity: str, category: str, message: str,
         "category": category,
         "message": message,
         "target": event["target"],
+        "attack": techniques,
     }
 
 
@@ -271,7 +279,8 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 match = _first_match(haystack, rule.get("patterns", []))
                 if match:
                     alerts.append(_mk_alert(e, rule.get("severity", "high"), "destructive_action",
-                        f"{rule.get('label', 'destructive action')} (tool call matched '{match}')"))
+                        f"{rule.get('label', 'destructive action')} (tool call matched '{match}')",
+                        technique_ids=rule.get("attack", [])))
                     break  # one destructive-action alert per tool call
 
             scope = policy.get("engagement_scope")

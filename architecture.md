@@ -160,6 +160,17 @@ fingerprinting, and role comparison (`role_at_least`). No database access and
 no FastAPI here, so the crypto is unit-reachable on its own. The storage lives
 in `db.py` and the request wiring in `app.py`.
 
+#### attack.py + attack_registry.json
+
+MITRE ATT&CK mapping. `attack_registry.json` is the shared, portfolio-wide
+table of technique metadata (id -> name, tactic, url); technique ids are used
+verbatim from it and nothing generates one. `attack.py` holds Shadowfax's own
+`CATEGORY_TO_TECHNIQUES` map and enriches ids into full technique objects,
+dropping any id the registry doesn't know (so a typo is a missing badge, not an
+invented technique). Destructive-action alerts get their technique from the
+matched policy rule rather than the category map, since `rm -rf` and a database
+drop differ. Each alert carries an `attack` array; `_mk_alert` fills it.
+
 #### bus.py
 
 An in-process publish/subscribe bus for change notifications. Each open
@@ -180,6 +191,8 @@ Tables:
 - `alerts`, detector output, one row per fired alert, referencing an event.
   The primary key is the deterministic id described above, not an
   autoincrement.
+  The row also stores the alert's ATT&CK techniques as JSON in an `attack`
+  column.
 - `alert_state`, per-alert analyst state (acknowledgement, assignment, notes),
   keyed on the alert id. Deliberately not foreign-keyed to `alerts`, so it
   survives the delete-and-reinsert of a rescan.
@@ -388,10 +401,11 @@ The following files are part of the project structure and must be preserved:
 
 ```
 app.py                  db.py                   detectors.py
-auth.py                 bus.py                  seed_data.py
-test_api.py             requirements.txt        architecture.md
-README.md               CHANGELOG.md            ROADMAP.md
-findings-envelope.md    .gitignore
+auth.py                 bus.py                  attack.py
+attack_registry.json    seed_data.py            test_api.py
+requirements.txt        architecture.md         README.md
+CHANGELOG.md            ROADMAP.md              findings-envelope.md
+.gitignore
 
 frontend/index.html                 frontend/package.json
 frontend/vite.config.js             frontend/README.md

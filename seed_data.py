@@ -57,16 +57,19 @@ DEFAULT_POLICY = {
     # Agent-trace detection (v0.4.5). Each rule matches case-insensitive
     # substrings against a tool call's tool + arguments + target; the first
     # matching rule fires one destructive_action alert.
+    # Each rule carries its own ATT&CK technique id (verbatim from
+    # attack_registry.json), because rm -rf and a database drop are both
+    # destructive_action but map to different techniques.
     "destructive_action_rules": [
-        {"label": "recursive delete", "severity": "critical",
+        {"label": "recursive delete", "severity": "critical", "attack": ["T1485"],
          "patterns": ["rm -rf", "rm -r ", "remove-item -recurse", "rmdir /s"]},
-        {"label": "database drop", "severity": "critical",
+        {"label": "database drop", "severity": "critical", "attack": ["T1485"],
          "patterns": ["drop table", "drop database", "truncate table"]},
-        {"label": "credential write", "severity": "critical",
+        {"label": "credential write", "severity": "critical", "attack": ["T1098"],
          "patterns": ["authorized_keys", ".aws/credentials", "/etc/shadow", "id_rsa"]},
-        {"label": "disk wipe", "severity": "critical",
+        {"label": "disk wipe", "severity": "critical", "attack": ["T1561"],
          "patterns": ["mkfs", "dd if=", "diskpart"]},
-        {"label": "system shutdown", "severity": "high",
+        {"label": "system shutdown", "severity": "high", "attack": ["T1529"],
          "patterns": ["shutdown", "poweroff", "reboot", "halt "]},
     ],
     # The rules of engagement. A tool call whose destination host, IP or port

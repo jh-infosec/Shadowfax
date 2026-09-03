@@ -1,5 +1,38 @@
 # Changelog
 
+## Version 0.4.6
+
+MITRE ATT&CK mapping (the roadmap's v0.4 item). Every alert now carries the
+ATT&CK technique(s) it corresponds to, so analysts see intent in a shared
+vocabulary.
+
+### Added
+
+- **Shared technique registry** (`attack_registry.json`): id -> name, tactic,
+  URL. It is the single source of technique metadata for the whole portfolio
+  (Shadowfax, claude-recon-agent, maltriage) -- one place a technique id is
+  corrected. Technique ids are used verbatim from it; nothing generates one.
+- **`attack.py`** maps Shadowfax's alert categories to technique ids and
+  enriches them from the registry. `enrich()` silently drops any id the
+  registry doesn't know, so a typo shows up as a missing badge, never an
+  invented technique. `validate()` (enforced by a test) asserts every id the
+  category map and the default policy reference exists in the registry.
+- **Per-rule techniques for destructive actions.** Each `destructive_action`
+  rule in policy declares its own `attack` id, because `rm -rf` (T1485 Data
+  Destruction) and a system shutdown (T1529) are both destructive but different
+  techniques. Fixed detectors use the category mapping; unmapped categories
+  (policy controls, pure anomalies) carry no technique, which is honest.
+- Alerts now include an `attack` array (`[{id, name, tactic, url}]`) on
+  `/alerts` and `/actors/{id}`, and the dashboard shows a linked technique
+  badge (e.g. `T1485`) on each alert. `GET /attack` returns the registry.
+
+### Changed
+
+- `alerts` gains an `attack` column (JSON). A pre-v0.4 alerts table without it
+  is dropped and rebuilt on startup (alerts are derived; `alert_state` is
+  keyed by id and preserved).
+- Backend version is now `0.4.6`.
+
 ## Version 0.4.5
 
 Agent traces as events. Shadowfax now watches an AI agent's tool calls, not just

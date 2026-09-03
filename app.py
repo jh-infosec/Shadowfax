@@ -32,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import attack
 import auth
 import bus
 import db
@@ -39,7 +40,7 @@ import detectors
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 SESSION_TTL_HOURS = 12
 
 # Application startup
@@ -393,6 +394,13 @@ def actor_detail(actor_id: str, identity: dict = Depends(require_role("viewer"))
 
 
 # Policy endpoints
+
+@app.get("/attack")
+def attack_registry(identity: dict = Depends(require_role("viewer"))):
+    """The shared MITRE ATT&CK technique registry (id -> name, tactic, url).
+    Alerts reference these ids; this is where the metadata lives."""
+    return attack.registry()
+
 
 @app.get("/policy")
 def get_policy(identity: dict = Depends(require_role("viewer"))):

@@ -48,6 +48,7 @@ investigation and explainability.
 - Dashboard sign-in, with the UI adapting to the signed-in user's role
 - Live push over Server-Sent Events — the dashboard updates the instant data changes
 - Agent-trace ingest — flags destructive tool calls and out-of-scope actions by AI agents
+- MITRE ATT&CK mapping — every alert tagged with technique IDs from a shared registry
 - React dashboard with a live alert table
 - Actor timelines, showing alerts attached to the events that produced them
 - Filtering by severity, actor type, category and free-text search
@@ -97,7 +98,6 @@ Current stack
 Planned
 
 - PostgreSQL
-- MITRE ATT&CK mapping
 - Electron desktop client
 - AI-assisted investigations
 
@@ -128,7 +128,7 @@ Planned
 
 ### v0.4
 
-- MITRE ATT&CK Mapping
+- MITRE ATT&CK Mapping — shipped (in the v0.4.6 snapshot)
 - Correlation Engine
 - Incident Reports
 

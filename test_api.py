@@ -229,6 +229,28 @@ check("in-scope tool call raises no destructive/scope alert",
       all(a["category"] not in ("destructive_action", "out_of_scope_action")
           for a in produced if a["target"] == "10.10.5.20"))
 
+print("\n== MITRE ATT&CK mapping ==")
+import attack
+from seed_data import DEFAULT_POLICY as _POLICY
+
+check("every referenced technique id exists in the registry", attack.validate(_POLICY) == [])
+r = client.get("/attack")
+check("GET /attack returns the shared registry", r.status_code == 200 and "T1110" in r.json())
+
+# canary_triggered persists here (the earlier policy test only loosened brute
+# force, which removed those alerts).
+canary = client.get("/alerts", params={"category": ["canary_triggered"]}).json()
+check("canary_triggered alerts map to T1552 Unsecured Credentials",
+      bool(canary) and all(any(t["id"] == "T1552" for t in a["attack"]) for a in canary))
+
+dest = [a for a in produced if a["category"] == "destructive_action"]
+check("a destructive rm -rf maps to T1485 Data Destruction",
+      any(any(t["id"] == "T1485" for t in a["attack"]) for a in dest))
+
+av = client.get("/alerts", params={"category": ["allowlist_violation"]}).json()
+check("an unmapped category (allowlist_violation) carries no ATT&CK techniques",
+      bool(av) and all(a["attack"] == [] for a in av))
+
 print("\n== server-sent events ==")
 import bus
 

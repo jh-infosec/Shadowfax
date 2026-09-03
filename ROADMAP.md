@@ -62,10 +62,11 @@ new work.
 
 ## Version 0.4
 
-- [ ] MITRE ATT&CK mapping. Technique ids come verbatim from a registry
-      shared with the rest of the portfolio, the same table `claude-recon-
-      agent` and `maltriage` consume. One registry, three consumers, one place
-      a technique id is corrected. Nothing generates a technique id.
+- [x] MITRE ATT&CK mapping. Technique ids come verbatim from a shared registry
+      (`attack_registry.json`) consumed across the portfolio; `attack.py` maps
+      alert categories (and per-rule destructive actions) to ids and enriches
+      from the registry. Nothing generates a technique id. Shipped in the
+      `v0.4.6` snapshot.
 - [ ] Alert correlation
 - [ ] Threat intelligence feeds
 - [ ] Incident reports
