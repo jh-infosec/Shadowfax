@@ -170,6 +170,32 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .drawer-close:hover { color: var(--text); }
 .drawer-sub { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
 
+/* Incidents drawer (correlation, v0.4) */
+.incidents-drawer { width: min(900px, 96vw); }
+.incidents-layout { display: grid; grid-template-columns: 240px 1fr; gap: 18px; margin-top: 12px; }
+.incident-list { display: flex; flex-direction: column; gap: 4px; border-right: 1px solid var(--border-soft); padding-right: 12px; max-height: calc(100vh - 90px); overflow-y: auto; }
+.incident-row {
+  display: flex; align-items: center; gap: 8px; text-align: left; padding: 8px 9px;
+  background: none; border: 1px solid transparent; border-radius: 6px; color: var(--text);
+}
+.incident-row:hover { background: var(--panel-2); }
+.incident-row.active { background: var(--panel-2); border-color: var(--border); }
+.incident-actor { font-family: var(--mono); font-size: 12px; }
+.incident-meta { font-size: 10.5px; color: var(--muted-2); margin-left: auto; white-space: nowrap; }
+.incident-detail { min-width: 0; }
+.incident-title { font-family: var(--mono); font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+.incident-sub { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-top: 4px; }
+.incident-summary { font-size: 13px; line-height: 1.55; margin: 14px 0; }
+.incident-tech { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 18px; }
+.incident-timeline-title { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted-2); font-weight: 700; margin-bottom: 8px; }
+.incident-timeline { width: 100%; border-collapse: collapse; font-size: 12px; }
+.incident-timeline td { padding: 6px 8px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+
+@media (max-width: 720px) {
+  .incidents-layout { grid-template-columns: 1fr; }
+  .incident-list { border-right: none; border-bottom: 1px solid var(--border-soft); padding-right: 0; max-height: 200px; }
+}
+
 .risk-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted-2); margin-bottom: 6px; font-weight: 700; }
 .risk-bar { height: 8px; border-radius: 4px; background: var(--panel-2); overflow: hidden; display: flex; margin-bottom: 4px; border: 1px solid var(--border); }
 .risk-seg { height: 100%; }

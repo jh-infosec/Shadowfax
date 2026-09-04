@@ -4,6 +4,7 @@ import Sidebar from "./components/Sidebar.jsx";
 import AlertTable from "./components/AlertTable.jsx";
 import ActorDrawer from "./components/ActorDrawer.jsx";
 import PolicyEditor from "./components/PolicyEditor.jsx";
+import IncidentsDrawer from "./components/IncidentsDrawer.jsx";
 import Login from "./components/Login.jsx";
 import { SEVERITIES, ACTOR_TYPES } from "./constants.js";
 import * as api from "./api.js";
@@ -51,6 +52,7 @@ export default function App() {
 
   const [policyOpen, setPolicyOpen] = useState(false);
   const [policy, setPolicy] = useState(null);
+  const [incidentsOpen, setIncidentsOpen] = useState(false);
 
   // Role helpers. admin > analyst > viewer.
   const canAnalyst = user && (user.role === "analyst" || user.role === "admin");
@@ -246,6 +248,7 @@ export default function App() {
           categories={knownCategories}
           onOpenPolicy={handleOpenPolicy}
           canEditPolicy={canAnalyst}
+          onOpenIncidents={() => setIncidentsOpen(true)}
         />
         <div className="main">
           <div className="table-wrap">
@@ -263,6 +266,8 @@ export default function App() {
       {actorDetail && (
         <ActorDrawer detail={actorDetail} onClose={() => setSelectedActorId(null)} />
       )}
+
+      {incidentsOpen && <IncidentsDrawer onClose={() => setIncidentsOpen(false)} />}
 
       {policyOpen && policy && (
         <PolicyEditor

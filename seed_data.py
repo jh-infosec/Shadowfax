@@ -54,6 +54,9 @@ DEFAULT_POLICY = {
     "rate_window_minutes": 5,
     "rate_anomaly_multiplier": 3.5,
     "rate_anomaly_min_baseline_events": 4,
+    # Alerts for one actor within this many minutes of each other correlate into
+    # a single incident.
+    "correlation_window_minutes": 30,
     # Agent-trace detection (v0.4.5). Each rule matches case-insensitive
     # substrings against a tool call's tool + arguments + target; the first
     # matching rule fires one destructive_action alert.

@@ -1,5 +1,36 @@
 # Changelog
 
+## Version 0.4.7
+
+Alert correlation and incident reports (the rest of the roadmap's v0.4).
+Detectors say *what* fired; correlation says *these fired together*, collapsing
+a stream of alerts into the smaller set of incidents an analyst actually works.
+
+### Added
+
+- **`correlate.py`** groups an actor's alerts into **incidents** by temporal
+  proximity: a new incident starts whenever the gap to the previous alert
+  exceeds `policy.correlation_window_minutes` (default 30). Pure function of
+  `(alerts, window)` -- no I/O, no LLM, deterministic like detection. Each
+  incident carries its window, alert count, severity breakdown, unioned
+  categories and ATT&CK techniques, a risk score, and a one-line summary.
+  Incident ids are deterministic (actor + first alert id).
+- **Deterministic incident reports.** `render_report()` produces a factual
+  markdown report -- summary, ATT&CK techniques, and a timeline table -- from
+  the incident's own data. (The v0.5 investigation assistant is where an LLM
+  gets to *explain*; here we only summarise what is already known.)
+- `GET /incidents` (correlated list) and `GET /incidents/{id}` (with member
+  alerts and the markdown report), computed on read from stored alerts, so
+  there is no new table or migration.
+- **Incidents view in the dashboard.** An Incidents drawer lists incidents and
+  shows the selected one's summary, ATT&CK badges, timeline, and a
+  "Copy report" button.
+
+### Changed
+
+- `DEFAULT_POLICY` gains `correlation_window_minutes` (30).
+- Backend version is now `0.4.7`.
+
 ## Version 0.4.6
 
 MITRE ATT&CK mapping (the roadmap's v0.4 item). Every alert now carries the

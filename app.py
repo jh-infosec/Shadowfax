@@ -35,12 +35,13 @@ from pydantic import BaseModel
 import attack
 import auth
 import bus
+import correlate
 import db
 import detectors
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.4.6"
+VERSION = "0.4.7"
 SESSION_TTL_HOURS = 12
 
 # Application startup
@@ -391,6 +392,34 @@ def actor_detail(actor_id: str, identity: dict = Depends(require_role("viewer"))
         alerts = db.query_alerts(conn, actor_id=actor_id, limit=1000)
         risk = db.actor_risk_scores(conn).get(actor_id, {"score": 0, "critical": 0, "high": 0, "medium": 0, "low": 0})
         return {"actor_id": actor_id, "events": events, "alerts": alerts, "risk": risk}
+
+
+# Incident endpoints (correlation)
+
+@app.get("/incidents")
+def list_incidents(identity: dict = Depends(require_role("viewer"))):
+    """Alerts correlated into incidents: a burst of one actor's alerts within
+    the policy's correlation window. Computed on read from stored alerts."""
+    with db.get_conn() as conn:
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        alerts = db.query_alerts(conn, limit=100_000)
+    window = policy.get("correlation_window_minutes", 30)
+    return correlate.correlate(alerts, window)
+
+
+@app.get("/incidents/{incident_id}")
+def incident_detail(incident_id: str, identity: dict = Depends(require_role("viewer"))):
+    with db.get_conn() as conn:
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        alerts = db.query_alerts(conn, limit=100_000)
+    window = policy.get("correlation_window_minutes", 30)
+    incidents = correlate.correlate(alerts, window)
+    incident = next((i for i in incidents if i["id"] == incident_id), None)
+    if incident is None:
+        raise HTTPException(404, f"no incident with id '{incident_id}'")
+    by_id = {a["id"]: a for a in alerts}
+    members = [by_id[aid] for aid in incident["alert_ids"] if aid in by_id]
+    return {**incident, "alerts": members, "report": correlate.render_report(incident, by_id)}
 
 
 # Policy endpoints

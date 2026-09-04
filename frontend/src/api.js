@@ -108,6 +108,14 @@ export function getAlerts(filters = {}) {
   return request(`/alerts${qs ? `?${qs}` : ""}`);
 }
 
+export function getIncidents() {
+  return request("/incidents");
+}
+
+export function getIncident(id) {
+  return request(`/incidents/${encodeURIComponent(id)}`);
+}
+
 export function getPolicy() {
   return request("/policy");
 }

@@ -171,6 +171,17 @@ invented technique). Destructive-action alerts get their technique from the
 matched policy rule rather than the category map, since `rm -rf` and a database
 drop differ. Each alert carries an `attack` array; `_mk_alert` fills it.
 
+#### correlate.py
+
+Alert correlation. `correlate()` groups an actor's alerts into **incidents** by
+temporal proximity -- a new incident begins when the gap to the previous alert
+exceeds `policy.correlation_window_minutes`. It is a pure function of
+`(alerts, window)`, deterministic like the detectors, and unions each cluster's
+categories, ATT&CK techniques and severities. `render_report()` turns an
+incident into a factual markdown report (summary, techniques, timeline) from
+the same data -- no LLM. Incidents are computed on read (`GET /incidents`) from
+the stored alerts, so there is no incidents table.
+
 #### bus.py
 
 An in-process publish/subscribe bus for change notifications. Each open
@@ -402,10 +413,10 @@ The following files are part of the project structure and must be preserved:
 ```
 app.py                  db.py                   detectors.py
 auth.py                 bus.py                  attack.py
-attack_registry.json    seed_data.py            test_api.py
-requirements.txt        architecture.md         README.md
-CHANGELOG.md            ROADMAP.md              findings-envelope.md
-.gitignore
+attack_registry.json    correlate.py            seed_data.py
+test_api.py             requirements.txt        architecture.md
+README.md               CHANGELOG.md            ROADMAP.md
+findings-envelope.md    .gitignore
 
 frontend/index.html                 frontend/package.json
 frontend/vite.config.js             frontend/README.md
@@ -418,4 +429,5 @@ frontend/src/components/AlertTable.jsx
 frontend/src/components/ActorDrawer.jsx
 frontend/src/components/PolicyEditor.jsx
 frontend/src/components/Login.jsx
+frontend/src/components/IncidentsDrawer.jsx
 ```

@@ -1,7 +1,7 @@
 import React from "react";
 import { SEVERITIES, ACTOR_TYPES, SEVERITY_COLOUR } from "../constants.js";
 
-export default function Sidebar({ filters, onFiltersChange, categories, onOpenPolicy, canEditPolicy }) {
+export default function Sidebar({ filters, onFiltersChange, categories, onOpenPolicy, canEditPolicy, onOpenIncidents }) {
   const toggle = (group, value) => {
     const set = new Set(filters[group]);
     set.has(value) ? set.delete(value) : set.add(value);
@@ -85,6 +85,12 @@ export default function Sidebar({ filters, onFiltersChange, categories, onOpenPo
       </div>
 
       <button className="clear-link" onClick={resetFilters}>Reset filters</button>
+
+      <div className="filter-group" style={{ marginTop: 24 }}>
+        <button className="btn" style={{ width: "100%" }} onClick={onOpenIncidents}>
+          Incidents
+        </button>
+      </div>
 
       {canEditPolicy && (
         <div className="filter-group" style={{ marginTop: 24 }}>

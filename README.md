@@ -49,6 +49,7 @@ investigation and explainability.
 - Live push over Server-Sent Events — the dashboard updates the instant data changes
 - Agent-trace ingest — flags destructive tool calls and out-of-scope actions by AI agents
 - MITRE ATT&CK mapping — every alert tagged with technique IDs from a shared registry
+- Alert correlation — related alerts grouped into incidents, each with a generated report
 - React dashboard with a live alert table
 - Actor timelines, showing alerts attached to the events that produced them
 - Filtering by severity, actor type, category and free-text search
@@ -128,9 +129,9 @@ Planned
 
 ### v0.4
 
-- MITRE ATT&CK Mapping — shipped (in the v0.4.6 snapshot)
-- Correlation Engine
-- Incident Reports
+- MITRE ATT&CK Mapping — shipped (v0.4.6)
+- Correlation Engine — shipped (v0.4.7)
+- Incident Reports — shipped (v0.4.7)
 
 ### v0.4.5 — shipped
 

@@ -251,6 +251,28 @@ av = client.get("/alerts", params={"category": ["allowlist_violation"]}).json()
 check("an unmapped category (allowlist_violation) carries no ATT&CK techniques",
       bool(av) and all(a["attack"] == [] for a in av))
 
+print("\n== incident correlation (v0.4) ==")
+r = client.get("/incidents")
+check("GET /incidents returns 200", r.status_code == 200)
+incidents = r.json()
+check("alerts correlate into incidents", len(incidents) > 0)
+
+recon = [i for i in incidents if i["actor_id"] == "recon-agent-3"]
+check("recon-agent-3's alerts form a single incident", len(recon) == 1)
+inc = recon[0]
+check("the incident is critical", inc["severity"] == "critical")
+check("the incident unions its categories",
+      "destructive_action" in inc["categories"] and "out_of_scope_action" in inc["categories"])
+check("the incident unions ATT&CK techniques", any(t["id"] == "T1485" for t in inc["techniques"]))
+
+r = client.get(f"/incidents/{inc['id']}")
+check("GET /incidents/{id} returns 200", r.status_code == 200)
+detail = r.json()
+check("incident detail carries its member alerts", len(detail["alerts"]) == inc["alert_count"])
+check("incident report is markdown with a timeline",
+      "## Timeline" in detail["report"] and f"Incident {inc['id']}" in detail["report"])
+check("unknown incident id 404s", client.get("/incidents/deadbeefdeadbeef").status_code == 404)
+
 print("\n== server-sent events ==")
 import bus
 

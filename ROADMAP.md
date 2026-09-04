@@ -67,9 +67,11 @@ new work.
       alert categories (and per-rule destructive actions) to ids and enriches
       from the registry. Nothing generates a technique id. Shipped in the
       `v0.4.6` snapshot.
-- [ ] Alert correlation
+- [x] Alert correlation. `correlate.py` groups an actor's alerts into incidents
+      by a policy time-window; `GET /incidents`. Shipped in `v0.4.7`.
 - [ ] Threat intelligence feeds
-- [ ] Incident reports
+- [x] Incident reports. Deterministic markdown report per incident
+      (`GET /incidents/{id}`), shown in the dashboard's Incidents view. `v0.4.7`.
 
 ---
 
