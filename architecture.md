@@ -231,8 +231,9 @@ Current categories: `allowlist_violation`, `canary_triggered`,
 `blocked_target_access`, `dormant_reappearance`, `capability_resurrection`,
 `brute_force_auth`, `impossible_travel`, `privilege_escalation`,
 `lateral_movement`, `off_hours_access`, `exfiltration_volume`,
-`rate_anomaly`, and -- for AI-agent tool calls (`event_type: "tool_call"`) --
-`destructive_action` and `out_of_scope_action`.
+`rate_anomaly`; for AI-agent tool calls (`event_type: "tool_call"`)
+`destructive_action` and `out_of_scope_action`; and for agent integrity
+`completion_fraud` and `token_spend_anomaly`.
 
 The two tool-call detectors are policy-driven like the rest:
 `destructive_action` matches `policy.destructive_action_rules` (label,
@@ -241,6 +242,15 @@ severity, substring patterns) against the tool, its arguments and target;
 `policy.engagement_scope` (allowed domains, IP ranges, ports), using the stdlib
 `ipaddress` module. Only calls with a real network destination are
 scope-checked, so filesystem and symbolic targets are left alone.
+
+The two integrity detectors compare an agent against itself.
+`completion_fraud` reads a `completion_claim` event (`metric`, `claimed`) and
+counts what the trace actually shows -- distinct targets touched, or tool calls
+-- firing when delivery falls short of the claim beyond
+`completion_claim_tolerance`. `token_spend_anomaly` accrues `metadata.tokens`
+per actor in a rolling window and fires against the actor's own baseline, the
+same shape as `rate_anomaly`. Both are unmapped to ATT&CK: they are integrity
+and cost signals, not adversary techniques.
 
 Severity levels are `critical`, `high`, `medium` and `low`.
 

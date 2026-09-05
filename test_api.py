@@ -54,7 +54,7 @@ r = client.get("/stats")
 check("GET /stats returns 200", r.status_code == 200)
 stats = r.json()
 print("  stats:", stats)
-check("seed data loaded (27 events)", stats["event_count"] == 27)
+check("seed data loaded (28 events)", stats["event_count"] == 28)
 check("critical alerts present from seed scenario", stats["alert_counts"]["critical"] >= 5)
 
 print("\n== actors ==")
@@ -273,6 +273,39 @@ check("incident report is markdown with a timeline",
       "## Timeline" in detail["report"] and f"Incident {inc['id']}" in detail["report"])
 check("unknown incident id 404s", client.get("/incidents/deadbeefdeadbeef").status_code == 404)
 
+print("\n== completion fraud + token spend (v0.5) ==")
+cf = client.get("/alerts", params={"category": ["completion_fraud"]}).json()
+check("completion_fraud fires on the seed over-claim", bool(cf))
+check("completion_fraud is critical and names the shortfall",
+      any(a["severity"] == "critical" and "claimed 40" in a["message"] and "shows 4" in a["message"]
+          for a in cf))
+
+# A truthful completion claim (delivered what it claimed) must not fire.
+truthful = [
+    {"timestamp": "2026-09-03T09:00:00", "actor_id": "honest-agent", "actor_type": "ai_agent",
+     "task": "t", "event_type": "tool_call", "target": "10.10.5.20",
+     "metadata": {"tool": "nmap", "host": "10.10.5.20", "port": 443}},
+    {"timestamp": "2026-09-03T09:01:00", "actor_id": "honest-agent", "actor_type": "ai_agent",
+     "task": "t", "event_type": "tool_call", "target": "10.10.5.21",
+     "metadata": {"tool": "nmap", "host": "10.10.5.21", "port": 443}},
+    {"timestamp": "2026-09-03T09:05:00", "actor_id": "honest-agent", "actor_type": "ai_agent",
+     "task": "t", "event_type": "completion_claim", "target": "t",
+     "metadata": {"metric": "distinct_targets", "claimed": 2}},
+]
+r = client.post("/events", json=truthful)
+check("a truthful completion claim does not fire",
+      not any(a["category"] == "completion_fraud" for a in r.json()["alerts"]))
+
+# Token-spend anomaly: a flat baseline then a spike.
+spend = [{"timestamp": f"2026-09-04T10:{i*10:02d}:00", "actor_id": "budget-agent",
+          "actor_type": "ai_agent", "event_type": "tool_call", "target": "model",
+          "metadata": {"tokens": 100}} for i in range(5)]
+spend.append({"timestamp": "2026-09-04T11:00:00", "actor_id": "budget-agent", "actor_type": "ai_agent",
+              "event_type": "tool_call", "target": "model", "metadata": {"tokens": 5000}})
+r = client.post("/events", json=spend)
+check("token_spend_anomaly fires on a spend spike",
+      any(a["category"] == "token_spend_anomaly" for a in r.json()["alerts"]))
+
 print("\n== server-sent events ==")
 import bus
 
@@ -292,6 +325,6 @@ print("\n== reset ==")
 r = client.post("/reset")
 check("POST /reset returns 200", r.status_code == 200)
 r = client.get("/stats")
-check("reset restores 27 seed events", r.json()["event_count"] == 27)
+check("reset restores 28 seed events", r.json()["event_count"] == 28)
 
 print("\nAll checks passed.")

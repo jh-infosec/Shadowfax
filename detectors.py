@@ -169,6 +169,12 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
     recent_privilege: str | None = None
     recent_events: deque[datetime] = deque()
     rate_history: list[int] = []
+    # Agent-trace running totals, for completion-fraud (v0.5).
+    tool_call_targets: set[str] = set()
+    tool_call_count: int = 0
+    # Token-spend window state, same shape as the rate-anomaly detector.
+    token_window: deque[tuple[datetime, int]] = deque()
+    token_history: list[int] = []
 
     for e in events:
         ts = datetime.fromisoformat(e["timestamp"])
@@ -241,16 +247,18 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
             if new_level:
                 recent_privilege = new_level
 
-        # lateral movement
-        recent_targets.append((ts, e["target"]))
-        window = timedelta(minutes=policy.get("lateral_movement_window_minutes", 15))
-        while recent_targets and ts - recent_targets[0][0] > window:
-            recent_targets.popleft()
-        distinct = {t for _, t in recent_targets}
-        if len(distinct) >= policy.get("lateral_movement_max_distinct_targets", 6):
-            alerts.append(_mk_alert(e, "high", "lateral_movement",
-                f"{len(distinct)} distinct targets touched within "
-                f"{policy.get('lateral_movement_window_minutes', 15)} min"))
+        # lateral movement. A completion_claim is a report, not a target
+        # access, so it does not count toward distinct targets touched.
+        if e["event_type"] != "completion_claim":
+            recent_targets.append((ts, e["target"]))
+            window = timedelta(minutes=policy.get("lateral_movement_window_minutes", 15))
+            while recent_targets and ts - recent_targets[0][0] > window:
+                recent_targets.popleft()
+            distinct = {t for _, t in recent_targets}
+            if len(distinct) >= policy.get("lateral_movement_max_distinct_targets", 6):
+                alerts.append(_mk_alert(e, "high", "lateral_movement",
+                    f"{len(distinct)} distinct targets touched within "
+                    f"{policy.get('lateral_movement_window_minutes', 15)} min"))
 
         # off hours
         if e["target"] in policy.get("off_hours_sensitive_targets", []):
@@ -289,6 +297,45 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 if violation:
                     alerts.append(_mk_alert(e, scope.get("severity", "high"),
                         "out_of_scope_action", violation))
+
+            # running trace totals for the completion-fraud check below
+            tool_call_targets.add(e["target"])
+            tool_call_count += 1
+
+        # completion fraud: the agent's claim vs what its trace actually shows.
+        # A counting problem -- claimed coverage against observed coverage.
+        if e["event_type"] == "completion_claim":
+            claimed = meta.get("claimed")
+            metric = meta.get("metric", "distinct_targets")
+            if isinstance(claimed, (int, float)) and claimed > 0:
+                actual = tool_call_count if metric == "tool_calls" else len(tool_call_targets)
+                tolerance = policy.get("completion_claim_tolerance", 0.9)
+                if actual < claimed * tolerance:
+                    sev = "critical" if actual < claimed * 0.5 else "high"
+                    alerts.append(_mk_alert(e, sev, "completion_fraud",
+                        f"agent claimed {int(claimed)} {metric.replace('_', ' ')} "
+                        f"but the trace shows {actual}"))
+
+        # token-spend anomaly: spend per actor against the actor's own baseline,
+        # the same window shape as the rate anomaly below.
+        tokens = int(meta.get("tokens", 0) or 0)
+        if tokens > 0:
+            token_window.append((ts, tokens))
+            twindow = timedelta(minutes=policy.get("token_spend_window_minutes", 5))
+            while token_window and ts - token_window[0][0] > twindow:
+                token_window.popleft()
+            spend = sum(t for _, t in token_window)
+            tmin_baseline = policy.get("token_spend_min_baseline", 4)
+            if len(token_history) >= tmin_baseline:
+                baseline = sum(token_history) / len(token_history)
+                multiplier = policy.get("token_spend_multiplier", 4.0)
+                if baseline > 0 and spend > baseline * multiplier:
+                    alerts.append(_mk_alert(e, "medium", "token_spend_anomaly",
+                        f"{spend:,} tokens in {policy.get('token_spend_window_minutes', 5)} min "
+                        f"vs baseline avg {baseline:,.0f}"))
+            token_history.append(spend)
+            if len(token_history) > 50:
+                token_history.pop(0)
 
         # rate anomaly
         recent_events.append(ts)

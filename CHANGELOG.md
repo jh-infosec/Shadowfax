@@ -1,5 +1,33 @@
 # Changelog
 
+## Version 0.5.0
+
+Two agent-integrity detectors: completion fraud and token-spend anomaly. Both
+are pure functions of an actor's trace and policy -- the deterministic half of
+v0.5. (The LLM investigation assistant is a later v0.5 item.)
+
+### Added
+
+- **Completion-fraud detection.** An agent emits a `completion_claim` event
+  carrying `metric` and `claimed`; the detector counts what the trace actually
+  shows (distinct targets touched, or tool calls) and fires `completion_fraud`
+  when delivery falls short of the claim beyond `completion_claim_tolerance`
+  (default 0.9). Critical when the agent delivered under half of what it
+  claimed, otherwise high. A counting problem, not a judgement -- the exact
+  failure practitioners describe (an agent reporting coverage of 40 targets
+  whose trace holds 4) and one no LLM is needed to catch.
+- **Token-spend anomaly.** Accrues `metadata.tokens` per actor over a rolling
+  window and fires `token_spend_anomaly` when spend exceeds the actor's own
+  baseline by `token_spend_multiplier` -- the same window shape as
+  `rate_anomaly`, reusing its baseline logic.
+- Sample `completion_claim` in the seed (recon-agent-3 claims 40 targets, trace
+  shows 4), visible after `/reset`.
+
+Both categories are deliberately unmapped to ATT&CK: they are agent-integrity
+and cost signals, not adversary techniques. A `completion_claim` is a report,
+not a target access, so it does not count toward lateral movement. Sixteen
+alert categories now.
+
 ## Version 0.4.7
 
 Alert correlation and incident reports (the rest of the roadmap's v0.4).

@@ -103,13 +103,13 @@ it.
 - [ ] AI investigation assistant
 - [ ] Natural language search
 - [ ] Threat summaries
-- [ ] Completion-fraud detector: compare what an agent claimed it did against
-      what its trace shows it did (claimed coverage of forty targets, trace
-      contains eleven). A counting problem, not a judgement call, so it belongs
-      in `detectors.py`. The detector to protect if anything gets cut.
-- [ ] Token-spend anomaly: spend per actor against that actor's own baseline,
-      the same shape as the existing `rate_anomaly` detector and able to reuse
-      its window handling.
+- [x] Completion-fraud detector: `completion_claim` events are checked against
+      the trace's actual coverage; fires `completion_fraud` when delivery falls
+      short of the claim beyond `completion_claim_tolerance`. Shipped in the
+      `v0.5` snapshot.
+- [x] Token-spend anomaly: `token_spend_anomaly` on `metadata.tokens` per actor
+      against the actor's own baseline, same window shape as `rate_anomaly`.
+      Shipped in `v0.5`.
 
 The investigation assistant explains alerts and never creates them. Both
 detectors above are pure functions of the actor's trace and the policy.

@@ -41,7 +41,7 @@ import detectors
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.4.7"
+VERSION = "0.5.0"
 SESSION_TTL_HOURS = 12
 
 # Application startup

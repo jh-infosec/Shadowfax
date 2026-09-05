@@ -39,7 +39,7 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across fourteen alert categories, including AI-agent tool-call analysis
+- Rule-based detection engine across sixteen alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
@@ -50,6 +50,8 @@ investigation and explainability.
 - Agent-trace ingest — flags destructive tool calls and out-of-scope actions by AI agents
 - MITRE ATT&CK mapping — every alert tagged with technique IDs from a shared registry
 - Alert correlation — related alerts grouped into incidents, each with a generated report
+- Completion-fraud detection — flags agents that claim more coverage than their trace shows
+- Token-spend anomaly — flags spend spikes against an actor's own baseline
 - React dashboard with a live alert table
 - Actor timelines, showing alerts attached to the events that produced them
 - Filtering by severity, actor type, category and free-text search
@@ -141,6 +143,8 @@ Planned
 
 ### v0.5
 
+- Completion-fraud detector — shipped (v0.5)
+- Token-spend anomaly — shipped (v0.5)
 - AI Investigation Assistant
 - Natural Language Search
 - Threat Summaries
