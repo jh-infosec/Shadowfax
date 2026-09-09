@@ -182,6 +182,32 @@ incident into a factual markdown report (summary, techniques, timeline) from
 the same data -- no LLM. Incidents are computed on read (`GET /incidents`) from
 the stored alerts, so there is no incidents table.
 
+#### assistant.py
+
+The investigation assistant (v0.5.1) -- the only module that uses an LLM, and
+the only one allowed to. It sits strictly downstream of detection, correlation
+and ATT&CK mapping: `build_alert_brief()` / `build_incident_brief()` assemble a
+compact, deterministic *evidence brief* from facts those modules already
+produced, and `explain()` turns the brief into prose. The model is confined to a
+single verb, **explain**:
+
+- It creates nothing. The explain endpoints (`GET /alerts/{id}/explain`,
+  `GET /incidents/{id}/explain`) are read-only -- no DB write, no `bus.publish`.
+- It decides nothing and has no tools. It is one text-in/text-out call with no
+  function calling, so there is no action it could take even if instructed to.
+- Untrusted input is fenced. Agent-reported fields (tool arguments, targets,
+  completion-claim text) are attacker-controlled; the prompt places them in an
+  `<agent_reported>` block and tells the model to treat them as data only. The
+  real safeguard is the two points above -- a prompt-injected narrative can be
+  wrong, but it cannot make Shadowfax act.
+
+`explain()` never raises: with no `ANTHROPIC_API_KEY` it returns a deterministic
+narrative built from the brief (so the feature and the tests work offline), and
+a failed model call falls back to the same narrative, reporting which path ran
+in the reply's `source`. The call uses the stdlib `urllib` only; model and base
+URL are environment-overridable. The briefs are pure and unit-tested without a
+key.
+
 #### bus.py
 
 An in-process publish/subscribe bus for change notifications. Each open
@@ -315,6 +341,20 @@ that produced them, plus a risk composition bar.
 Raw JSON editing of the live policy. Saving calls `PUT /policy`, which
 rebuilds every alert in the database.
 
+#### src/components/IncidentsDrawer.jsx
+
+The Incidents view: correlated incidents on the left, the selected incident's
+summary, ATT&CK techniques, timeline and copyable markdown report on the right,
+plus an "Explain this incident" threat summary (v0.5.1).
+
+#### src/components/Explanation.jsx + ExplanationModal.jsx
+
+The investigation-assistant UI (v0.5.1). `Explanation` is a shared panel that
+calls an explain endpoint and renders the narrative with a badge stating whether
+a model or the deterministic fallback produced it; `ExplanationModal` wraps it
+for the per-alert "✦ explain" link in the table. Both are read-only views onto
+`assistant.py`.
+
 #### src/styles.css
 
 All styling. CSS custom properties at the top define the palette, including
@@ -423,10 +463,10 @@ The following files are part of the project structure and must be preserved:
 ```
 app.py                  db.py                   detectors.py
 auth.py                 bus.py                  attack.py
-attack_registry.json    correlate.py            seed_data.py
-test_api.py             requirements.txt        architecture.md
-README.md               CHANGELOG.md            ROADMAP.md
-findings-envelope.md    .gitignore
+attack_registry.json    correlate.py            assistant.py
+seed_data.py            test_api.py             requirements.txt
+architecture.md         README.md               CHANGELOG.md
+ROADMAP.md              findings-envelope.md    .gitignore
 
 frontend/index.html                 frontend/package.json
 frontend/vite.config.js             frontend/README.md
@@ -440,4 +480,6 @@ frontend/src/components/ActorDrawer.jsx
 frontend/src/components/PolicyEditor.jsx
 frontend/src/components/Login.jsx
 frontend/src/components/IncidentsDrawer.jsx
+frontend/src/components/Explanation.jsx
+frontend/src/components/ExplanationModal.jsx
 ```

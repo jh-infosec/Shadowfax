@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { SEVERITY_COLOUR } from "../constants.js";
+import Explanation from "./Explanation.jsx";
 import * as api from "../api.js";
 
 export default function IncidentsDrawer({ onClose }) {
@@ -76,6 +77,12 @@ export default function IncidentsDrawer({ onClose }) {
                   {" · "}{detail.duration_minutes} min · risk {detail.risk_score}
                 </div>
                 <p className="incident-summary">{detail.summary}</p>
+
+                <Explanation
+                  key={selectedId}
+                  fetcher={() => api.explainIncident(selectedId)}
+                  label="Explain this incident"
+                />
 
                 {detail.techniques.length > 0 && (
                   <div className="incident-tech">

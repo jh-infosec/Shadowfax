@@ -1,5 +1,49 @@
 # Changelog
 
+## Version 0.5.1
+
+The AI investigation assistant: the first and only place an LLM is used in
+Shadowfax, confined to a single verb -- **explain**. Detection, correlation and
+ATT&CK mapping have already decided the facts deterministically; the assistant
+turns those facts into prose for a human analyst. It creates nothing, decides
+nothing, and has no tools.
+
+### Added
+
+- **`assistant.py`.** Builds a deterministic *evidence brief* from an alert (or
+  a correlated incident) and its actor's events, then asks a model to explain
+  it. `build_alert_brief` / `build_incident_brief` are pure and fully
+  unit-testable with no network. `explain()` never raises: on any model or
+  network error it falls back to a deterministic narrative and records that in
+  the reply's `source`.
+- **Read-only explain endpoints.** `GET /alerts/{id}/explain` and
+  `GET /incidents/{id}/explain` return `{ narrative, source, model, brief }`.
+  They perform no writes and publish no change event -- the assistant explains,
+  it never creates or closes an alert. `GET /assistant/status` reports whether a
+  model is configured so the dashboard can label narratives honestly.
+- **Dashboard.** A "✦ explain" link on every alert row opens a modal with the
+  alert's explanation; the Incidents drawer gains an "Explain this incident"
+  threat summary. A badge states whether each narrative was written by a model
+  or generated deterministically, and a footer restates that the assistant
+  explains rather than decides.
+- **Zero-setup / provider config.** With no `ANTHROPIC_API_KEY` the narratives
+  are generated deterministically, so the feature and the test suite work
+  offline. The model (`SHADOWFAX_LLM_MODEL`) and base URL
+  (`SHADOWFAX_LLM_BASE_URL`) are overridable; the call uses the stdlib only, no
+  new dependency.
+
+### Security
+
+- **Untrusted input is fenced.** Agent-reported fields (tool arguments, targets,
+  completion-claim text) are attacker-controlled, so the prompt labels them as
+  data inside an `<agent_reported>` block and instructs the model to never treat
+  them as instructions. The real safeguard is architectural: the assistant has
+  no tools and the endpoints are read-only, so a prompt-injected narrative can
+  be wrong but cannot make Shadowfax act.
+
+Detection remains entirely deterministic and LLM-free; the assistant sits
+strictly downstream of it.
+
 ## Version 0.5.0
 
 Two agent-integrity detectors: completion fraud and token-spend anomaly. Both

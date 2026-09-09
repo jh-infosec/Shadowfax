@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { SEVERITY_COLOUR, SEVERITY_ORDER } from "../constants.js";
 
-export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAssign, canAct }) {
+export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAssign, onExplain, canAct }) {
   const [sortKey, setSortKey] = useState("timestamp");
   const [sortDir, setSortDir] = useState("desc");
 
@@ -61,6 +61,13 @@ export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAss
             <td className="time-cell">{a.timestamp.replace("T", " ").slice(0, 16)}</td>
             <td className="target-cell">{a.target}</td>
             <td className="msg-cell">
+              <button
+                className="explain-link"
+                title="Explain this alert"
+                onClick={(e) => { e.stopPropagation(); onExplain(a); }}
+              >
+                ✦ explain
+              </button>
               {a.message}
               {a.attack && a.attack.length > 0 && (
                 <span className="attack-badges">

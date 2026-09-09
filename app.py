@@ -32,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import assistant
 import attack
 import auth
 import bus
@@ -41,7 +42,7 @@ import detectors
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 SESSION_TTL_HOURS = 12
 
 # Application startup
@@ -314,6 +315,25 @@ def update_alert_state(alert_id: str, update: AlertStateUpdate,
     return state
 
 
+@app.get("/alerts/{alert_id}/explain")
+def explain_alert(alert_id: str, identity: dict = Depends(require_role("viewer"))):
+    """A natural-language explanation of one alert, for an analyst.
+
+    Read-only: it assembles an evidence brief from the stored alert and its
+    actor's events and asks the investigation assistant to describe it. It
+    creates and changes nothing -- the assistant explains, it never decides.
+    With no model configured the narrative is generated deterministically from
+    the same brief.
+    """
+    with db.get_conn() as conn:
+        alert = db.get_alert(conn, alert_id)
+        if alert is None:
+            raise HTTPException(404, f"no alert with id '{alert_id}'")
+        events = db.get_events_for_actor(conn, alert["actor_id"])
+    brief = assistant.build_alert_brief(alert, events)
+    return assistant.explain(brief)
+
+
 @app.get("/stats")
 def stats(identity: dict = Depends(require_role("viewer"))):
     with db.get_conn() as conn:
@@ -420,6 +440,35 @@ def incident_detail(incident_id: str, identity: dict = Depends(require_role("vie
     by_id = {a["id"]: a for a in alerts}
     members = [by_id[aid] for aid in incident["alert_ids"] if aid in by_id]
     return {**incident, "alerts": members, "report": correlate.render_report(incident, by_id)}
+
+
+@app.get("/incidents/{incident_id}/explain")
+def explain_incident(incident_id: str, identity: dict = Depends(require_role("viewer"))):
+    """A natural-language threat summary of one correlated incident.
+
+    Read-only, like /alerts/{id}/explain: correlation and detection have already
+    decided the facts; the assistant only turns the incident's evidence brief
+    into prose. Falls back to a deterministic narrative when no model is set.
+    """
+    with db.get_conn() as conn:
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        alerts = db.query_alerts(conn, limit=100_000)
+    window = policy.get("correlation_window_minutes", 30)
+    incidents = correlate.correlate(alerts, window)
+    incident = next((i for i in incidents if i["id"] == incident_id), None)
+    if incident is None:
+        raise HTTPException(404, f"no incident with id '{incident_id}'")
+    by_id = {a["id"]: a for a in alerts}
+    members = [by_id[aid] for aid in incident["alert_ids"] if aid in by_id]
+    brief = assistant.build_incident_brief(incident, members)
+    return assistant.explain(brief)
+
+
+@app.get("/assistant/status")
+def assistant_status(identity: dict = Depends(require_role("viewer"))):
+    """Whether explanations come from a model or the deterministic fallback, so
+    the dashboard can label them honestly."""
+    return assistant.status()
 
 
 # Policy endpoints

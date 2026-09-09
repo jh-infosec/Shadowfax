@@ -116,6 +116,22 @@ export function getIncident(id) {
   return request(`/incidents/${encodeURIComponent(id)}`);
 }
 
+// Investigation assistant (v0.5). These are read-only: the assistant explains
+// a finding, it never creates or changes one. `source` in the reply is "llm",
+// "deterministic" (no model configured) or "deterministic_fallback" (a model
+// call was attempted and failed).
+export function explainAlert(id) {
+  return request(`/alerts/${encodeURIComponent(id)}/explain`);
+}
+
+export function explainIncident(id) {
+  return request(`/incidents/${encodeURIComponent(id)}/explain`);
+}
+
+export function getAssistantStatus() {
+  return request("/assistant/status");
+}
+
 export function getPolicy() {
   return request("/policy");
 }

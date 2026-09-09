@@ -100,9 +100,14 @@ it.
 
 ## Version 0.5
 
-- [ ] AI investigation assistant
+- [x] AI investigation assistant. `assistant.py` explains an alert or a
+      correlated incident to an analyst from a deterministic evidence brief;
+      `GET /alerts/{id}/explain` and `GET /incidents/{id}/explain` are read-only.
+      The LLM explains, never creates or decides, and has no tools. Falls back to
+      a deterministic narrative when no API key is set. Shipped in `v0.5.1`.
 - [ ] Natural language search
-- [ ] Threat summaries
+- [x] Threat summaries: the incident explanation is a plain-English threat
+      summary of a correlated burst of alerts. Shipped in `v0.5.1`.
 - [x] Completion-fraud detector: `completion_claim` events are checked against
       the trace's actual coverage; fires `completion_fraud` when delivery falls
       short of the claim beyond `completion_claim_tolerance`. Shipped in the

@@ -5,6 +5,7 @@ import AlertTable from "./components/AlertTable.jsx";
 import ActorDrawer from "./components/ActorDrawer.jsx";
 import PolicyEditor from "./components/PolicyEditor.jsx";
 import IncidentsDrawer from "./components/IncidentsDrawer.jsx";
+import ExplanationModal from "./components/ExplanationModal.jsx";
 import Login from "./components/Login.jsx";
 import { SEVERITIES, ACTOR_TYPES } from "./constants.js";
 import * as api from "./api.js";
@@ -53,6 +54,8 @@ export default function App() {
   const [policyOpen, setPolicyOpen] = useState(false);
   const [policy, setPolicy] = useState(null);
   const [incidentsOpen, setIncidentsOpen] = useState(false);
+  // The alert whose explanation modal is open, or null.
+  const [explainAlert, setExplainAlert] = useState(null);
 
   // Role helpers. admin > analyst > viewer.
   const canAnalyst = user && (user.role === "analyst" || user.role === "admin");
@@ -257,6 +260,7 @@ export default function App() {
               onSelectActor={setSelectedActorId}
               onAcknowledge={acknowledgeAlert}
               onAssign={assignAlertToMe}
+              onExplain={setExplainAlert}
               canAct={canAnalyst}
             />
           </div>
@@ -268,6 +272,10 @@ export default function App() {
       )}
 
       {incidentsOpen && <IncidentsDrawer onClose={() => setIncidentsOpen(false)} />}
+
+      {explainAlert && (
+        <ExplanationModal alert={explainAlert} onClose={() => setExplainAlert(null)} />
+      )}
 
       {policyOpen && policy && (
         <PolicyEditor

@@ -52,6 +52,7 @@ investigation and explainability.
 - Alert correlation — related alerts grouped into incidents, each with a generated report
 - Completion-fraud detection — flags agents that claim more coverage than their trace shows
 - Token-spend anomaly — flags spend spikes against an actor's own baseline
+- AI investigation assistant — explains an alert or incident in plain English for an analyst; it explains, never decides, and works without an API key (deterministic fallback)
 - React dashboard with a live alert table
 - Actor timelines, showing alerts attached to the events that produced them
 - Filtering by severity, actor type, category and free-text search
@@ -102,7 +103,6 @@ Planned
 
 - PostgreSQL
 - Electron desktop client
-- AI-assisted investigations
 
 ---
 
@@ -145,9 +145,9 @@ Planned
 
 - Completion-fraud detector — shipped (v0.5)
 - Token-spend anomaly — shipped (v0.5)
-- AI Investigation Assistant
+- AI Investigation Assistant — shipped (v0.5.1)
+- Threat Summaries — shipped (v0.5.1)
 - Natural Language Search
-- Threat Summaries
 
 ### v1.0
 
@@ -221,6 +221,25 @@ created and a warning is printed — fine for local development, but set real
 credentials and change the password before exposing the API. Hashing is
 stdlib PBKDF2 rather than bcrypt/argon2; that, and the still-single-writer
 SQLite backend, are the reasons Shadowfax remains a local-development tool.
+
+---
+
+## Investigation assistant
+
+The dashboard can explain any alert or incident in plain English: a "✦ explain"
+link on each alert, and an "Explain this incident" threat summary in the
+Incidents view. This is the only part of Shadowfax that uses a language model,
+and it is deliberately confined to explaining. It is handed an evidence brief
+assembled from facts the deterministic engine already produced, and it creates
+nothing, decides nothing and has no tools — the explain endpoints are read-only.
+Fields reported by the monitored agent are treated as untrusted data in the
+prompt, and because the assistant cannot act, a prompt-injected narrative can be
+wrong but can never make Shadowfax do anything.
+
+Set `ANTHROPIC_API_KEY` (optionally `SHADOWFAX_LLM_MODEL`) to have a model write
+the narratives. With no key configured, explanations are generated
+deterministically from the same brief, so the feature works out of the box and
+the test suite needs no network. Each narrative is labelled with its source.
 
 ---
 
