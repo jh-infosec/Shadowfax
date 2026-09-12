@@ -1,5 +1,42 @@
 # Changelog
 
+## Version 0.5.2
+
+Natural-language alert search — the last item in the v0.5 line. The analyst
+types a plain-English request and the assistant *translates* it into a filter
+Shadowfax runs. As with the investigation assistant, the model only translates:
+it never touches alert data, never decides what is suspicious, and every value
+it proposes is validated against Shadowfax's known enums before it can reach a
+query.
+
+### Added
+
+- **`assistant.translate_query()`.** Turns a query like "critical destructive
+  actions by AI agents last week" into `{severity, actor_type, category,
+  actor_id, search, since, until}`. The model returns strict JSON;
+  `validate_filters()` then keeps only recognised severities, actor types and
+  categories, a non-empty actor id / search term, and parseable ISO time bounds
+  — a hallucinated value is simply dropped, so the query that runs is always
+  built from values Shadowfax recognises. Time bounds are parameterised, so the
+  translated filter cannot inject SQL.
+- **`POST /search`.** Read-only: translate, validate, run `query_alerts`, and
+  return `{ query, filters, interpretation, source, count, alerts }`. It selects
+  which existing alerts to show and reports how it read the query; it creates
+  and changes nothing.
+- **Time filtering.** `query_alerts` (and `GET /alerts`) gain optional
+  `since` / `until` ISO bounds, matched against the stored ISO timestamps.
+- **Dashboard.** A plain-English search box above the alert table. Results show
+  with a banner stating how the query was interpreted — the exact filters that
+  ran — and whether a model or the offline keyword parser read it; Clear returns
+  to the live filtered view.
+- **Zero-setup.** With no `ANTHROPIC_API_KEY`, a conservative keyword parser
+  handles the common cases (severities, actor types, category synonyms, relative
+  time windows like "today" / "last week"), so search and its tests work
+  offline.
+
+Detection remains deterministic and LLM-free; natural-language search only
+chooses which already-computed alerts to display.
+
 ## Version 0.5.1
 
 The AI investigation assistant: the first and only place an LLM is used in

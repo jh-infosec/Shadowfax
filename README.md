@@ -53,6 +53,7 @@ investigation and explainability.
 - Completion-fraud detection — flags agents that claim more coverage than their trace shows
 - Token-spend anomaly — flags spend spikes against an actor's own baseline
 - AI investigation assistant — explains an alert or incident in plain English for an analyst; it explains, never decides, and works without an API key (deterministic fallback)
+- Natural-language alert search — ask in plain English; the assistant translates the query into a validated filter and shows how it read it (detection stays deterministic)
 - React dashboard with a live alert table
 - Actor timelines, showing alerts attached to the events that produced them
 - Filtering by severity, actor type, category and free-text search
@@ -147,7 +148,7 @@ Planned
 - Token-spend anomaly — shipped (v0.5)
 - AI Investigation Assistant — shipped (v0.5.1)
 - Threat Summaries — shipped (v0.5.1)
-- Natural Language Search
+- Natural Language Search — shipped (v0.5.2)
 
 ### v1.0
 
@@ -236,10 +237,19 @@ Fields reported by the monitored agent are treated as untrusted data in the
 prompt, and because the assistant cannot act, a prompt-injected narrative can be
 wrong but can never make Shadowfax do anything.
 
+The same assistant powers **natural-language search**: the search box above the
+alert table takes a plain-English request ("critical destructive actions by AI
+agents last week") and the assistant *translates* it into a filter. It only
+translates — every value it proposes is validated against Shadowfax's known
+severities, actor types and categories before the query runs, so a hallucinated
+value is dropped rather than executed, and the banner shows exactly how the
+query was read. Detection and the query itself stay deterministic.
+
 Set `ANTHROPIC_API_KEY` (optionally `SHADOWFAX_LLM_MODEL`) to have a model write
-the narratives. With no key configured, explanations are generated
-deterministically from the same brief, so the feature works out of the box and
-the test suite needs no network. Each narrative is labelled with its source.
+the narratives and translate searches. With no key configured, explanations use
+the deterministic brief and search uses a keyword parser, so both features work
+out of the box and the test suite needs no network. Each result is labelled with
+its source.
 
 ---
 

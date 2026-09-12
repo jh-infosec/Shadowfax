@@ -42,7 +42,7 @@ import detectors
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 SESSION_TTL_HOURS = 12
 
 # Application startup
@@ -161,6 +161,10 @@ class CreateUserRequest(BaseModel):
 
 class CreateApiKeyRequest(BaseModel):
     label: str | None = None
+
+
+class SearchRequest(BaseModel):
+    query: str
 
 
 # Authentication dependencies
@@ -282,11 +286,14 @@ def list_alerts(
     actor_id: str | None = None,
     category: list[str] | None = Query(None),
     search: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
     limit: int = 500,
     identity: dict = Depends(require_role("viewer")),
 ):
     with db.get_conn() as conn:
-        return db.query_alerts(conn, severity, actor_type, actor_id, category, search, limit)
+        return db.query_alerts(conn, severity, actor_type, actor_id, category,
+                               search, since, until, limit)
 
 
 @app.patch("/alerts/{alert_id}/state")
@@ -462,6 +469,31 @@ def explain_incident(incident_id: str, identity: dict = Depends(require_role("vi
     members = [by_id[aid] for aid in incident["alert_ids"] if aid in by_id]
     brief = assistant.build_incident_brief(incident, members)
     return assistant.explain(brief)
+
+
+@app.post("/search")
+def nl_search(req: SearchRequest, identity: dict = Depends(require_role("viewer"))):
+    """Natural-language alert search (v0.5.2). The assistant *translates* the
+    plain-English query into a Shadowfax alert filter; every proposed value is
+    validated against known enums, then the deterministic `query_alerts` runs
+    it. Read-only: it creates nothing and decides nothing -- it only chooses
+    which existing alerts to show, and returns how it read the query so the
+    analyst can see and adjust it."""
+    with db.get_conn() as conn:
+        categories = db.distinct_alert_categories(conn)
+        translated = assistant.translate_query(req.query, categories)
+        f = translated["filters"]
+        alerts = db.query_alerts(
+            conn,
+            severity=f.get("severity"),
+            actor_type=f.get("actor_type"),
+            actor_id=f.get("actor_id"),
+            category=f.get("category"),
+            search=f.get("search"),
+            since=f.get("since"),
+            until=f.get("until"),
+        )
+    return {**translated, "count": len(alerts), "alerts": alerts}
 
 
 @app.get("/assistant/status")

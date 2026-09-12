@@ -378,6 +378,61 @@ carried = " ".join(e.get("detail", "") for e in ib.get("actor_activity", []))
 check("untrusted argument is carried into the brief as data",
       "IGNORE ALL PREVIOUS INSTRUCTIONS" in carried)
 
+print("\n== natural-language search (v0.5.2) ==")
+from datetime import datetime as _dt
+
+# validate_filters is the trust boundary: unknown enum values are dropped, so a
+# hallucinated (or malicious) value can never reach the query.
+junk = assistant.validate_filters(
+    {"severity": ["critical", "sneaky"], "actor_type": ["ai_agent", "robot"],
+     "category": ["destructive_action", "'; DROP TABLE alerts; --"], "search": "x"},
+    ["destructive_action", "lateral_movement"],
+)
+check("validate_filters keeps only known severities", junk["severity"] == ["critical"])
+check("validate_filters keeps only known actor types", junk["actor_type"] == ["ai_agent"])
+check("validate_filters drops unknown/malicious categories", junk["category"] == ["destructive_action"])
+
+# Deterministic (no-key) translation of a plain-English query.
+cats = client.get("/alerts").json()
+known_cats = sorted({a["category"] for a in cats})
+t = assistant.translate_query("critical destructive actions by ai agents", known_cats)
+check("translate_query source is deterministic without a key", t["source"] == "deterministic")
+check("translate reads severity critical", t["filters"].get("severity") == ["critical"])
+check("translate reads actor type ai_agent", "ai_agent" in t["filters"].get("actor_type", []))
+check("translate maps 'destructive' to destructive_action",
+      "destructive_action" in t["filters"].get("category", []))
+
+# Relative time parsing against a fixed 'now' so the assertion is stable.
+tt = assistant.translate_query("alerts from yesterday", known_cats, now=_dt(2026, 8, 11, 12, 0, 0))
+check("translate parses 'yesterday' into a since bound", tt["filters"].get("since", "").startswith("2026-08-10"))
+check("translate parses 'yesterday' into an until bound", tt["filters"].get("until", "").startswith("2026-08-11"))
+
+# The /search endpoint: translate, validate, run, and return the interpretation.
+r = client.post("/search", json={"query": "critical destructive actions by ai agents"})
+check("POST /search returns 200", r.status_code == 200)
+sr = r.json()
+check("search reports how it read the query", isinstance(sr["interpretation"], str) and len(sr["interpretation"]) > 0)
+check("search found matching alerts", sr["count"] > 0)
+check("every search result matches the filters",
+      all(a["severity"] == "critical" and a["category"] == "destructive_action"
+          and a["actor_type"] == "ai_agent" for a in sr["alerts"]))
+
+# Read-only: searching must not change the alert set.
+before_counts = client.get("/stats").json()["alert_counts"]
+client.post("/search", json={"query": "everything"})
+after_counts = client.get("/stats").json()["alert_counts"]
+check("searching creates no alerts (read-only)", before_counts == after_counts)
+
+# Time bounds on the alert query itself.
+early = client.get("/alerts?since=2026-08-01T00:00:00").json()
+check("since bound excludes older alerts", all(a["timestamp"] >= "2026-08-01T00:00:00" for a in early))
+until = client.get("/alerts?until=2026-08-01T00:00:00").json()
+check("until bound excludes newer alerts", all(a["timestamp"] <= "2026-08-01T00:00:00" for a in until))
+
+# Unauthenticated search is rejected.
+check("unauthenticated /search is 401",
+      anon.post("/search", json={"query": "anything"}).status_code == 401)
+
 print("\n== server-sent events ==")
 import bus
 

@@ -208,6 +208,16 @@ in the reply's `source`. The call uses the stdlib `urllib` only; model and base
 URL are environment-overridable. The briefs are pure and unit-tested without a
 key.
 
+`translate_query()` (v0.5.2) powers natural-language search under the same
+boundary. It turns a plain-English query into a Shadowfax alert filter, and
+`validate_filters()` is the trust boundary: whatever the model proposes, only
+recognised severities, actor types and categories, a non-empty actor id /
+search term, and parseable ISO time bounds survive — a hallucinated value is
+dropped, so `POST /search` always runs `query_alerts` with values Shadowfax
+recognises, through parameterised SQL. The model only translates; it never sees
+alert data and never decides what is suspicious. With no key a conservative
+keyword parser handles the common cases, so search works offline.
+
 #### bus.py
 
 An in-process publish/subscribe bus for change notifications. Each open
@@ -355,6 +365,14 @@ a model or the deterministic fallback produced it; `ExplanationModal` wraps it
 for the per-alert "✦ explain" link in the table. Both are read-only views onto
 `assistant.py`.
 
+#### src/components/NLSearch.jsx
+
+Natural-language search (v0.5.2). A plain-English query box above the alert
+table; on submit it calls `POST /search` and the parent renders the returned
+alerts. The banner states the interpretation (the exact filters that ran) and
+whether a model or the keyword parser read the query, with a Clear control back
+to the live filtered view.
+
 #### src/styles.css
 
 All styling. CSS custom properties at the top define the palette, including
@@ -482,4 +500,5 @@ frontend/src/components/Login.jsx
 frontend/src/components/IncidentsDrawer.jsx
 frontend/src/components/Explanation.jsx
 frontend/src/components/ExplanationModal.jsx
+frontend/src/components/NLSearch.jsx
 ```

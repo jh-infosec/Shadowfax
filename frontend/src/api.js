@@ -132,6 +132,13 @@ export function getAssistantStatus() {
   return request("/assistant/status");
 }
 
+// Natural-language alert search (v0.5.2). The assistant translates `query`
+// into a validated filter and returns the matching alerts plus how it read the
+// query: { query, filters, interpretation, source, count, alerts }.
+export function nlSearch(query) {
+  return request("/search", { method: "POST", body: JSON.stringify({ query }) });
+}
+
 export function getPolicy() {
   return request("/policy");
 }

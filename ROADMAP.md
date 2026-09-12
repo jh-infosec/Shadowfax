@@ -105,7 +105,11 @@ it.
       `GET /alerts/{id}/explain` and `GET /incidents/{id}/explain` are read-only.
       The LLM explains, never creates or decides, and has no tools. Falls back to
       a deterministic narrative when no API key is set. Shipped in `v0.5.1`.
-- [ ] Natural language search
+- [x] Natural language search: `assistant.translate_query()` turns a
+      plain-English query into a validated alert filter (`POST /search`); the
+      model only translates, every value is validated against known enums, and
+      detection stays deterministic. Deterministic keyword fallback with no key.
+      Shipped in `v0.5.2`.
 - [x] Threat summaries: the incident explanation is a plain-English threat
       summary of a correlated burst of alerts. Shipped in `v0.5.1`.
 - [x] Completion-fraud detector: `completion_claim` events are checked against

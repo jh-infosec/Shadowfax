@@ -35,8 +35,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta
 from typing import Any
 
 # --- configuration ---------------------------------------------------------
@@ -358,3 +360,269 @@ def explain(brief: dict[str, Any]) -> dict[str, Any]:
             "error": f"{type(exc).__name__}: {exc}",
             "brief": brief,
         }
+
+
+# --- natural-language search (v0.5.2) --------------------------------------
+#
+# The analyst types a plain-English query ("critical destructive actions by AI
+# agents last week"); the model *translates* it into the same structured filter
+# the dashboard's checkboxes produce. The model never touches alert data and
+# never decides what is suspicious -- it only proposes filter values, and every
+# value it proposes is validated against Shadowfax's known enums before it can
+# reach the query. A hallucinated severity or category is simply dropped, so the
+# query that runs is always built from values Shadowfax recognises. With no key,
+# a keyword parser handles the common cases so search works offline too.
+
+VALID_SEVERITIES = ["critical", "high", "medium", "low"]
+VALID_ACTOR_TYPES = ["human", "ai_agent", "service_account"]
+
+# Words an analyst is likely to use, mapped to a canonical alert category. Only
+# categories that actually exist (passed in as `known_categories`) survive
+# validation, so this map can be generous.
+_CATEGORY_SYNONYMS = {
+    "destructive": "destructive_action",
+    "destroy": "destructive_action",
+    "delete": "destructive_action",
+    "out of scope": "out_of_scope_action",
+    "out-of-scope": "out_of_scope_action",
+    "scope": "out_of_scope_action",
+    "brute force": "brute_force_auth",
+    "brute-force": "brute_force_auth",
+    "impossible travel": "impossible_travel",
+    "privilege": "privilege_escalation",
+    "escalation": "privilege_escalation",
+    "lateral": "lateral_movement",
+    "exfil": "exfiltration_volume",
+    "exfiltration": "exfiltration_volume",
+    "canary": "canary_triggered",
+    "honeytoken": "canary_triggered",
+    "honeypot": "canary_triggered",
+    "blocked": "blocked_target_access",
+    "allowlist": "allowlist_violation",
+    "resurrection": "capability_resurrection",
+    "dormant": "dormant_reappearance",
+    "off hours": "off_hours_access",
+    "off-hours": "off_hours_access",
+    "rate": "rate_anomaly",
+    "completion": "completion_fraud",
+    "fraud": "completion_fraud",
+    "token": "token_spend_anomaly",
+    "spend": "token_spend_anomaly",
+}
+
+
+def _as_str_list(v: Any) -> list[str]:
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, list):
+        return [x for x in v if isinstance(x, str)]
+    return []
+
+
+def _coerce_iso(v: Any) -> str | None:
+    """Normalise a date or datetime string to a naive ISO timestamp matching the
+    stored event format, or None. Anything unparseable is dropped."""
+    if not isinstance(v, str) or not v.strip():
+        return None
+    s = v.strip().replace("Z", "")
+    try:
+        return datetime.fromisoformat(s).replace(tzinfo=None).isoformat()
+    except ValueError:
+        try:
+            return datetime.strptime(s[:10], "%Y-%m-%d").isoformat()
+        except ValueError:
+            return None
+
+
+def validate_filters(raw: Any, known_categories: list[str] | None) -> dict[str, Any]:
+    """Keep only values Shadowfax recognises. This is the trust boundary for the
+    translator: whatever the model or the keyword parser proposes, only valid
+    enum members, a non-empty actor id / search string, and parseable ISO time
+    bounds survive to be used in a (parameterised) query."""
+    out: dict[str, Any] = {}
+    if not isinstance(raw, dict):
+        return out
+    known = set(known_categories or [])
+
+    sev = [s.lower() for s in _as_str_list(raw.get("severity")) if s.lower() in VALID_SEVERITIES]
+    if sev:
+        out["severity"] = sorted(set(sev), key=VALID_SEVERITIES.index)
+    at = [a.lower() for a in _as_str_list(raw.get("actor_type")) if a.lower() in VALID_ACTOR_TYPES]
+    if at:
+        out["actor_type"] = sorted(set(at), key=VALID_ACTOR_TYPES.index)
+    cat = [c for c in _as_str_list(raw.get("category")) if c in known]
+    if cat:
+        out["category"] = list(dict.fromkeys(cat))
+
+    aid = raw.get("actor_id")
+    if isinstance(aid, str) and aid.strip():
+        out["actor_id"] = aid.strip()
+    q = raw.get("search")
+    if isinstance(q, str) and q.strip():
+        out["search"] = q.strip()
+    for k in ("since", "until"):
+        iso = _coerce_iso(raw.get(k))
+        if iso:
+            out[k] = iso
+    return out
+
+
+def describe_filters(f: dict[str, Any]) -> str:
+    """A human sentence for exactly the filters that will run, so the dashboard
+    banner always reflects the real query (dropped values never appear)."""
+    if not f:
+        return "no filters recognised — showing everything"
+    parts: list[str] = []
+    if f.get("severity"):
+        parts.append("severity " + "/".join(f["severity"]))
+    if f.get("actor_type"):
+        parts.append("actor type " + "/".join(a.replace("_", " ") for a in f["actor_type"]))
+    if f.get("category"):
+        parts.append("category " + "/".join(f["category"]))
+    if f.get("actor_id"):
+        parts.append(f"actor {f['actor_id']}")
+    if f.get("search"):
+        parts.append(f"text “{f['search']}”")
+    if f.get("since"):
+        parts.append(f"since {f['since'][:16].replace('T', ' ')}")
+    if f.get("until"):
+        parts.append(f"until {f['until'][:16].replace('T', ' ')}")
+    return "; ".join(parts)
+
+
+_SEARCH_SYSTEM_PROMPT = (
+    "You translate a security analyst's plain-English request into a JSON filter "
+    "for Shadowfax's alert list. You do not answer the question, judge anything, "
+    "or return alerts -- you only produce the filter Shadowfax will run.\n\n"
+    "Return a single JSON object, no prose, with any of these optional keys:\n"
+    '- "severity": array from ["critical","high","medium","low"]\n'
+    '- "actor_type": array from ["human","ai_agent","service_account"]\n'
+    '- "category": array of Shadowfax alert categories (use only ones from the '
+    "provided list)\n"
+    '- "actor_id": a specific actor id string, if the request names one\n'
+    '- "search": a free-text substring, only for a literal term to match (a '
+    "target name, a keyword) -- do not put whole sentences here\n"
+    '- "since" / "until": ISO-8601 timestamps bounding the alert time\n\n'
+    "Omit keys you are unsure about rather than guessing. Resolve relative times "
+    '("today", "last week") against the provided current time. Output only the '
+    "JSON object."
+)
+
+
+def _parse_json_object(text: str) -> dict[str, Any]:
+    """Best-effort extraction of the first JSON object from a model reply."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", text).strip()
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else {}
+    except ValueError:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                obj = json.loads(m.group(0))
+                return obj if isinstance(obj, dict) else {}
+            except ValueError:
+                return {}
+        return {}
+
+
+def _keyword_filters(query: str, known_categories: list[str], now: datetime) -> dict[str, Any]:
+    """The no-key fallback: pull the structured bits out of the query by keyword.
+    Deliberately conservative -- it sets only what it clearly recognises and
+    never dumps the whole query into free-text search (which would over-filter).
+    Anything it cannot place is simply left out."""
+    q = query.lower()
+    raw: dict[str, Any] = {}
+
+    raw["severity"] = [s for s in VALID_SEVERITIES if s in q]
+    at: list[str] = []
+    if "ai agent" in q or "ai_agent" in q or "agent" in q:
+        at.append("ai_agent")
+    if "service account" in q or "service_account" in q or "service" in q:
+        at.append("service_account")
+    if re.search(r"\bhuman\b|\buser\b|\bpeople\b", q):
+        at.append("human")
+    raw["actor_type"] = at
+
+    known = set(known_categories or [])
+    cats: list[str] = []
+    for c in known:
+        if c.replace("_", " ") in q:
+            cats.append(c)
+    for phrase, c in _CATEGORY_SYNONYMS.items():
+        if phrase in q and c in known and c not in cats:
+            cats.append(c)
+    raw["category"] = cats
+
+    # Relative time windows -> a `since` bound (and `until` for "yesterday").
+    def iso(dt: datetime) -> str:
+        return dt.replace(microsecond=0).isoformat()
+
+    if "yesterday" in q:
+        start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        raw["since"] = iso(start)
+        raw["until"] = iso(start + timedelta(days=1))
+    elif "today" in q:
+        raw["since"] = iso(now.replace(hour=0, minute=0, second=0, microsecond=0))
+    elif re.search(r"last hour|past hour", q):
+        raw["since"] = iso(now - timedelta(hours=1))
+    elif re.search(r"last 24 hours|last day|past day|past 24 hours", q):
+        raw["since"] = iso(now - timedelta(days=1))
+    elif re.search(r"last week|past week|last 7 days|past 7 days", q):
+        raw["since"] = iso(now - timedelta(days=7))
+    elif re.search(r"last month|past month|last 30 days|past 30 days", q):
+        raw["since"] = iso(now - timedelta(days=30))
+
+    return raw
+
+
+def _build_search_user_prompt(query: str, known_categories: list[str], now: datetime) -> str:
+    return "\n".join([
+        f"Current time (ISO-8601): {now.replace(microsecond=0).isoformat()}",
+        f"Available alert categories: {', '.join(known_categories) or '(none seen yet)'}",
+        "",
+        "Analyst request:",
+        query,
+    ])
+
+
+def translate_query(query: str, known_categories: list[str] | None,
+                    now: datetime | None = None) -> dict[str, Any]:
+    """Turn a plain-English query into a validated Shadowfax alert filter.
+
+    Returns { query, filters, interpretation, source }. `filters` only ever
+    contains values Shadowfax recognises; `interpretation` describes exactly
+    those filters. Never raises: a failed model call falls back to the keyword
+    parser. `source` is "llm", "deterministic" (no key) or
+    "deterministic_fallback" (a model call was attempted and failed)."""
+    now = now or datetime.now()
+    known = known_categories or []
+
+    def _result(raw: dict[str, Any], source: str, error: str | None = None) -> dict[str, Any]:
+        filters = validate_filters(raw, known)
+        out = {
+            "query": query,
+            "filters": filters,
+            "interpretation": describe_filters(filters),
+            "source": source,
+        }
+        if error:
+            out["error"] = error
+        return out
+
+    if not (query and query.strip()):
+        return _result({}, "deterministic" if not llm_configured() else "llm")
+
+    if not llm_configured():
+        return _result(_keyword_filters(query, known, now), "deterministic")
+
+    try:
+        text = _call_model(_SEARCH_SYSTEM_PROMPT,
+                           _build_search_user_prompt(query, known, now))
+        return _result(_parse_json_object(text), "llm")
+    except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError,
+            ValueError, TimeoutError, OSError) as exc:
+        return _result(_keyword_filters(query, known, now), "deterministic_fallback",
+                       error=f"{type(exc).__name__}: {exc}")

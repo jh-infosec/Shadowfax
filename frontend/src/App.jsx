@@ -6,6 +6,7 @@ import ActorDrawer from "./components/ActorDrawer.jsx";
 import PolicyEditor from "./components/PolicyEditor.jsx";
 import IncidentsDrawer from "./components/IncidentsDrawer.jsx";
 import ExplanationModal from "./components/ExplanationModal.jsx";
+import NLSearch from "./components/NLSearch.jsx";
 import Login from "./components/Login.jsx";
 import { SEVERITIES, ACTOR_TYPES } from "./constants.js";
 import * as api from "./api.js";
@@ -56,6 +57,10 @@ export default function App() {
   const [incidentsOpen, setIncidentsOpen] = useState(false);
   // The alert whose explanation modal is open, or null.
   const [explainAlert, setExplainAlert] = useState(null);
+  // Active natural-language search result (snapshot), or null for the normal
+  // filtered list. When set, the table shows these alerts with an interpretation
+  // banner; Clear returns to the live filtered view.
+  const [nlResult, setNlResult] = useState(null);
 
   // Role helpers. admin > analyst > viewer.
   const canAnalyst = user && (user.role === "analyst" || user.role === "admin");
@@ -173,6 +178,7 @@ export default function App() {
 
   const handleReset = async () => {
     await api.resetData();
+    setNlResult(null);
     refresh();
   };
 
@@ -193,6 +199,9 @@ export default function App() {
   // alert id is stable, so the change survives the rescans that rebuild alerts.
   const handleSetAlertState = useCallback(async (alertId, patch) => {
     setAlerts((prev) => prev.map((a) => (a.id === alertId ? { ...a, ...patch } : a)));
+    setNlResult((prev) =>
+      prev ? { ...prev, alerts: prev.alerts.map((a) => (a.id === alertId ? { ...a, ...patch } : a)) } : prev
+    );
     if (actorDetail) {
       setActorDetail((prev) =>
         prev ? { ...prev, alerts: prev.alerts.map((a) => (a.id === alertId ? { ...a, ...patch } : a)) } : prev
@@ -254,9 +263,14 @@ export default function App() {
           onOpenIncidents={() => setIncidentsOpen(true)}
         />
         <div className="main">
+          <NLSearch
+            result={nlResult}
+            onResult={setNlResult}
+            onClear={() => setNlResult(null)}
+          />
           <div className="table-wrap">
             <AlertTable
-              alerts={alerts}
+              alerts={nlResult ? nlResult.alerts : alerts}
               onSelectActor={setSelectedActorId}
               onAcknowledge={acknowledgeAlert}
               onAssign={assignAlertToMe}

@@ -201,6 +201,15 @@ def distinct_actors(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     return [(r["actor_id"], r["actor_type"]) for r in rows]
 
 
+def distinct_alert_categories(conn: sqlite3.Connection) -> list[str]:
+    """The set of alert categories currently present, used to validate a
+    natural-language query's proposed category filters."""
+    rows = conn.execute(
+        "SELECT DISTINCT category FROM alerts ORDER BY category"
+    ).fetchall()
+    return [r["category"] for r in rows]
+
+
 def _row_to_event(r: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": r["id"],
@@ -244,6 +253,8 @@ def query_alerts(
     actor_id: str | None = None,
     category: list[str] | None = None,
     search: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
     limit: int = 500,
 ) -> list[dict[str, Any]]:
     clauses, params = [], []
@@ -263,6 +274,14 @@ def query_alerts(
         clauses.append("(a.actor_id LIKE ? OR a.target LIKE ? OR a.message LIKE ? OR a.category LIKE ?)")
         like = f"%{search}%"
         params += [like, like, like, like]
+    # Time bounds. Timestamps are stored as ISO-8601 strings, so a lexicographic
+    # comparison is also chronological. Bound values are parameterised.
+    if since:
+        clauses.append("a.timestamp >= ?")
+        params.append(since)
+    if until:
+        clauses.append("a.timestamp <= ?")
+        params.append(until)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     # Left join analyst state so acknowledgement and assignment ride along with
     # each alert. State lives in its own table keyed by the deterministic id.
