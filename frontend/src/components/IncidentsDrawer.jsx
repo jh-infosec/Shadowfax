@@ -60,6 +60,7 @@ export default function IncidentsDrawer({ onClose }) {
                 <span className="incident-actor">{i.actor_id}</span>
                 <span className="incident-meta">
                   {i.alert_count} alert{i.alert_count !== 1 ? "s" : ""} · {i.start.slice(5, 16).replace("T", " ")}
+                  {i.chain && i.chain.escalated && <span className="chain-tag">⛓ chain</span>}
                 </span>
               </button>
             ))}
@@ -77,6 +78,36 @@ export default function IncidentsDrawer({ onClose }) {
                   {" · "}{detail.duration_minutes} min · risk {detail.risk_score}
                 </div>
                 <p className="incident-summary">{detail.summary}</p>
+
+                {detail.chain && (
+                  <div className={`kill-chain ${detail.chain.escalated ? "escalated" : ""}`}>
+                    <div className="kill-chain-head">
+                      {detail.chain.escalated ? (
+                        <span className="kill-chain-title">
+                          ⛓ Kill chain — reaches {detail.chain.terminal_tactic}
+                        </span>
+                      ) : (
+                        <span className="kill-chain-title">⛓ Partial attack chain</span>
+                      )}
+                      {detail.chain.escalated && detail.base_severity !== detail.severity && (
+                        <span className="kill-chain-escalation">
+                          escalated {detail.base_severity} → {detail.severity}
+                        </span>
+                      )}
+                    </div>
+                    <div className="kill-chain-stages">
+                      {detail.chain.stages.map((s, idx) => (
+                        <React.Fragment key={s.alert_id}>
+                          {idx > 0 && <span className="kill-chain-arrow">→</span>}
+                          <span className="kill-chain-stage" title={`${s.category} (${s.technique_id})`}>
+                            <span className="kill-chain-tactic">{s.tactic}</span>
+                            <span className="kill-chain-tech">{s.technique_id}</span>
+                          </span>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <Explanation
                   key={selectedId}

@@ -171,6 +171,14 @@ def build_incident_brief(incident: dict[str, Any], alerts: list[dict[str, Any]])
             for t in (incident.get("techniques") or [])
         ],
         "correlation_summary": incident.get("summary"),
+        "attack_chain": (
+            {
+                "stages": [s["tactic"] for s in incident["chain"]["stages"]],
+                "escalated": incident["chain"]["escalated"],
+                "terminal_tactic": incident["chain"].get("terminal_tactic"),
+            }
+            if incident.get("chain") else None
+        ),
         "findings": findings[:_MAX_EVIDENCE_EVENTS],
     }
 
@@ -298,6 +306,18 @@ def _deterministic_narrative(brief: dict[str, Any]) -> str:
         if brief.get("attack"):
             ids = ", ".join(f"{t['id']} ({t['name']})" for t in brief["attack"])
             lines.append(f"Mapped ATT&CK techniques: {ids}.")
+        chain = brief.get("attack_chain")
+        if chain:
+            arrow = " → ".join(chain["stages"])
+            if chain.get("escalated"):
+                lines.append(
+                    f"Kill chain (escalated to critical): {arrow}. The activity "
+                    f"advances in order through the ATT&CK kill chain and reaches "
+                    f"{chain.get('terminal_tactic')}, so these alerts are one "
+                    f"attack, not unrelated noise."
+                )
+            else:
+                lines.append(f"Partial attack chain: {arrow}.")
         worst = [f for f in brief.get("findings", []) if f.get("severity") in ("critical", "high")]
         if worst:
             lines.append("Most serious findings:")

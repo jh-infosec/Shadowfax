@@ -1,5 +1,42 @@
 # Changelog
 
+## Version 0.6.0
+
+Attack-chain correlation. Correlation grouped an actor's alerts by time; now it
+also asks whether they *advance through the kill chain in order*. A single
+mid-severity alert rarely tells the story — an attacker gains access, escalates,
+moves laterally, then exfiltrates or destroys. Shadowfax now recognises that
+progression and escalates the incident, the "combo move" a lone alert never
+shows.
+
+### Added
+
+- **Kill-chain detection in `correlate.py`.** For each incident, the longest
+  run of its alerts whose ATT&CK tactics step *forward* through the canonical
+  MITRE tactic order (`attack.TACTIC_ORDER`) is found as a strictly-increasing
+  subsequence over the time-ordered alerts. Pure and deterministic, like the
+  detectors — no LLM decides this. Each incident now carries a `chain`
+  (`stages`, `length`, `terminal_tactic`, `escalated`) plus a `base_severity`.
+- **Escalation.** A chain of at least `attack_chain_min_stages` tactics (default
+  3) that reaches a *terminal* tactic — lateral movement, collection, C2,
+  exfiltration or impact — escalates the incident to **critical**, so a burst of
+  individually-high alerts that together complete an attack surfaces at the top.
+  `base_severity` keeps the un-escalated verdict for transparency.
+- **`attack.py` kill-chain ordering.** `TACTIC_ORDER`, `TACTIC` ranking
+  (`tactic_rank`), and `TERMINAL_TACTICS` / `is_terminal_tactic`, derived from
+  MITRE ATT&CK Enterprise.
+- **Dashboard.** The Incidents view shows the chain as an ordered
+  tactic → tactic flow, an "escalated high → critical" marker when a chain lifts
+  the verdict, and a ⛓ badge on escalated incidents in the list. The incident
+  report gains an "Attack chain" section, and the investigation assistant's
+  brief includes the chain so explanations can name it.
+- **Seed.** `apt-agent-9` walks a clean four-stage kill chain — privilege
+  escalation → credential access → lateral movement → exfiltration — in one
+  window; its incident escalates from high to critical. Visible after `/reset`.
+
+Detection stays deterministic and unchanged; chain detection is a pure function
+of the already-computed alerts and the policy, layered on top of correlation.
+
 ## Version 0.5.2
 
 Natural-language alert search — the last item in the v0.5 line. The analyst

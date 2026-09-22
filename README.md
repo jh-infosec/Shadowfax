@@ -50,6 +50,7 @@ investigation and explainability.
 - Agent-trace ingest — flags destructive tool calls and out-of-scope actions by AI agents
 - MITRE ATT&CK mapping — every alert tagged with technique IDs from a shared registry
 - Alert correlation — related alerts grouped into incidents, each with a generated report
+- Attack-chain detection — incidents whose alerts advance through the ATT&CK kill chain in order are flagged, and completed chains escalate to critical
 - Completion-fraud detection — flags agents that claim more coverage than their trace shows
 - Token-spend anomaly — flags spend spikes against an actor's own baseline
 - AI investigation assistant — explains an alert or incident in plain English for an analyst; it explains, never decides, and works without an API key (deterministic fallback)
@@ -135,6 +136,10 @@ Planned
 - MITRE ATT&CK Mapping — shipped (v0.4.6)
 - Correlation Engine — shipped (v0.4.7)
 - Incident Reports — shipped (v0.4.7)
+
+### v0.6
+
+- Attack-Chain Correlation — shipped (v0.6.0)
 
 ### v0.4.5 — shipped
 

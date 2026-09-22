@@ -127,8 +127,14 @@ detectors above are pure functions of the actor's trace and the policy.
 
 ## Version 0.6
 
-Evidence integrity and ingest.
+Attack-chain correlation, then evidence integrity and ingest.
 
+- [x] Attack-chain (kill-chain) correlation: an incident whose alerts advance in
+      order through the MITRE ATT&CK tactics is flagged as a chain and, when it
+      reaches a terminal tactic (lateral movement, collection, C2, exfiltration,
+      impact), escalated to critical. Deterministic — the longest
+      strictly-increasing tactic-rank subsequence of the incident's alerts, in
+      `correlate.py`; threshold `attack_chain_min_stages`. Shipped in `v0.6.0`.
 - [ ] Tamper-evident append-only event log: hash-chained entries, so the event
       store can be shown not to have been edited after the fact. This is what
       turns the alert history into something an auditor or assessor will accept.

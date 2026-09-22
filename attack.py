@@ -78,6 +78,51 @@ def registry() -> dict[str, dict[str, str]]:
     return dict(_REGISTRY)
 
 
+# Kill-chain ordering (v0.6). The MITRE ATT&CK Enterprise tactics in their
+# canonical progression, earliest first. An attacker (or a rogue agent) tends to
+# move *forward* through these -- gain access, escalate, move laterally, then
+# exfiltrate or destroy -- so a run of one actor's alerts whose tactics advance
+# in this order is a kill chain, not just a coincidental burst. `correlate.py`
+# uses this to detect and escalate chains. Ranks are the list index; a tactic not
+# listed (or an alert with no technique) has no rank and does not sit on the
+# chain.
+TACTIC_ORDER: list[str] = [
+    "Reconnaissance",
+    "Resource Development",
+    "Initial Access",
+    "Execution",
+    "Persistence",
+    "Privilege Escalation",
+    "Defense Evasion",
+    "Credential Access",
+    "Discovery",
+    "Lateral Movement",
+    "Collection",
+    "Command and Control",
+    "Exfiltration",
+    "Impact",
+]
+
+_TACTIC_RANK = {name: i for i, name in enumerate(TACTIC_ORDER)}
+
+# The late-stage tactics that make a chain an emergency: reaching one of these
+# from an earlier stage is the actor achieving its objective (spread, steal,
+# wreck).
+TERMINAL_TACTICS: frozenset[str] = frozenset(
+    {"Lateral Movement", "Collection", "Command and Control", "Exfiltration", "Impact"}
+)
+
+
+def tactic_rank(tactic: str) -> int | None:
+    """Position of a tactic in the kill chain, or None if it isn't a ranked
+    tactic. Lower comes earlier."""
+    return _TACTIC_RANK.get(tactic)
+
+
+def is_terminal_tactic(tactic: str) -> bool:
+    return tactic in TERMINAL_TACTICS
+
+
 def validate(policy: dict[str, Any] | None = None) -> list[str]:
     """Return any technique ids referenced by the category mapping or the given
     policy's destructive-action rules that are missing from the registry. Empty

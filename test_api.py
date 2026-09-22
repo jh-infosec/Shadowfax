@@ -54,14 +54,14 @@ r = client.get("/stats")
 check("GET /stats returns 200", r.status_code == 200)
 stats = r.json()
 print("  stats:", stats)
-check("seed data loaded (28 events)", stats["event_count"] == 28)
+check("seed data loaded (39 events)", stats["event_count"] == 39)
 check("critical alerts present from seed scenario", stats["alert_counts"]["critical"] >= 5)
 
 print("\n== actors ==")
 r = client.get("/actors")
 actors = r.json()
 check("GET /actors returns 200", r.status_code == 200)
-check("4 actors present", len(actors) == 4)
+check("5 actors present", len(actors) == 5)
 top_actor = actors[0]
 print("  top risk actor:", top_actor["actor_id"], "score:", top_actor["risk_score"])
 check("actors sorted by risk descending", actors[0]["risk_score"] >= actors[-1]["risk_score"])
@@ -273,6 +273,46 @@ check("incident report is markdown with a timeline",
       "## Timeline" in detail["report"] and f"Incident {inc['id']}" in detail["report"])
 check("unknown incident id 404s", client.get("/incidents/deadbeefdeadbeef").status_code == 404)
 
+print("\n== attack chain (v0.6) ==")
+import correlate as _correlate
+
+# Earlier tests mutate the policy; reset to the bundled seed so the full
+# apt-agent-9 kill chain (privilege escalation -> credential access -> lateral
+# movement -> exfiltration) is present and deterministic.
+client.post("/reset")
+incidents = client.get("/incidents").json()
+recon = [i for i in incidents if i["actor_id"] == "recon-agent-3"]
+
+chain_incs = [i for i in incidents if i["actor_id"] == "apt-agent-9"]
+check("apt-agent-9's alerts form a single incident", len(chain_incs) == 1)
+ci = chain_incs[0]
+check("the incident carries an attack chain", ci.get("chain") is not None)
+check("the chain is escalated (reaches a terminal tactic)", ci["chain"]["escalated"] is True)
+check("escalation lifted the base severity to critical",
+      ci["base_severity"] == "high" and ci["severity"] == "critical")
+stages = [s["tactic"] for s in ci["chain"]["stages"]]
+check("the chain advances in kill-chain order",
+      stages == ["Privilege Escalation", "Credential Access", "Lateral Movement", "Exfiltration"])
+check("the chain's terminal tactic is Exfiltration", ci["chain"]["terminal_tactic"] == "Exfiltration")
+
+# The report spells out the chain.
+rep = client.get(f"/incidents/{ci['id']}").json()["report"]
+check("the incident report includes the attack chain", "## Attack chain" in rep)
+
+# A burst that does not advance in order is not flagged as an escalated chain.
+check("recon-agent-3 is not an escalated kill chain",
+      not ((recon[0].get("chain") or {}).get("escalated")))
+
+# The threshold is policy-driven: requiring more stages than the chain has drops it.
+apt_alerts = client.get("/alerts", params={"actor_id": "apt-agent-9"}).json()
+strict = _correlate.correlate(apt_alerts, 30, chain_min_stages=5)
+check("raising attack_chain_min_stages past the chain length drops the chain",
+      all(i.get("chain") is None for i in strict))
+# And it is deterministic: same input, same chain.
+again = _correlate.correlate(apt_alerts, 30, chain_min_stages=3)
+check("chain detection is deterministic",
+      [s["tactic"] for s in again[0]["chain"]["stages"]] == stages)
+
 print("\n== completion fraud + token spend (v0.5) ==")
 cf = client.get("/alerts", params={"category": ["completion_fraud"]}).json()
 check("completion_fraud fires on the seed over-claim", bool(cf))
@@ -452,6 +492,6 @@ print("\n== reset ==")
 r = client.post("/reset")
 check("POST /reset returns 200", r.status_code == 200)
 r = client.get("/stats")
-check("reset restores 28 seed events", r.json()["event_count"] == 28)
+check("reset restores 39 seed events", r.json()["event_count"] == 39)
 
 print("\nAll checks passed.")

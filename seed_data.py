@@ -35,6 +35,23 @@ SAMPLE_EVENTS = [
     # Completion claim (v0.5): the agent reports scanning 40 targets, but its
     # trace touched only a handful -- completion fraud.
     {"timestamp": "2026-08-10T10:12:00", "actor_id": "recon-agent-3", "actor_type": "ai_agent", "task": "engagement_alpha", "event_type": "completion_claim", "target": "engagement_alpha", "metadata": {"metric": "distinct_targets", "claimed": 40, "summary": "scanned 40 in-scope targets, no issues found"}},
+
+    # Attack chain (v0.6): a compromised agent that advances *in order* through
+    # the kill chain within one window -- privilege escalation -> credential
+    # access -> lateral movement -> exfiltration. Each alert alone is high at
+    # most; together they complete an attack, so the incident escalates to
+    # critical.
+    {"timestamp": "2026-08-14T09:00:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "privilege_change", "target": "apt_workstation", "metadata": {"new_level": "root", "elevated": True, "approved": False}},
+    {"timestamp": "2026-08-14T09:02:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "auth_failure", "target": "corp_vpn", "metadata": {}},
+    {"timestamp": "2026-08-14T09:03:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "auth_failure", "target": "corp_vpn", "metadata": {}},
+    {"timestamp": "2026-08-14T09:04:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "auth_failure", "target": "corp_vpn", "metadata": {}},
+    {"timestamp": "2026-08-14T09:05:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "auth_failure", "target": "corp_vpn", "metadata": {}},
+    {"timestamp": "2026-08-14T09:06:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "file_access", "target": "finance_db_a", "metadata": {}},
+    {"timestamp": "2026-08-14T09:07:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "file_access", "target": "finance_db_b", "metadata": {}},
+    {"timestamp": "2026-08-14T09:08:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "file_access", "target": "hr_db_c", "metadata": {}},
+    {"timestamp": "2026-08-14T09:09:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "file_access", "target": "hr_db_d", "metadata": {}},
+    {"timestamp": "2026-08-14T09:10:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "file_access", "target": "backup_store_e", "metadata": {}},
+    {"timestamp": "2026-08-14T09:12:00", "actor_id": "apt-agent-9", "actor_type": "ai_agent", "event_type": "data_transfer", "target": "internal_staging_bucket", "metadata": {"bytes_transferred": 500000000}},
 ]
 
 DEFAULT_POLICY = {
@@ -60,6 +77,11 @@ DEFAULT_POLICY = {
     # Alerts for one actor within this many minutes of each other correlate into
     # a single incident.
     "correlation_window_minutes": 30,
+    # Attack chain (v0.6): an incident whose alerts advance through at least this
+    # many ordered ATT&CK tactics is flagged as a kill chain; one that reaches a
+    # terminal tactic (lateral movement, collection, C2, exfiltration, impact)
+    # escalates the incident to critical.
+    "attack_chain_min_stages": 3,
     # Agent-trace detection (v0.4.5). Each rule matches case-insensitive
     # substrings against a tool call's tool + arguments + target; the first
     # matching rule fires one destructive_action alert.

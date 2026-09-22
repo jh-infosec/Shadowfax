@@ -170,17 +170,29 @@ dropping any id the registry doesn't know (so a typo is a missing badge, not an
 invented technique). Destructive-action alerts get their technique from the
 matched policy rule rather than the category map, since `rm -rf` and a database
 drop differ. Each alert carries an `attack` array; `_mk_alert` fills it.
+`TACTIC_ORDER` (v0.6) is the canonical MITRE ATT&CK Enterprise tactic
+progression; `tactic_rank()` and `TERMINAL_TACTICS` let correlation see whether
+an incident advances *forward* through the kill chain.
 
 #### correlate.py
 
-Alert correlation. `correlate()` groups an actor's alerts into **incidents** by
-temporal proximity -- a new incident begins when the gap to the previous alert
-exceeds `policy.correlation_window_minutes`. It is a pure function of
-`(alerts, window)`, deterministic like the detectors, and unions each cluster's
-categories, ATT&CK techniques and severities. `render_report()` turns an
-incident into a factual markdown report (summary, techniques, timeline) from
-the same data -- no LLM. Incidents are computed on read (`GET /incidents`) from
-the stored alerts, so there is no incidents table.
+Alert correlation and attack-chain detection. `correlate()` groups an actor's
+alerts into **incidents** by temporal proximity -- a new incident begins when
+the gap to the previous alert exceeds `policy.correlation_window_minutes`. It is
+a pure function of `(alerts, window, chain_min_stages)`, deterministic like the
+detectors, and unions each cluster's categories, ATT&CK techniques and
+severities.
+
+On top of grouping, `_detect_chain()` (v0.6) finds the **kill chain** inside an
+incident: place each alert at its earliest ATT&CK tactic, then take the longest
+strictly-increasing-by-tactic-rank subsequence of the time-ordered alerts. A
+chain of at least `attack_chain_min_stages` tactics that reaches a terminal
+tactic (lateral movement, collection, C2, exfiltration, impact) escalates the
+incident to critical (`base_severity` preserves the un-escalated verdict). Still
+pure and LLM-free -- a function of the already-computed alerts and the policy.
+`render_report()` turns an incident into a factual markdown report (summary,
+techniques, attack chain, timeline). Incidents are computed on read
+(`GET /incidents`) from the stored alerts, so there is no incidents table.
 
 #### assistant.py
 

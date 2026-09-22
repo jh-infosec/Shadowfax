@@ -42,7 +42,7 @@ import detectors
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.5.2"
+VERSION = "0.6.0"
 SESSION_TTL_HOURS = 12
 
 # Application startup
@@ -431,7 +431,8 @@ def list_incidents(identity: dict = Depends(require_role("viewer"))):
         policy = db.get_policy(conn) or DEFAULT_POLICY
         alerts = db.query_alerts(conn, limit=100_000)
     window = policy.get("correlation_window_minutes", 30)
-    return correlate.correlate(alerts, window)
+    chain_min = policy.get("attack_chain_min_stages", 3)
+    return correlate.correlate(alerts, window, chain_min)
 
 
 @app.get("/incidents/{incident_id}")
@@ -440,7 +441,8 @@ def incident_detail(incident_id: str, identity: dict = Depends(require_role("vie
         policy = db.get_policy(conn) or DEFAULT_POLICY
         alerts = db.query_alerts(conn, limit=100_000)
     window = policy.get("correlation_window_minutes", 30)
-    incidents = correlate.correlate(alerts, window)
+    chain_min = policy.get("attack_chain_min_stages", 3)
+    incidents = correlate.correlate(alerts, window, chain_min)
     incident = next((i for i in incidents if i["id"] == incident_id), None)
     if incident is None:
         raise HTTPException(404, f"no incident with id '{incident_id}'")
@@ -461,7 +463,8 @@ def explain_incident(incident_id: str, identity: dict = Depends(require_role("vi
         policy = db.get_policy(conn) or DEFAULT_POLICY
         alerts = db.query_alerts(conn, limit=100_000)
     window = policy.get("correlation_window_minutes", 30)
-    incidents = correlate.correlate(alerts, window)
+    chain_min = policy.get("attack_chain_min_stages", 3)
+    incidents = correlate.correlate(alerts, window, chain_min)
     incident = next((i for i in incidents if i["id"] == incident_id), None)
     if incident is None:
         raise HTTPException(404, f"no incident with id '{incident_id}'")

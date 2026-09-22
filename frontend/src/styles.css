@@ -336,3 +336,35 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   margin-left: auto; font-family: var(--mono); font-size: 10px;
   text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted-2);
 }
+
+/* --- Attack-chain / kill chain (v0.6) --- */
+.chain-tag {
+  margin-left: 6px; font-family: var(--mono); font-size: 9.5px;
+  color: var(--crit); border: 1px solid var(--crit-dim); border-radius: 3px;
+  padding: 0 4px; white-space: nowrap;
+}
+.kill-chain {
+  margin: 14px 0; padding: 12px 14px; border-radius: 6px;
+  background: var(--panel-2); border: 1px solid var(--border);
+}
+.kill-chain.escalated { border-color: var(--crit); background: var(--crit-dim); }
+.kill-chain-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 10px; flex-wrap: wrap;
+}
+.kill-chain-title { font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text); }
+.kill-chain.escalated .kill-chain-title { color: var(--crit); }
+.kill-chain-escalation {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.03em; color: var(--crit);
+  border: 1px solid var(--crit); border-radius: 4px; padding: 2px 7px;
+}
+.kill-chain-stages { display: flex; align-items: stretch; flex-wrap: wrap; gap: 6px; }
+.kill-chain-stage {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 10px; border-radius: 5px;
+  background: var(--panel); border: 1px solid var(--border);
+}
+.kill-chain-tactic { font-size: 11.5px; font-weight: 600; color: var(--text); }
+.kill-chain-tech { font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
+.kill-chain-arrow { align-self: center; color: var(--muted-2); font-size: 14px; }
