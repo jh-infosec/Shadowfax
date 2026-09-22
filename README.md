@@ -59,6 +59,7 @@ investigation and explainability.
 - Actor timelines, showing alerts attached to the events that produced them
 - Filtering by severity, actor type, category and free-text search
 - Policy editing from the dashboard
+- Command-line interface — ingest, query, explain and gate on alerts from a shell; `--json` everywhere for agents
 - Automated API testing
 
 ---
@@ -137,10 +138,6 @@ Planned
 - Correlation Engine — shipped (v0.4.7)
 - Incident Reports — shipped (v0.4.7)
 
-### v0.6
-
-- Attack-Chain Correlation — shipped (v0.6.0)
-
 ### v0.4.5 — shipped
 
 - Agent-trace ingest (`tool_call` events)
@@ -154,6 +151,14 @@ Planned
 - AI Investigation Assistant — shipped (v0.5.1)
 - Threat Summaries — shipped (v0.5.1)
 - Natural Language Search — shipped (v0.5.2)
+
+### v0.6
+
+- Attack-Chain Correlation — shipped (v0.6.0)
+
+### v0.7
+
+- Command-Line Interface — shipped (v0.7.0)
 
 ### v1.0
 
@@ -209,6 +214,33 @@ python test_api.py
 ```
 
 The dashboard has no automated tests yet.
+
+---
+
+## Command line
+
+The CLI talks to the same HTTP API as the dashboard, so authentication and roles
+apply identically — it is a convenience, never a way around the security model.
+
+```bash
+python cli.py login -u admin            # stores a token in ~/.shadowfax/config.json
+python cli.py status
+python cli.py alerts --severity critical
+python cli.py incidents --json
+python cli.py explain incident <id>
+python cli.py search "critical destructive actions by ai agents"
+cat trace.json | python cli.py ingest -  # a harness emitting its own trace
+```
+
+Every command takes `--json` for machine consumption. Exit codes are meaningful
+(`0` ok, `1` failure, `2` usage, `3` auth, `4` unreachable), and `check` exits
+non-zero when alerts match — so an agent harness can gate its own run:
+
+```bash
+python cli.py check --severity critical || echo "agent tripped a detector"
+```
+
+Point it elsewhere with `--url`, `SHADOWFAX_URL`, or the stored config.
 
 ---
 

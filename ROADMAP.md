@@ -148,6 +148,17 @@ Attack-chain correlation, then evidence integrity and ingest.
 
 ---
 
+## Version 0.7
+
+- [x] Command-line interface: `cli.py`, stdlib-only, over the HTTP API (never
+      the database, so auth and RBAC still apply). `--json` everywhere and
+      meaningful exit codes; `shadowfax check` exits non-zero when alerts match,
+      so a harness can gate its own run. Shipped in `v0.7.0`.
+- [ ] Triage digest: the assistant ranks open incidents into a "these N need
+      you" summary, optionally on a schedule. Explains and ranks; never decides.
+
+---
+
 ## Version 1.0
 
 - [ ] Electron desktop application

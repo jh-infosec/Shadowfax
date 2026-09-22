@@ -230,6 +230,30 @@ recognises, through parameterised SQL. The model only translates; it never sees
 alert data and never decides what is suspicious. With no key a conservative
 keyword parser handles the common cases, so search works offline.
 
+#### cli.py
+
+The command-line interface (v0.7). A single stdlib-only file (argparse +
+urllib) exposing `status`, `login`, `ingest`, `alerts`, `check`, `incidents`,
+`explain`, `search`, `actors`, `stats` and `policy`.
+
+It is a **client of the HTTP API, not of the database** -- deliberately. Reading
+SQLite directly would be faster and would also quietly bypass authentication,
+roles and every policy check; a convenience tool must not become a way around
+the security model of a security tool. So the CLI carries a bearer token or an
+API key and is subject to exactly the same rules as the dashboard.
+
+It is built to be driven by scripts and agents: `--json` on every command (and
+on either side of the subcommand), diagnostics on stderr, and meaningful exit
+codes (`0` ok, `1` failure/match, `2` usage, `3` auth, `4` unreachable).
+`check` inverts the usual sense and exits non-zero *when alerts match*, so a
+harness can gate its own run on whether its behaviour tripped a detector.
+Settings resolve flag > environment > `~/.shadowfax/config.json` (written
+`0600`, since it holds a session token) > default.
+
+The HTTP layer sits behind a single injectable `transport`, so the test suite
+drives the real command paths against the API's own test client with no live
+server.
+
 #### bus.py
 
 An in-process publish/subscribe bus for change notifications. Each open
@@ -495,7 +519,8 @@ app.py                  db.py                   detectors.py
 auth.py                 bus.py                  attack.py
 attack_registry.json    correlate.py            assistant.py
 seed_data.py            test_api.py             requirements.txt
-architecture.md         README.md               CHANGELOG.md
+cli.py                  architecture.md         README.md
+CHANGELOG.md
 ROADMAP.md              findings-envelope.md    .gitignore
 
 frontend/index.html                 frontend/package.json

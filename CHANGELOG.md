@@ -1,5 +1,36 @@
 # Changelog
 
+## Version 0.7.0
+
+A command-line interface. Shadowfax watches AI agents, and agents are most at
+home in a terminal — they reach for tools they can invoke and output they can
+parse. Everything the dashboard does is now reachable from a shell, which also
+makes Shadowfax something a harness can wire itself into.
+
+### Added
+
+- **`cli.py`** — a single-file, stdlib-only CLI (argparse + urllib, no new
+  dependency): `status`, `login`, `ingest`, `alerts`, `check`, `incidents`,
+  `explain`, `search`, `actors`, `stats`, `policy`.
+- **It goes through the HTTP API, never the database.** The CLI is just another
+  client, so authentication, roles and every policy check apply exactly as they
+  do to the dashboard. A convenience tool must not become a way around the
+  security model of a security tool.
+- **Built to be scripted.** `--json` on every command (and on either side of the
+  subcommand), errors to stderr, and meaningful exit codes: `0` success, `1`
+  failure, `2` usage, `3` auth, `4` unreachable.
+- **`shadowfax check` is a CI gate.** It exits non-zero when alerts match its
+  filters, so a harness or pipeline can fail a run the moment the agent's own
+  behaviour trips a detector:
+  `shadowfax check --severity critical || exit 1`.
+- **`shadowfax ingest -`** reads events as JSON from a file or stdin — the
+  integration point for a harness emitting its own trace.
+- **Config follows the same convention**: `~/.shadowfax/config.json` (written
+  `0600` because it holds a session token), overridable by `SHADOWFAX_URL`,
+  `SHADOWFAX_TOKEN`, `SHADOWFAX_API_KEY`, `SHADOWFAX_CONFIG` or a flag.
+- The transport is injectable, so the test suite drives the real command paths
+  against the API's own test client — end-to-end coverage with no live server.
+
 ## Version 0.6.0
 
 Attack-chain correlation. Correlation grouped an actor's alerts by time; now it

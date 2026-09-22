@@ -473,6 +473,103 @@ check("until bound excludes newer alerts", all(a["timestamp"] <= "2026-08-01T00:
 check("unauthenticated /search is 401",
       anon.post("/search", json={"query": "anything"}).status_code == 401)
 
+print("\n== command-line interface (v0.7) ==")
+import io as _io
+import json
+import cli as _cli
+
+class _TestClientTransport:
+    """Drives the CLI against the API's own test client -- the real command
+    paths, no live server."""
+    def __init__(self, tc):
+        self.tc = tc
+    def request(self, method, path, params=None, body=None, headers=None):
+        r = self.tc.request(method, path, params=params, json=body, headers=headers or {})
+        try:
+            return r.status_code, (r.json() if r.content else None)
+        except ValueError:
+            return r.status_code, {"detail": r.text}
+
+_anon_tp = _TestClientTransport(TestClient(app))
+_tp = _TestClientTransport(client)          # admin-authenticated client
+
+def run_cli(argv, transport=_tp):
+    """Run the CLI, returning (exit_code, stdout, stderr)."""
+    o, e = _io.StringIO(), _io.StringIO()
+    # The CLI reads credentials from config/env; the transport already carries
+    # the admin session, so pass an explicit token to exercise the auth path.
+    code = _cli.run(argv, transport=transport, out=o, err=e)
+    return code, o.getvalue(), e.getvalue()
+
+code, sout, _ = run_cli(["stats", "--json"])
+check("CLI `stats --json` exits 0", code == 0)
+check("CLI `stats --json` emits parseable JSON", json.loads(sout)["event_count"] > 0)
+
+code, sout, _ = run_cli(["alerts", "--severity", "critical", "--json"])
+check("CLI `alerts --severity critical` exits 0", code == 0)
+crit = json.loads(sout)
+check("CLI alert filtering reaches the API",
+      len(crit) > 0 and all(a["severity"] == "critical" for a in crit))
+
+code, sout, _ = run_cli(["alerts", "--severity", "critical"])
+check("CLI renders a human table by default",
+      "SEVERITY" in sout and "CATEGORY" in sout)
+
+# `check` is the CI gate: non-zero when something matched, zero when nothing did.
+code, _, _ = run_cli(["check", "--severity", "critical"])
+check("CLI `check` exits 1 when alerts match", code == 1)
+code, _, _ = run_cli(["check", "--actor", "no-such-actor-at-all"])
+check("CLI `check` exits 0 when nothing matches", code == 0)
+
+code, sout, _ = run_cli(["incidents", "--json"])
+check("CLI `incidents --json` exits 0", code == 0)
+_incs = json.loads(sout)
+check("CLI lists incidents", len(_incs) > 0)
+_chained = [i for i in _incs if (i.get("chain") or {}).get("escalated")]
+check("CLI surfaces escalated attack chains", len(_chained) > 0)
+
+code, sout, _ = run_cli(["incidents", _incs[0]["id"], "--report"])
+check("CLI `incidents <id> --report` prints markdown",
+      code == 0 and "## Timeline" in sout)
+
+code, sout, _ = run_cli(["explain", "incident", _incs[0]["id"], "--json"])
+check("CLI `explain incident` exits 0", code == 0)
+check("CLI explain returns a narrative", len(json.loads(sout)["narrative"]) > 0)
+
+code, sout, _ = run_cli(["search", "critical destructive actions by ai agents", "--json"])
+check("CLI `search` exits 0", code == 0)
+check("CLI search reports its interpretation",
+      "interpretation" in json.loads(sout))
+
+# Ingest from stdin -- the integration point for a harness emitting its trace.
+import sys as _sys
+_ev = [{"timestamp": "2026-09-06T08:00:00", "actor_id": "cli-agent",
+        "actor_type": "ai_agent", "event_type": "tool_call", "target": "/etc/shadow",
+        "metadata": {"tool": "bash", "arguments": "cat /etc/shadow"}}]
+_stdin = _sys.stdin
+_sys.stdin = _io.StringIO(json.dumps(_ev))
+try:
+    code, sout, _ = run_cli(["ingest", "-", "--json"])
+finally:
+    _sys.stdin = _stdin
+check("CLI `ingest -` exits 0", code == 0)
+check("CLI ingest reports what it ingested", json.loads(sout)["ingested"] == 1)
+check("CLI-ingested event raised its alert",
+      any(a["actor_id"] == "cli-agent" for a in client.get("/alerts").json()))
+
+# Bad input is a usage error, not a crash.
+_sys.stdin = _io.StringIO("not json at all")
+try:
+    code, _, serr = run_cli(["ingest", "-"])
+finally:
+    _sys.stdin = _stdin
+check("CLI rejects malformed ingest input with exit 2", code == 2 and "error:" in serr)
+
+# Unauthenticated calls fail with the auth exit code, not a traceback.
+code, _, serr = run_cli(["stats"], transport=_anon_tp)
+check("CLI exits 3 on an unauthenticated call", code == 3)
+check("CLI points at how to authenticate", "login" in serr)
+
 print("\n== server-sent events ==")
 import bus
 
