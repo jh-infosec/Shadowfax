@@ -1,5 +1,40 @@
 # Changelog
 
+## Version 0.8.0
+
+The triage digest. An analyst does not want every alert; they want to know which
+few things need them today. Detection says what fired, correlation groups it and
+chain detection says which bursts are real attacks — this turns all of that into
+a short, ranked queue: *these N need you, and here is why.*
+
+### Added
+
+- **`digest.py`** — `build_digest()` ranks the **open** incidents (those with
+  unacknowledged alerts) into a triage queue. Pure function of
+  `(incidents, alerts_by_id, now)`.
+- **The ranking is deterministic, and it shows its working.** Priority is
+  arithmetic over facts already on record: severity, whether the incident
+  completed a kill chain, how many alerts are still unacknowledged, and how long
+  it has sat. Every item carries the `reasons` that produced its score, so an
+  analyst can interrogate the order instead of taking it on trust. A ranking you
+  cannot question is one you cannot rely on.
+- **It ranks; it does not decide.** Nothing is closed, suppressed or acted on. An
+  incident leaves the queue only when a human acknowledges its alerts — there is
+  a test for exactly that.
+- **`GET /digest`** (read-only, viewer) returns the queue, a deterministic text
+  rendering, and optionally the assistant's covering narrative (`?narrative=`,
+  `?limit=`). The assistant is handed the order and the reasons *after* they are
+  fixed, and its prompt forbids re-ordering the queue.
+- **`shadowfax digest`** in the CLI, with `--plain` for the deterministic text
+  and `--no-narrative` to skip the model entirely — the "read one thing a day"
+  workflow from a terminal or a cron job.
+- **Dashboard.** A "Triage digest" view: the covering summary, then each ranked
+  item with its severity, unacknowledged count, priority score, kill chain and
+  the reasons behind its position. Clicking an actor opens their timeline.
+
+Detection, correlation and chain detection are unchanged. The digest is a pure
+reading of what they already produced.
+
 ## Version 0.7.0
 
 A command-line interface. Shadowfax watches AI agents, and agents are most at

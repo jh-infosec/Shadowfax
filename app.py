@@ -39,10 +39,11 @@ import bus
 import correlate
 import db
 import detectors
+import digest as digest_mod
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 SESSION_TTL_HOURS = 12
 
 # Application startup
@@ -497,6 +498,34 @@ def nl_search(req: SearchRequest, identity: dict = Depends(require_role("viewer"
             until=f.get("until"),
         )
     return {**translated, "count": len(alerts), "alerts": alerts}
+
+
+@app.get("/digest")
+def triage_digest(limit: int = digest_mod.DEFAULT_LIMIT, narrative: bool = True,
+                  identity: dict = Depends(require_role("viewer"))):
+    """The triage queue (v0.8): the open incidents that most need an analyst.
+
+    Read-only. The ranking is computed deterministically by `digest.py` from
+    facts already on record -- severity, completed attack chains, unacknowledged
+    volume, age -- and every item carries the reasons behind its position. The
+    assistant may add a covering narrative, but it cannot re-order the queue and
+    nothing here acknowledges, closes or acts on anything: an incident leaves the
+    digest only when a human acknowledges its alerts.
+    """
+    with db.get_conn() as conn:
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        alerts = db.query_alerts(conn, limit=100_000)
+    window = policy.get("correlation_window_minutes", 30)
+    chain_min = policy.get("attack_chain_min_stages", 3)
+    incidents = correlate.correlate(alerts, window, chain_min)
+    by_id = {a["id"]: a for a in alerts}
+    result = digest_mod.build_digest(incidents, by_id, limit=limit)
+    result["text"] = digest_mod.render_digest(result)
+    if narrative:
+        explained = assistant.explain(assistant.build_digest_brief(result))
+        result["narrative"] = explained.get("narrative")
+        result["source"] = explained.get("source")
+    return result
 
 
 @app.get("/assistant/status")

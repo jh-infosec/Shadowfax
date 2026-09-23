@@ -473,6 +473,68 @@ check("until bound excludes newer alerts", all(a["timestamp"] <= "2026-08-01T00:
 check("unauthenticated /search is 401",
       anon.post("/search", json={"query": "anything"}).status_code == 401)
 
+print("\n== triage digest (v0.8) ==")
+import digest as _digest
+from datetime import datetime as _dt
+
+# Reset so the queue reflects the bundled seed deterministically.
+client.post("/reset")
+r = client.get("/digest")
+check("GET /digest returns 200", r.status_code == 200)
+dg = r.json()
+check("digest reports open incidents", dg["open_incidents"] > 0)
+check("digest counts unacknowledged alerts", dg["unacknowledged_alerts"] > 0)
+check("digest returns a ranked queue", len(dg["items"]) > 0)
+
+# Ranking is deterministic and descending by priority.
+prios = [i["priority"] for i in dg["items"]]
+check("the queue is ordered by priority, highest first", prios == sorted(prios, reverse=True))
+check("every item explains why it ranks where it does",
+      all(i["reasons"] for i in dg["items"]))
+
+# The completed kill chains should outrank incidents without one.
+top = dg["items"][0]
+check("a completed kill chain leads the queue", bool((top.get("chain") or {}).get("escalated")))
+check("the top item's reasons name its kill chain",
+      any("kill chain" in rsn for rsn in top["reasons"]))
+
+# The narrative is prose over the ranking; the ranking itself came from code.
+check("digest carries a covering narrative", len(dg.get("narrative") or "") > 0)
+check("narrative is deterministic without a key", dg.get("source") == "deterministic")
+check("digest also renders deterministic text", "triage digest" in dg.get("text", "").lower())
+
+# Acknowledging an incident's alerts takes it off the queue -- a human, not the
+# assistant, is what closes something.
+target = dg["items"][0]
+inc_detail = client.get(f"/incidents/{target['incident_id']}").json()
+for a in inc_detail["alerts"]:
+    client.patch(f"/alerts/{a['id']}/state", json={"acknowledged": True})
+dg2 = client.get("/digest").json()
+check("acknowledging every alert removes the incident from the digest",
+      all(i["incident_id"] != target["incident_id"] for i in dg2["items"]))
+check("the open count drops once it is handled",
+      dg2["open_incidents"] == dg["open_incidents"] - 1)
+
+# The digest is read-only: asking for it changes nothing.
+_before = client.get("/stats").json()["alert_counts"]
+client.get("/digest")
+check("reading the digest creates no alerts",
+      client.get("/stats").json()["alert_counts"] == _before)
+
+# `limit` is honoured, and the scorer is a pure function.
+small = client.get("/digest", params={"limit": 2}).json()
+check("digest honours ?limit", len(small["items"]) <= 2)
+_inc = {"severity": "critical", "end": "2026-08-14T09:12:00",
+        "chain": {"escalated": True, "stages": [{"tactic": "Exfiltration"}]}}
+s1, r1 = _digest.score_incident(_inc, 3, _dt(2026, 8, 20))
+s2, r2 = _digest.score_incident(_inc, 3, _dt(2026, 8, 20))
+check("scoring is deterministic", (s1, r1) == (s2, r2))
+_plain = {"severity": "critical", "end": "2026-08-14T09:12:00"}
+s3, _ = _digest.score_incident(_plain, 3, _dt(2026, 8, 20))
+check("a completed chain outranks the same incident without one", s1 > s3)
+
+check("unauthenticated /digest is 401", anon.get("/digest").status_code == 401)
+
 print("\n== command-line interface (v0.7) ==")
 import io as _io
 import json
@@ -566,6 +628,14 @@ finally:
 check("CLI rejects malformed ingest input with exit 2", code == 2 and "error:" in serr)
 
 # Unauthenticated calls fail with the auth exit code, not a traceback.
+code, sout, _ = run_cli(["digest", "--json"])
+check("CLI `digest --json` exits 0", code == 0)
+_dg = json.loads(sout)
+check("CLI digest returns the ranked queue", "items" in _dg and "open_incidents" in _dg)
+code, sout, _ = run_cli(["digest", "--plain", "--no-narrative"])
+check("CLI `digest --plain` prints the deterministic text",
+      code == 0 and "triage digest" in sout.lower())
+
 code, _, serr = run_cli(["stats"], transport=_anon_tp)
 check("CLI exits 3 on an unauthenticated call", code == 3)
 check("CLI points at how to authenticate", "login" in serr)

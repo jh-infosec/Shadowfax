@@ -230,6 +230,24 @@ recognises, through parameterised SQL. The model only translates; it never sees
 alert data and never decides what is suspicious. With no key a conservative
 keyword parser handles the common cases, so search works offline.
 
+#### digest.py
+
+The triage digest (v0.8). `build_digest()` ranks the **open** incidents -- those
+with at least one unacknowledged alert -- into the short queue an analyst works
+from. A pure function of `(incidents, alerts_by_id, now)`.
+
+Two invariants make it trustworthy. First, **the ranking is deterministic**:
+priority is arithmetic over facts already on record (severity, a completed kill
+chain, unacknowledged volume, age), and `score_incident()` returns the
+`reasons` alongside the number, so the order can be interrogated rather than
+taken on trust. No model orders this queue. Second, **it ranks but never
+decides** -- nothing is closed, suppressed or acted on, and an incident leaves
+the queue only when a human acknowledges its alerts.
+
+`render_digest()` produces the plain-text digest. `GET /digest` adds the
+assistant's covering narrative, but the assistant receives the order and the
+reasons *after* they are fixed and its prompt forbids re-ordering them.
+
 #### cli.py
 
 The command-line interface (v0.7). A single stdlib-only file (argparse +
@@ -401,6 +419,13 @@ a model or the deterministic fallback produced it; `ExplanationModal` wraps it
 for the per-alert "✦ explain" link in the table. Both are read-only views onto
 `assistant.py`.
 
+#### src/components/DigestDrawer.jsx
+
+The triage digest view (v0.8). Renders the covering narrative, then each ranked
+item with its severity, unacknowledged count, priority score, kill chain and the
+reasons behind its position -- the reasons are shown because a ranking an
+analyst cannot interrogate is one they cannot trust.
+
 #### src/components/NLSearch.jsx
 
 Natural-language search (v0.5.2). A plain-English query box above the alert
@@ -519,7 +544,8 @@ app.py                  db.py                   detectors.py
 auth.py                 bus.py                  attack.py
 attack_registry.json    correlate.py            assistant.py
 seed_data.py            test_api.py             requirements.txt
-cli.py                  architecture.md         README.md
+cli.py                  digest.py               architecture.md
+README.md
 CHANGELOG.md
 ROADMAP.md              findings-envelope.md    .gitignore
 

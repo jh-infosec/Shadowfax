@@ -59,6 +59,7 @@ investigation and explainability.
 - Actor timelines, showing alerts attached to the events that produced them
 - Filtering by severity, actor type, category and free-text search
 - Policy editing from the dashboard
+- Triage digest — the open incidents that most need an analyst, ranked deterministically with the reasons shown
 - Command-line interface — ingest, query, explain and gate on alerts from a shell; `--json` everywhere for agents
 - Automated API testing
 
@@ -160,6 +161,10 @@ Planned
 
 - Command-Line Interface — shipped (v0.7.0)
 
+### v0.8
+
+- Triage Digest — shipped (v0.8.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -239,6 +244,18 @@ non-zero when alerts match — so an agent harness can gate its own run:
 ```bash
 python cli.py check --severity critical || echo "agent tripped a detector"
 ```
+
+The triage queue — what most needs an analyst right now:
+
+```bash
+python cli.py digest              # ranked queue with a covering summary
+python cli.py digest --plain      # the deterministic text, no model involved
+```
+
+The ranking is computed deterministically (severity, completed attack chains,
+unacknowledged volume, age) and every item shows the reasons behind its
+position. Shadowfax ranks the queue; you decide. An incident leaves the list
+when its alerts are acknowledged.
 
 Point it elsewhere with `--url`, `SHADOWFAX_URL`, or the stored config.
 

@@ -139,6 +139,13 @@ export function nlSearch(query) {
   return request("/search", { method: "POST", body: JSON.stringify({ query }) });
 }
 
+// Triage digest (v0.8). Read-only: the ranking is computed server-side and
+// deterministically; the assistant only writes the covering narrative.
+export function getDigest(limit) {
+  const qs = limit ? `?limit=${encodeURIComponent(limit)}` : "";
+  return request(`/digest${qs}`);
+}
+
 export function getPolicy() {
   return request("/policy");
 }

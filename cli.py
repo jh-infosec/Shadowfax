@@ -383,6 +383,21 @@ def cmd_search(client: Client, args, out) -> int:
     return EXIT_OK
 
 
+def cmd_digest(client: Client, args, out) -> int:
+    """The triage queue: what most needs an analyst right now. Ranked
+    deterministically server-side; this just renders it."""
+    params: dict[str, Any] = {"limit": args.limit} if args.limit else {}
+    params["narrative"] = "false" if args.no_narrative else "true"
+    result = client.call("GET", "/digest", params=params)
+    def human(o, v):
+        if v.get("narrative") and not args.plain:
+            print(v["narrative"] + "\n", file=o)
+        else:
+            print(v.get("text", ""), file=o)
+    emit(out, result, args.json, human)
+    return EXIT_OK
+
+
 def cmd_actors(client: Client, args, out) -> int:
     actors = client.call("GET", "/actors")
     emit(out, actors, args.json, human_actors)
@@ -479,6 +494,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("search", help="natural-language alert search")
     sp.add_argument("query")
 
+    sp = sub.add_parser("digest", help="triage queue: what most needs an analyst")
+    sp.add_argument("--limit", type=int, help="how many incidents to show")
+    sp.add_argument("--no-narrative", dest="no_narrative", action="store_true",
+                    help="skip the assistant's covering summary")
+    sp.add_argument("--plain", action="store_true",
+                    help="print the deterministic digest text, not the narrative")
+
     sub.add_parser("actors", help="list actors with risk scores")
     sub.add_parser("stats", help="alert and event counts")
 
@@ -494,6 +516,7 @@ COMMANDS = {
     "status": cmd_status, "login": cmd_login, "ingest": cmd_ingest,
     "alerts": cmd_alerts, "check": cmd_check, "incidents": cmd_incidents,
     "explain": cmd_explain, "search": cmd_search, "actors": cmd_actors,
+    "digest": cmd_digest,
     "stats": cmd_stats, "policy": cmd_policy,
 }
 

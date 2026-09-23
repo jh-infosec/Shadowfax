@@ -154,8 +154,14 @@ Attack-chain correlation, then evidence integrity and ingest.
       the database, so auth and RBAC still apply). `--json` everywhere and
       meaningful exit codes; `shadowfax check` exits non-zero when alerts match,
       so a harness can gate its own run. Shipped in `v0.7.0`.
-- [ ] Triage digest: the assistant ranks open incidents into a "these N need
-      you" summary, optionally on a schedule. Explains and ranks; never decides.
+- [x] Triage digest: `digest.py` ranks the open incidents (those with
+      unacknowledged alerts) into a "these N need you" queue. The ranking is
+      deterministic — severity, completed attack chains, unacknowledged volume,
+      age — and every item carries the reasons behind its position; the
+      assistant only writes a covering narrative and cannot re-order it.
+      `GET /digest`, `shadowfax digest`, and a dashboard view. An incident
+      leaves the queue only when a human acknowledges its alerts. Shipped in
+      `v0.8.0`.
 
 ---
 
