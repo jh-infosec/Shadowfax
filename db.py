@@ -17,6 +17,7 @@ of (that actor's ordered event history, current policy).
 
 from __future__ import annotations
 import json
+import ledger
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -35,7 +36,21 @@ CREATE TABLE IF NOT EXISTS events (
     event_type TEXT NOT NULL,
     target TEXT NOT NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
-    ingested_at TEXT NOT NULL DEFAULT (datetime('now'))
+    ingested_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Tamper-evident ledger (v0.9). Each event chains to the one before it, so
+    -- a later edit, deletion or reordering breaks the chain detectably.
+    prev_hash TEXT,
+    entry_hash TEXT
+);
+
+-- The chain's head: how many entries the ledger should hold and the hash it
+-- should end on. Kept so truncation is visible -- entries lopped off the end
+-- leave a shorter but internally valid chain, which only this record catches.
+CREATE TABLE IF NOT EXISTS ledger_head (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    entry_count INTEGER NOT NULL DEFAULT 0,
+    head_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
@@ -125,6 +140,7 @@ def init_db(path: Path | None = None) -> None:
     with get_conn(path) as conn:
         _migrate_legacy_alerts(conn)
         conn.executescript(SCHEMA)
+        _migrate_ledger(conn)
         conn.commit()
 
 
@@ -165,10 +181,85 @@ def get_conn(path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 # Event storage
 
+def _migrate_ledger(conn: sqlite3.Connection) -> None:
+    """Bring an existing database onto the hash chain.
+
+    Adds the hash columns if they predate v0.9 and backfills the chain over
+    whatever is already stored, in insertion order. Backfilling cannot prove
+    anything about edits made *before* the ledger existed -- it establishes the
+    baseline from which tampering becomes detectable, which is the honest thing
+    it can offer.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    if "prev_hash" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN prev_hash TEXT")
+    if "entry_hash" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN entry_hash TEXT")
+
+    unchained = conn.execute(
+        "SELECT COUNT(*) AS n FROM events WHERE entry_hash IS NULL"
+    ).fetchone()["n"]
+    head_row = conn.execute("SELECT * FROM ledger_head WHERE id = 1").fetchone()
+
+    if unchained == 0 and head_row is not None:
+        return  # already chained
+
+    rows = conn.execute("SELECT * FROM events ORDER BY id ASC").fetchall()
+    events = [_row_to_event(r) for r in rows]
+    chain = ledger.compute_chain(events)
+    for row, (prev, entry) in zip(rows, chain):
+        conn.execute("UPDATE events SET prev_hash = ?, entry_hash = ? WHERE id = ?",
+                     (prev, entry, row["id"]))
+    head = chain[-1][1] if chain else ledger.GENESIS_HASH
+    _write_ledger_head(conn, len(chain), head)
+
+
+def _write_ledger_head(conn: sqlite3.Connection, count: int, head: str) -> None:
+    conn.execute(
+        """INSERT INTO ledger_head (id, entry_count, head_hash, updated_at)
+           VALUES (1, ?, ?, datetime('now'))
+           ON CONFLICT(id) DO UPDATE SET
+             entry_count = excluded.entry_count,
+             head_hash   = excluded.head_hash,
+             updated_at  = excluded.updated_at""",
+        (count, head),
+    )
+
+
+def get_ledger_head(conn: sqlite3.Connection) -> dict[str, Any]:
+    """The recorded head: what the ledger should end on. Export this somewhere
+    the database's owner does not control and truncation stops being deniable."""
+    row = conn.execute("SELECT * FROM ledger_head WHERE id = 1").fetchone()
+    if row is None:
+        return {"entry_count": 0, "head_hash": ledger.GENESIS_HASH, "updated_at": None}
+    return {"entry_count": row["entry_count"], "head_hash": row["head_hash"],
+            "updated_at": row["updated_at"]}
+
+
+def ledger_entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every entry in insertion order, with its stored chain hashes, ready for
+    `ledger.verify_chain`."""
+    rows = conn.execute("SELECT * FROM events ORDER BY id ASC").fetchall()
+    out = []
+    for r in rows:
+        e = _row_to_event(r)
+        e["prev_hash"] = r["prev_hash"]
+        e["entry_hash"] = r["entry_hash"]
+        out.append(e)
+    return out
+
+
 def insert_event(conn: sqlite3.Connection, event: dict[str, Any]) -> int:
+    # Chain this event to the current head before storing it, so the ledger is
+    # append-only by construction rather than by convention.
+    head = get_ledger_head(conn)
+    prev = head["head_hash"]
+    entry = ledger.entry_hash(prev, event)
+
     cur = conn.execute(
-        """INSERT INTO events (timestamp, actor_id, actor_type, task, event_type, target, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO events (timestamp, actor_id, actor_type, task, event_type,
+                               target, metadata, prev_hash, entry_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             event["timestamp"],
             event["actor_id"],
@@ -177,8 +268,11 @@ def insert_event(conn: sqlite3.Connection, event: dict[str, Any]) -> int:
             event["event_type"],
             event["target"],
             json.dumps(event.get("metadata", {})),
+            prev,
+            entry,
         ),
     )
+    _write_ledger_head(conn, head["entry_count"] + 1, entry)
     return cur.lastrowid
 
 
@@ -422,6 +516,10 @@ def wipe_all(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM alert_state")
     conn.execute("DELETE FROM events")
     conn.execute("DELETE FROM policy")
+    # The ledger restarts from genesis along with the events it describes. A
+    # reset is an explicit, authorised wipe -- not a silent edit -- so the head
+    # is reset openly rather than left claiming entries that no longer exist.
+    _write_ledger_head(conn, 0, ledger.GENESIS_HASH)
 
 
 # Authentication: users

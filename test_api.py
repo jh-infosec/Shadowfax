@@ -473,6 +473,92 @@ check("until bound excludes newer alerts", all(a["timestamp"] <= "2026-08-01T00:
 check("unauthenticated /search is 401",
       anon.post("/search", json={"query": "anything"}).status_code == 401)
 
+print("\n== tamper-evident ledger (v0.9) ==")
+import sqlite3 as _sqlite3
+import ledger as _ledger
+
+# The chain is built as events are stored.
+head = client.get("/ledger/head").json()
+check("ledger head is recorded", head["entry_count"] > 0 and len(head["head_hash"]) == 64)
+
+r = client.get("/ledger/verify")
+check("GET /ledger/verify returns 200", r.status_code == 200)
+v = r.json()
+check("a clean ledger verifies", v["ok"] is True)
+check("verification covers every entry", v["verified"] == v["entries"] == head["entry_count"])
+check("verification reports the head it computed", v["head"] == head["head_hash"])
+
+# Appending advances the head.
+_before_head = head["head_hash"]
+client.post("/events", json=[{"timestamp": "2026-09-07T10:00:00", "actor_id": "ledger-agent",
+                              "actor_type": "ai_agent", "event_type": "tool_call",
+                              "target": "ledger_probe", "metadata": {}}])
+_after = client.get("/ledger/head").json()
+check("appending an event advances the head", _after["head_hash"] != _before_head)
+check("appending an event increments the count",
+      _after["entry_count"] == head["entry_count"] + 1)
+check("the ledger still verifies after an append", client.get("/ledger/verify").json()["ok"] is True)
+
+# Tamper with a stored event behind the API's back, exactly as an attacker with
+# database access would. Then repair it, so the rest of the suite is unaffected.
+_tampered_id = client.get("/alerts").json()[0]["event_id"]
+_con = _sqlite3.connect(str(db_module.DB_PATH))
+_orig = _con.execute("SELECT target FROM events WHERE id = ?", (_tampered_id,)).fetchone()[0]
+_con.execute("UPDATE events SET target = 'innocent_looking' WHERE id = ?", (_tampered_id,))
+_con.commit()
+v = client.get("/ledger/verify").json()
+check("editing a stored event breaks the ledger", v["ok"] is False)
+check("the break is located at the edited entry",
+      v["broken_at"] and v["broken_at"]["event_id"] == _tampered_id)
+check("the break says the content no longer matches its hash",
+      "does not match its hash" in v["reason"])
+check("entries before the break still verify", v["verified"] >= 0)
+_con.execute("UPDATE events SET target = ? WHERE id = ?", (_orig, _tampered_id))
+_con.commit(); _con.close()
+check("restoring the original content makes the ledger valid again",
+      client.get("/ledger/verify").json()["ok"] is True)
+
+# Deletion and truncation, against the pure chain functions so the live
+# database is never left damaged.
+_evs = [{"timestamp": f"2026-09-08T10:0{i}:00", "actor_id": "x", "actor_type": "ai_agent",
+         "event_type": "tool_call", "target": f"t{i}", "metadata": {}} for i in range(5)]
+_chain = _ledger.compute_chain(_evs)
+_entries = [dict(e, prev_hash=p, entry_hash=h, id=i)
+            for i, (e, (p, h)) in enumerate(zip(_evs, _chain))]
+check("a freshly built chain verifies", _ledger.verify_chain(_entries)["ok"] is True)
+check("the chain starts from genesis", _entries[0]["prev_hash"] == _ledger.GENESIS_HASH)
+
+_missing = _entries[:2] + _entries[3:]          # drop one from the middle
+_vd = _ledger.verify_chain(_missing)
+check("deleting an entry breaks the chain", _vd["ok"] is False)
+check("the deletion break names a chaining failure",
+      "does not chain to the one before it" in _vd["reason"])
+
+_truncated = _entries[:3]                        # lop the tail off
+check("a truncated chain is internally valid on its own",
+      _ledger.verify_chain(_truncated)["ok"] is True)
+_vt = _ledger.verify_chain(_truncated, expected_count=5, expected_head=_chain[-1][1])
+check("the head record catches truncation", _vt["ok"] is False)
+check("the truncation reason names removal from the end",
+      "removed from the end" in _vt["reason"])
+
+# Hashing is pure: same content, same hash; any change, different hash.
+check("entry hashing is deterministic",
+      _ledger.entry_hash(_ledger.GENESIS_HASH, _evs[0])
+      == _ledger.entry_hash(_ledger.GENESIS_HASH, _evs[0]))
+check("a different predecessor yields a different hash",
+      _ledger.entry_hash(_ledger.GENESIS_HASH, _evs[0])
+      != _ledger.entry_hash("f" * 64, _evs[0]))
+_mutated = dict(_evs[0], target="somewhere_else")
+check("changing any field changes the hash",
+      _ledger.entry_hash(_ledger.GENESIS_HASH, _evs[0])
+      != _ledger.entry_hash(_ledger.GENESIS_HASH, _mutated))
+check("key order in metadata does not change the hash",
+      _ledger.entry_hash(_ledger.GENESIS_HASH, dict(_evs[0], metadata={"a": 1, "b": 2}))
+      == _ledger.entry_hash(_ledger.GENESIS_HASH, dict(_evs[0], metadata={"b": 2, "a": 1})))
+
+check("unauthenticated /ledger/verify is 401", anon.get("/ledger/verify").status_code == 401)
+
 print("\n== triage digest (v0.8) ==")
 import digest as _digest
 from datetime import datetime as _dt
@@ -628,6 +714,10 @@ finally:
 check("CLI rejects malformed ingest input with exit 2", code == 2 and "error:" in serr)
 
 # Unauthenticated calls fail with the auth exit code, not a traceback.
+code, sout, _ = run_cli(["verify", "--json"])
+check("CLI `verify` exits 0 on an intact ledger", code == 0)
+check("CLI verify reports the chain is ok", json.loads(sout)["ok"] is True)
+
 code, sout, _ = run_cli(["digest", "--json"])
 check("CLI `digest --json` exits 0", code == 0)
 _dg = json.loads(sout)

@@ -18,7 +18,7 @@ under `frontend/`.
                            ▼
               ┌─────────────────────────┐
               │   Dashboard (React)     │
-              │   polls every 5s        │
+              │   live over SSE         │
               └────────────┬────────────┘
                            │ HTTP, JSON
                            ▼
@@ -248,6 +248,45 @@ the queue only when a human acknowledges its alerts.
 assistant's covering narrative, but the assistant receives the order and the
 reasons *after* they are fixed and its prompt forbids re-ordering them.
 
+#### ledger.py
+
+The tamper-evident event ledger (v0.9). Pure, no I/O: given events it computes
+hashes, given stored rows it reports whether they still agree.
+
+Each stored event carries `entry_hash = sha256(prev_hash | canonical_json(content))`,
+chaining from a fixed `GENESIS_HASH`. Because every link folds in the one before
+it, altering any byte of any event invalidates that entry *and* every entry after
+it, and the following row's stored `prev_hash` no longer matches. `canonical_payload()`
+is what makes this reliable rather than flaky -- sorted keys and no incidental
+whitespace, so equal content always hashes identically and a re-serialisation
+cannot masquerade as tampering. `HASHED_FIELDS` deliberately excludes the row id
+and `ingested_at`: those are assigned by the store, not asserted by the emitter,
+and hashing them would tie the evidence to bookkeeping.
+
+`verify_chain()` walks the log and returns the **first** divergence with its
+position, event id, timestamp and actor, plus how many entries verified before
+it -- a break that is located is actionable; one that is merely announced is
+not. It distinguishes three failure modes in the reason it reports: content that
+no longer matches its hash (edited), an entry that no longer chains to its
+predecessor (deleted or reordered), and an internally valid chain that is shorter
+than the recorded head (truncated). It never raises; a malformed row is a
+finding, not an exception.
+
+The chain follows **insertion order** (the autoincrement id), not the claimed
+`timestamp`. Events legitimately arrive out of chronological order -- a harness
+uploading a session log, a backdated import -- and ordering by emitter-supplied
+data would make the proof depend on the thing being audited. What is proven is
+"these entries were appended in this order and none has changed since": a
+statement about the store, not about the world.
+
+This is tamper-**evident**, not tamper-**proof**, and the module says so in its
+own docstring. It makes silent modification and deletion detectable by anyone who
+can read the log; it does not prevent them. An attacker with full write access
+could rewrite the events, the chain and the head together -- which is why
+`GET /ledger/head` exists, so the head can be anchored outside the database's
+trust boundary. Where it gets published is the operator's decision, and claiming
+more than that would be the one failure mode this feature cannot afford.
+
 #### cli.py
 
 The command-line interface (v0.7). A single stdlib-only file (argparse +
@@ -369,10 +408,12 @@ Reads `VITE_API_BASE`, defaulting to `http://127.0.0.1:8000`.
 
 #### src/App.jsx
 
-Top-level state, the poll loop, and all wiring. Owns filter state, the
-selected actor, and whether the policy editor is open.
+Top-level state, the stream subscription, and all wiring. Owns filter state,
+the signed-in user, the selected actor, and which drawers are open.
 
-`POLL_INTERVAL_MS` lives here.
+The debounce constants live here: `SEARCH_DEBOUNCE_MS` for the search box and
+`STREAM_REFRESH_DEBOUNCE_MS` so a burst of stream events (a batch ingest)
+coalesces into one refetch.
 
 #### src/constants.js
 
@@ -382,8 +423,19 @@ once.
 
 #### src/components/TopBar.jsx
 
-Branding, connection status and the severity count summary. The connection
-dot reflects whether the last poll succeeded.
+Branding, connection status, the evidence-integrity badge and the severity
+count summary. The connection dot reflects whether the live stream is up.
+
+#### src/components/LedgerBadge.jsx
+
+The evidence-integrity badge (v0.9). Calls `GET /ledger/verify` on mount and
+whenever the event count changes, so a broken chain surfaces on its own rather
+than waiting to be asked for. It sits beside the connection indicator because
+both answer the same question -- can I believe what I am looking at right now --
+and a break is styled louder than a critical alert, since every finding below it
+is suspect until the break is explained. A failed *request* renders as "ledger
+unverified", never as "broken": not reaching the check is not evidence of
+tampering, and conflating the two would make the badge useless.
 
 #### src/components/Sidebar.jsx
 
@@ -444,11 +496,14 @@ the severity colours that `constants.js` refers to by variable name.
 ### On event ingestion
 
 1. Event received at `POST /events`
-2. Event stored in SQLite
+2. Event hash-chained onto the ledger and stored in SQLite -- `insert_event`
+   reads the current head, computes `prev_hash`/`entry_hash`, inserts the row
+   and advances `ledger_head` in the same transaction, so the log and its head
+   record cannot drift apart
 3. Full event history loaded for each affected actor
 4. Detection engine evaluates that history against the active policy
 5. Existing alerts for the actor are deleted and replaced with the new set
-6. Dashboard picks up the change on its next poll
+6. A change is published on the bus; subscribed dashboards refetch
 
 ### On policy change
 
@@ -544,7 +599,8 @@ app.py                  db.py                   detectors.py
 auth.py                 bus.py                  attack.py
 attack_registry.json    correlate.py            assistant.py
 seed_data.py            test_api.py             requirements.txt
-cli.py                  digest.py               architecture.md
+cli.py                  digest.py               ledger.py
+architecture.md
 README.md
 CHANGELOG.md
 ROADMAP.md              findings-envelope.md    .gitignore
@@ -564,4 +620,6 @@ frontend/src/components/IncidentsDrawer.jsx
 frontend/src/components/Explanation.jsx
 frontend/src/components/ExplanationModal.jsx
 frontend/src/components/NLSearch.jsx
+frontend/src/components/DigestDrawer.jsx
+frontend/src/components/LedgerBadge.jsx
 ```

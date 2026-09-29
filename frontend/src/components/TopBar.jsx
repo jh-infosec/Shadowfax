@@ -1,4 +1,5 @@
 import React from "react";
+import LedgerBadge from "./LedgerBadge.jsx";
 
 export default function TopBar({ stats, connected, onReset, canReset, user, onLogout }) {
   return (
@@ -19,6 +20,10 @@ export default function TopBar({ stats, connected, onReset, canReset, user, onLo
         <span className={`conn-dot ${connected ? "live" : "down"}`} />
         {connected ? "connected to API" : "API unreachable"}
       </div>
+
+      {/* Evidence integrity sits beside the connection state on purpose: both
+          answer "can I believe what I'm looking at right now". */}
+      <LedgerBadge eventCount={stats?.event_count} />
 
       {canReset && (
         <button className="btn" onClick={onReset}>

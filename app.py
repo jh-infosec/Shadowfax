@@ -40,10 +40,11 @@ import correlate
 import db
 import detectors
 import digest as digest_mod
+import ledger
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 SESSION_TTL_HOURS = 12
 
 # Application startup
@@ -526,6 +527,36 @@ def triage_digest(limit: int = digest_mod.DEFAULT_LIMIT, narrative: bool = True,
         result["narrative"] = explained.get("narrative")
         result["source"] = explained.get("source")
     return result
+
+
+@app.get("/ledger/verify")
+def verify_ledger(identity: dict = Depends(require_role("viewer"))):
+    """Verify the tamper-evident event ledger (v0.9).
+
+    Recomputes the hash chain over every stored event in insertion order and
+    compares it with the stored links and the recorded head. Reports the *first*
+    position where they diverge, so a break is located rather than merely
+    announced. Read-only, and safe to run on a schedule.
+    """
+    with db.get_conn() as conn:
+        entries = db.ledger_entries(conn)
+        head = db.get_ledger_head(conn)
+    report = ledger.verify_chain(entries, head["entry_count"], head["head_hash"])
+    report["summary"] = ledger.describe(report)
+    report["recorded_head"] = head
+    return report
+
+
+@app.get("/ledger/head")
+def ledger_head(identity: dict = Depends(require_role("viewer"))):
+    """The ledger's current head hash and entry count.
+
+    Export this somewhere outside the database's own trust boundary -- a log
+    server, a signed commit, a colleague's inbox. Anchoring the head off-box is
+    what turns "we can tell it changed" into something a third party can check.
+    """
+    with db.get_conn() as conn:
+        return db.get_ledger_head(conn)
 
 
 @app.get("/assistant/status")

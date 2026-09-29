@@ -410,3 +410,62 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border-soft);
   font-size: 10.5px; color: var(--muted-2); line-height: 1.45;
 }
+
+/* ---- evidence-integrity badge (v0.9) ---------------------------------- */
+
+.ledger-badge-wrap { position: relative; }
+
+.ledger-badge {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border-radius: 5px;
+  font-family: var(--mono); font-size: 11px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  color: var(--muted-2); white-space: nowrap;
+}
+.ledger-badge:hover { border-color: var(--accent); }
+.ledger-badge .ledger-icon { font-size: 12px; line-height: 1; }
+
+.ledger-badge.ok { color: #6fce9a; border-color: #1d3a2a; }
+/* A broken chain is louder than a critical alert: every finding below it is
+   suspect until the break is explained. */
+.ledger-badge.broken {
+  color: var(--crit); border-color: var(--crit);
+  background: var(--crit-dim); font-weight: 600;
+  animation: ledger-pulse 1.6s ease-in-out infinite;
+}
+.ledger-badge.unknown { color: var(--muted-2); }
+
+@keyframes ledger-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 74, 82, 0.0); }
+  50%      { box-shadow: 0 0 0 3px rgba(239, 74, 82, 0.18); }
+}
+
+.ledger-pop {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 40;
+  width: 340px; padding: 14px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 7px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+.ledger-pop-title {
+  font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted-2); margin-bottom: 8px;
+}
+.ledger-pop-line { margin: 0 0 10px; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+.ledger-pop-line.good { color: #6fce9a; }
+.ledger-pop-line.bad { color: var(--crit); }
+.ledger-pop-note { margin: 0 0 10px; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.ledger-pop-label {
+  font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--muted-2);
+}
+.ledger-hash {
+  display: block; margin: 4px 0 10px; padding: 7px 8px;
+  background: var(--bg); border: 1px solid var(--border-soft); border-radius: 4px;
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+  word-break: break-all; user-select: all;
+}
+.ledger-break {
+  margin: 0 0 10px; padding: 8px 10px;
+  background: var(--bg); border-left: 2px solid var(--crit); border-radius: 3px;
+  font-family: var(--mono); font-size: 11px; line-height: 1.7;
+}

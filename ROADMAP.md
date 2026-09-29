@@ -135,9 +135,16 @@ Attack-chain correlation, then evidence integrity and ingest.
       impact), escalated to critical. Deterministic — the longest
       strictly-increasing tactic-rank subsequence of the incident's alerts, in
       `correlate.py`; threshold `attack_chain_min_stages`. Shipped in `v0.6.0`.
-- [ ] Tamper-evident append-only event log: hash-chained entries, so the event
+- [x] Tamper-evident append-only event log: hash-chained entries, so the event
       store can be shown not to have been edited after the fact. This is what
       turns the alert history into something an auditor or assessor will accept.
+      `ledger.py`: `entry_hash = sha256(prev_hash | canonical_json(content))`
+      over insertion order, plus a `ledger_head` record so truncation is visible
+      too. Verification locates the *first* break and distinguishes edit from
+      deletion from truncation. `GET /ledger/verify`, `GET /ledger/head`,
+      `shadowfax verify`, and a dashboard integrity badge. Tamper-evident, not
+      tamper-proof — anchoring the head off-box is left to the operator.
+      Shipped in `v0.9.0`.
 - [ ] Findings-envelope ingest: accept the envelope defined in
       `findings-envelope.md` from `maltriage` and `claude-recon-agent`.
       Envelope findings become alerts without Shadowfax knowing anything about

@@ -146,6 +146,19 @@ export function getDigest(limit) {
   return request(`/digest${qs}`);
 }
 
+// Tamper-evident ledger (v0.9). Both are read-only. `verifyLedger` recomputes
+// the whole hash chain server-side and returns
+// { ok, entries, verified, head, broken_at, reason, summary, recorded_head };
+// `getLedgerHead` returns just { entry_count, head_hash, updated_at } so the
+// head can be exported and anchored outside the database's own trust boundary.
+export function verifyLedger() {
+  return request("/ledger/verify");
+}
+
+export function getLedgerHead() {
+  return request("/ledger/head");
+}
+
 export function getPolicy() {
   return request("/policy");
 }

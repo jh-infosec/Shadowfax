@@ -1,5 +1,76 @@
 # Changelog
 
+## Version 0.9.0
+
+The tamper-evident event ledger. Every version until now made Shadowfax better at
+judging whether an actor should be trusted. This one asks the prior question: can
+the *record* be trusted? An event history that could have been quietly edited
+after the fact is not evidence, it is an assertion — and an assertion is not
+worth building a detection engine on top of.
+
+### Added
+
+- **`ledger.py`** — a hash chain over the event log. Each stored event carries
+  `entry_hash = sha256(prev_hash | canonical_json(content))`, chaining from a
+  fixed genesis hash. Because every link folds in the one before it, changing any
+  byte of any event invalidates that entry and every entry after it. Pure, no
+  I/O, no dependencies beyond the standard library.
+- **Breaks are located, not just announced.** `verify_chain()` walks the log and
+  reports the *first* position where the recomputed value diverges, with the
+  event id, timestamp and actor, plus how many entries before it verified
+  cleanly. It distinguishes three failure modes in the message it returns: an
+  entry whose content no longer matches its hash (**edited**), an entry that no
+  longer chains to the one before it (**deleted or reordered**), and a log that
+  is internally consistent but shorter than the recorded head (**truncated**).
+- **`ledger_head` table** — the stored entry count and head hash. This is what
+  makes truncation visible: lopping entries off the end leaves a shorter but
+  internally valid chain, so the chain alone cannot catch it.
+- **`GET /ledger/verify`** and **`GET /ledger/head`** (read-only, viewer). The
+  head endpoint exists so the head can be exported somewhere outside the
+  database's own trust boundary — a log server, a signed commit, a colleague's
+  inbox. Anchoring it off-box is what turns "we can tell it changed" into
+  something a third party can check.
+- **`shadowfax verify`** — exits 0 on an intact ledger, 1 on a broken one, so a
+  cron job or CI step can fail on tampering without anyone reading output.
+- **Evidence-integrity badge in the dashboard.** It sits next to the connection
+  indicator, because both answer the same question: can I believe what I am
+  looking at right now. It re-verifies whenever the event count changes, so a
+  break surfaces on its own. A broken chain is styled louder than a critical
+  alert — every finding below it is suspect until the break is explained.
+
+### Changed
+
+- **`insert_event` now chains.** It reads the current head, computes the new
+  entry's hashes and advances the head in the same transaction as the insert, so
+  the log and its head cannot drift apart. The chain follows **insertion order**
+  (the autoincrement id), not the claimed `timestamp`: events legitimately arrive
+  out of chronological order, and ordering by attacker-supplied data would be a
+  poor foundation for a proof. What is proven is "these entries were appended in
+  this order and none has changed since" — a statement about the store.
+- **Existing databases migrate in place.** `init_db` adds the two columns if
+  absent and backfills the chain in id order, so a v0.8 database keeps its
+  history rather than having to be thrown away.
+- `POST /reset` resets the head to genesis along with the events, so the demo
+  data verifies cleanly rather than inheriting a stale head.
+
+### Notes on what this is not
+
+Tamper-**evident**, not tamper-**proof**. It makes silent modification and
+deletion detectable by anyone who can read the log; it does not prevent them. An
+attacker with full write access to the database could rewrite the events, the
+chain and the head together — which is exactly why `GET /ledger/head` exists and
+why anchoring the head externally is left to the operator rather than quietly
+claimed here. Overstating this would be worse than not building it.
+
+### Tests
+
+27 new checks: the head advances on append, a clean log verifies, an edit is
+detected *and located* at the right position, restoring the original value makes
+it valid again, a deletion breaks the chain link, a truncation is caught by the
+head record, hashing is deterministic and independent of metadata key order, and
+the endpoints reject unauthenticated callers. Plus the CLI's exit codes.
+Full suite green.
+
 ## Version 0.8.0
 
 The triage digest. An analyst does not want every alert; they want to know which

@@ -61,6 +61,7 @@ investigation and explainability.
 - Policy editing from the dashboard
 - Triage digest — the open incidents that most need an analyst, ranked deterministically with the reasons shown
 - Command-line interface — ingest, query, explain and gate on alerts from a shell; `--json` everywhere for agents
+- Tamper-evident event ledger — every event hash-chained to the one before it, so an edit, deletion or reordering breaks the chain at a locatable point
 - Automated API testing
 
 ---
@@ -165,6 +166,10 @@ Planned
 
 - Triage Digest — shipped (v0.8.0)
 
+### v0.9
+
+- Tamper-Evident Event Ledger — shipped (v0.9.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -257,7 +262,66 @@ unacknowledged volume, age) and every item shows the reasons behind its
 position. Shadowfax ranks the queue; you decide. An incident leaves the list
 when its alerts are acknowledged.
 
+Verify that the event log has not been tampered with (see Evidence integrity):
+
+```bash
+python cli.py verify              # exit 0 if intact, 1 if broken
+```
+
 Point it elsewhere with `--url`, `SHADOWFAX_URL`, or the stored config.
+
+---
+
+## Evidence integrity
+
+Shadowfax asks whether an actor's behaviour should be trusted. That question is
+worth very little if the record of the behaviour cannot itself be trusted — an
+event history that could have been quietly edited after the fact is not evidence,
+it is an assertion.
+
+Every event is hash-chained to the one before it:
+
+```
+entry_hash = sha256( prev_hash | canonical_json(event content) )
+```
+
+Because each link folds in the one before it, changing any byte of any event
+invalidates that entry and every entry after it. Verification recomputes the
+whole chain and reports the **first** position where it diverges, so a break is
+located rather than merely announced — and the three failure modes read
+differently: content that no longer matches its hash (edited), an entry that no
+longer chains to its predecessor (deleted or reordered), and a valid chain that
+is shorter than the recorded head (truncated).
+
+```bash
+python cli.py verify     # exit 0 if intact, 1 if broken
+```
+
+```
+ledger intact — 39 entries verified, head 491329ea531869ec…
+
+LEDGER BROKEN at position 24 (event id 25, actor recon-agent-3): the entry's
+content does not match its hash -- this event was modified after it was
+recorded. 24 entries before it verified cleanly.
+```
+
+The dashboard carries the same check as a badge beside the connection
+indicator — both answer "can I believe what I am looking at right now" — and it
+re-verifies itself whenever the event count changes.
+
+The chain follows the order events were **received**, not the `timestamp` they
+claim. Events legitimately arrive out of chronological order, and ordering by
+data the emitter supplies would make the proof depend on the thing being
+audited. What is proven is *"these entries were appended in this order and none
+has changed since"* — a statement about the store, not about the world.
+
+This is tamper-**evident**, not tamper-**proof**. It makes silent modification
+and deletion detectable by anyone who can read the log; it does not prevent
+them. An attacker with full write access to the database could rewrite the
+events, the chain and the recorded head together. The honest mitigation is to
+anchor the head somewhere that attacker does not control — `GET /ledger/head`
+returns the entry count and head hash for exactly that purpose, and where it
+gets published is deliberately left to the operator rather than claimed here.
 
 ---
 

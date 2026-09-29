@@ -398,6 +398,14 @@ def cmd_digest(client: Client, args, out) -> int:
     return EXIT_OK
 
 
+def cmd_verify(client: Client, args, out) -> int:
+    """Verify the event ledger's hash chain. Exits non-zero when the chain is
+    broken, so a cron job or CI step can alarm on a tampered log."""
+    report = client.call("GET", "/ledger/verify")
+    emit(out, report, args.json, lambda o, v: print(v.get("summary", ""), file=o))
+    return EXIT_OK if report.get("ok") else EXIT_FAIL
+
+
 def cmd_actors(client: Client, args, out) -> int:
     actors = client.call("GET", "/actors")
     emit(out, actors, args.json, human_actors)
@@ -501,6 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--plain", action="store_true",
                     help="print the deterministic digest text, not the narrative")
 
+    sub.add_parser("verify", help="verify the event ledger (non-zero if broken)")
     sub.add_parser("actors", help="list actors with risk scores")
     sub.add_parser("stats", help="alert and event counts")
 
@@ -516,7 +525,7 @@ COMMANDS = {
     "status": cmd_status, "login": cmd_login, "ingest": cmd_ingest,
     "alerts": cmd_alerts, "check": cmd_check, "incidents": cmd_incidents,
     "explain": cmd_explain, "search": cmd_search, "actors": cmd_actors,
-    "digest": cmd_digest,
+    "digest": cmd_digest, "verify": cmd_verify,
     "stats": cmd_stats, "policy": cmd_policy,
 }
 
