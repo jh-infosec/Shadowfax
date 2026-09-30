@@ -197,7 +197,14 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 "actor accessed a target explicitly on the blocklist"))
 
         # dormant reappearance
-        if last_seen is not None:
+        #
+        # Exempt actors whose silence is their normal state. A user account that
+        # wakes after three idle weeks is worth a look; an event-driven endpoint
+        # that only emits when something happens to it is idle by definition, and
+        # alerting on that would train an analyst to ignore the category. The
+        # exemption lives in the policy rather than in a hardcoded name here, so
+        # detectors stay a pure function of (events, policy).
+        if last_seen is not None and e["actor_id"] not in policy.get("dormancy_exempt_actors", []):
             gap = ts - last_seen
             if gap >= timedelta(minutes=policy.get("dormancy_threshold_minutes", 120)):
                 note = " (target previously touched -- possible foothold rebuild)" if e["target"] in touched_targets else ""

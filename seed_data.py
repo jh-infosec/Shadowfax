@@ -62,6 +62,12 @@ DEFAULT_POLICY = {
     "canary_tokens": ["decoy_credential_store_A"],
     "blocked_targets": ["prod_model_hosting_platform", "external_open_internet"],
     "dormancy_threshold_minutes": 60,
+    # Actors whose quiet periods are normal, and so must not raise
+    # dormant_reappearance (v0.10). Shadowfax's own sign-in endpoint only emits
+    # an event when someone fails to authenticate, so a long silence is the
+    # healthy case -- alerting on it would be noise, and noise is how a whole
+    # category of alert gets ignored.
+    "dormancy_exempt_actors": ["shadowfax-auth"],
     "brute_force_window_minutes": 10,
     "brute_force_max_failures": 4,
     "lateral_movement_window_minutes": 15,

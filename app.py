@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -41,11 +41,43 @@ import db
 import detectors
 import digest as digest_mod
 import ledger
+import throttle
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 SESSION_TTL_HOURS = 12
+
+# Sign-in throttling (v0.10). Read once at import, from the environment rather
+# than the detection policy: this is enforcement of Shadowfax's own front door,
+# and the policy governs detection. See throttle.py for the reasoning.
+LOGIN_THROTTLE = throttle.Settings.from_env()
+
+# Recorded sign-in attempts are operational state for the throttle, not
+# evidence, so they are pruned. The ledger keeps what matters.
+LOGIN_ATTEMPT_RETENTION_HOURS = 24
+
+# Self-monitoring (v0.10). Shadowfax has always been able to detect brute-force
+# authentication; from this version its own front door is one of the things it
+# watches. Failed sign-ins against the platform are ingested as ordinary events
+# under this actor, so the existing brute_force_auth detector fires on attacks
+# against Shadowfax itself with no special-casing anywhere in the engine.
+#
+# One actor, not one per attempted username: the username on a failed sign-in is
+# attacker-controlled, so keying actors on it would let anyone mint actors at
+# will -- or worse, post events into a real actor's timeline by "signing in" as
+# them, poisoning the evidence for an unrelated investigation. The attempted
+# name travels in metadata, where it is plainly untrusted data.
+SELF_ACTOR_ID = "shadowfax-auth"
+SELF_ACTOR_TYPE = "service_account"
+SELF_TARGET = "shadowfax_login"
+
+# Off only if explicitly disabled. The volume is bounded by the throttle itself:
+# a scope can log at most `max_failures` failures before it is locked out, so
+# the thing that stops the brute force is also what stops the audit trail from
+# becoming an unauthenticated write amplifier.
+SELF_MONITOR = os.environ.get("SHADOWFAX_SELF_MONITOR", "1").strip().lower() not in (
+    "0", "false", "no", "off")
 
 # Application startup
 
@@ -249,6 +281,62 @@ def _load_events(conn: sqlite3.Connection, events: list[dict[str, Any]]) -> None
     for e in events:
         db.insert_event(conn, e)
     _rescan_all(conn)
+
+
+# Self-monitoring: Shadowfax's own front door (v0.10)
+
+def _naive_utc_now() -> datetime:
+    """UTC, without a tzinfo, to match the event corpus.
+
+    Every timestamp in the event store is a naive ISO string, and the detectors
+    compare them directly. Mixing an aware timestamp in would not be a style
+    inconsistency, it would be a TypeError the first time a detector subtracted
+    one from the other -- so self-monitoring events are written in the same
+    shape as everything else.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+
+
+def _client_source(request: Request) -> str:
+    """The peer address this request arrived from.
+
+    `X-Forwarded-For` is deliberately ignored. It is set by the client, so
+    keying the throttle on it would let an attacker reset their own counter by
+    changing a header -- the control would belong to them, not to us. An
+    operator behind a proxy needs the proxy to present the real peer address;
+    that requirement is documented rather than quietly assumed away.
+    """
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", None) if client else None
+    return host or "unknown"
+
+
+def _record_auth_event(conn: sqlite3.Connection, event_type: str, username: str,
+                       source: str, at: datetime, **detail: Any) -> None:
+    """Write one front-door event into Shadowfax's own hash-chained log.
+
+    This is the point of the whole feature: an attack on the monitoring platform
+    lands in the same append-only ledger, raises alerts through the same
+    detectors and appears in the same dashboard as an attack on anything else
+    Shadowfax watches. There is no separate audit path to keep in sync, and no
+    privileged log a compromised admin could edit more quietly than the rest.
+
+    The attempted username is recorded as metadata, never as the actor id --
+    it is attacker-supplied text, and it is fenced as data accordingly.
+    """
+    if not SELF_MONITOR:
+        return
+    db.insert_event(conn, {
+        "timestamp": at.isoformat(),
+        "actor_id": SELF_ACTOR_ID,
+        "actor_type": SELF_ACTOR_TYPE,
+        "task": "platform_authentication",
+        "event_type": event_type,
+        "target": SELF_TARGET,
+        "metadata": {"attempted_username": username, "source": source, **detail},
+    })
+    _rescan_actor(conn, SELF_ACTOR_ID)
+    bus.publish({"type": "change", "reason": "auth", "actors": [SELF_ACTOR_ID]})
 
 
 # Event endpoints
@@ -607,20 +695,149 @@ def reset(identity: dict = Depends(require_role("admin"))):
 # Authentication endpoints
 
 @app.post("/auth/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, request: Request):
+    """Sign in, subject to backoff and lockout (v0.10).
+
+    The order below is deliberate. The throttle is consulted *before* the
+    username is looked up, and a failure is recorded whether or not the account
+    exists, so a caller cannot tell real usernames from imaginary ones by how
+    the endpoint behaves. When there is no such user, `auth.dummy_verify` burns
+    the same PBKDF2 work a real check would, closing the timing side channel
+    that a straight early return leaves open.
+
+    Every refusal is recorded, and the security-relevant ones are written into
+    Shadowfax's own hash-chained ledger -- see `_record_auth_event`.
+    """
+    source = _client_source(request)
+    now = _naive_utc_now()
+    window_start = now - timedelta(minutes=LOGIN_THROTTLE.window_minutes)
+
     with db.get_conn() as conn:
+        failures = db.recent_login_failures(conn, req.username, source, window_start)
+        # Two scopes: this username from this source, and this source across
+        # every username it has tried. The second is what stops spraying, where
+        # no single scope ever reaches its own threshold.
+        source_failures = db.recent_source_failures(conn, source, window_start)
+        decision = throttle.strictest(
+            throttle.evaluate(failures, now, LOGIN_THROTTLE),
+            throttle.evaluate(source_failures, now, LOGIN_THROTTLE.for_source()),
+        )
+
+        if not decision.allowed:
+            # Refused before any credential work: a locked-out caller costs us
+            # a cheap index read, not a 200,000-round key derivation. That is
+            # the difference between a throttle and a self-inflicted DoS, and
+            # it is also why the refusal is not recorded as another row --
+            # a flood must not be able to grow our own tables.
+            conn.commit()
+            raise HTTPException(
+                429, decision.message(),
+                headers={"Retry-After": str(decision.retry_after_seconds)},
+            )
+
         user = db.get_user_by_username(conn, req.username)
-        if not user or not auth.verify_password(req.password, user["salt"], user["password_hash"]):
+        if user is None:
+            ok = auth.dummy_verify(req.password)
+        else:
+            ok = auth.verify_password(req.password, user["salt"], user["password_hash"])
+
+        if not ok:
+            db.record_login_attempt(conn, req.username, source, "failure", now)
+            _record_auth_event(conn, "auth_failure", req.username, source, now)
+
+            # Re-evaluate including the failure just recorded, so the lockout
+            # event is emitted exactly once -- at the attempt that trips it,
+            # not on every refused attempt afterwards.
+            after = throttle.strictest(
+                throttle.evaluate(failures + [now], now, LOGIN_THROTTLE),
+                throttle.evaluate(source_failures + [now], now,
+                                  LOGIN_THROTTLE.for_source()),
+            )
+            if after.locked:
+                _record_auth_event(conn, "auth_lockout", req.username, source, now,
+                                   locked_for_seconds=after.retry_after_seconds,
+                                   failures=after.failures)
+                # Rare and bounded, so a good moment to take out the rubbish
+                # without putting a DELETE on every failed sign-in.
+                db.prune_login_attempts(
+                    conn, now - timedelta(hours=LOGIN_ATTEMPT_RETENTION_HOURS))
+            conn.commit()
+            # One message for both branches. "Invalid username or password" is
+            # the whole point: naming which half was wrong is a free gift to
+            # anyone enumerating accounts.
             raise HTTPException(401, "invalid username or password")
+
         token = auth.new_session_token()
         expires = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
         db.create_session(conn, auth.token_fingerprint(token), user["id"], expires.isoformat())
+        db.record_login_attempt(conn, req.username, source, "success", now)
+        # A successful sign-in clears the scope's failures, so a user who
+        # mistypes twice and then gets it right carries nothing forward.
+        db.clear_login_failures(conn, req.username, source)
+        db.prune_login_attempts(conn, now - timedelta(hours=LOGIN_ATTEMPT_RETENTION_HOURS))
         conn.commit()
+
     return {
         "token": token,
         "user": {"username": user["username"], "role": user["role"]},
         "expires_at": expires.isoformat(),
     }
+
+
+@app.get("/auth/lockouts")
+def list_lockouts(identity: dict = Depends(require_role("admin"))):
+    """Scopes currently locked out, and those partway there.
+
+    Read-only. The throttle decides what "locked" means here exactly as it does
+    on the sign-in path -- one implementation of the rule, so this view cannot
+    drift from the behaviour it describes.
+    """
+    now = _naive_utc_now()
+    window_start = now - timedelta(minutes=LOGIN_THROTTLE.window_minutes)
+    out = []
+    with db.get_conn() as conn:
+        for scope in db.login_failure_scopes(conn, window_start):
+            decision = throttle.evaluate(scope["failures"], now, LOGIN_THROTTLE)
+            out.append({
+                "username": scope["username"],
+                "source": scope["source"],
+                "failures": len(scope["failures"]),
+                "locked": decision.locked,
+                "locked_until": decision.locked_until.isoformat() if decision.locked_until else None,
+                "retry_after_seconds": decision.retry_after_seconds if not decision.allowed else 0,
+                "last_failure": max(scope["failures"]).isoformat() if scope["failures"] else None,
+            })
+    out.sort(key=lambda s: (not s["locked"], -s["failures"]))
+    return {
+        "now": now.isoformat(),
+        "settings": {
+            "window_minutes": LOGIN_THROTTLE.window_minutes,
+            "max_failures": LOGIN_THROTTLE.max_failures,
+            "lockout_minutes": LOGIN_THROTTLE.lockout_minutes,
+            "backoff_after": LOGIN_THROTTLE.backoff_after,
+        },
+        "scopes": out,
+    }
+
+
+@app.delete("/auth/lockouts/{username}")
+def clear_lockout(username: str, identity: dict = Depends(require_role("admin"))):
+    """Release a locked-out user (admin only).
+
+    Lockouts expire on their own, so this is for the case where a colleague is
+    locked out and needs back in now. It is an explicit, attributable action
+    rather than a side effect of something else -- and it is written into the
+    ledger, because "the lockout went away" is exactly the kind of event whose
+    absence from an audit trail would be suspicious.
+    """
+    now = _naive_utc_now()
+    with db.get_conn() as conn:
+        cleared = db.clear_login_failures(conn, username)
+        if cleared:
+            _record_auth_event(conn, "auth_lockout_cleared", username, "admin", now,
+                               cleared_by=identity["username"], cleared=cleared)
+        conn.commit()
+    return {"username": username, "cleared_failures": cleared}
 
 
 @app.post("/auth/logout")

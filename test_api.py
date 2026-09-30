@@ -15,7 +15,14 @@ if db_module.DB_PATH.exists():
     db_module.DB_PATH.unlink()
 
 from fastapi.testclient import TestClient
+import app as app_module
 from app import app
+
+# Self-monitoring (v0.10) writes a real event every time a sign-in fails, which
+# would shift the event counts the sections below assert on. It is switched off
+# here and exercised deliberately in its own section -- via the same supported
+# switch a deployment would use, not a private hook.
+app_module.SELF_MONITOR = False
 
 client = TestClient(app)
 client.__enter__()  # trigger startup lifespan event so seed data + admin load
@@ -729,6 +736,210 @@ check("CLI `digest --plain` prints the deterministic text",
 code, _, serr = run_cli(["stats"], transport=_anon_tp)
 check("CLI exits 3 on an unauthenticated call", code == 3)
 check("CLI points at how to authenticate", "login" in serr)
+
+print("\n== login throttling and self-monitoring (v0.10) ==")
+import throttle as throttle_mod
+from datetime import datetime as _dt, timedelta as _td
+
+# -- the pure throttle ------------------------------------------------------
+# throttle.evaluate() reads no clock and touches no store, so a lockout, a
+# backoff and an expiry can all be driven here in microseconds instead of
+# waiting fifteen real minutes to find out whether the rule is right.
+
+_S = throttle_mod.Settings(window_minutes=15, max_failures=5, lockout_minutes=15,
+                           backoff_after=3, backoff_base_seconds=2,
+                           backoff_cap_seconds=30)
+_NOW = _dt(2026, 9, 30, 12, 0, 0)
+
+
+def _ago(**kw):
+    return _NOW - _td(**kw)
+
+
+check("a clean scope is allowed", throttle_mod.evaluate([], _NOW, _S).allowed)
+check("failures below the backoff threshold cost nothing",
+      throttle_mod.evaluate([_ago(seconds=1), _ago(seconds=2)], _NOW, _S).allowed)
+
+_d = throttle_mod.evaluate([_ago(seconds=1), _ago(seconds=2), _ago(seconds=3)], _NOW, _S)
+check("the third failure starts the backoff", not _d.allowed and _d.reason == "backoff")
+check("a refused attempt always asks for at least one second",
+      _d.retry_after_seconds >= 1)
+check("backoff is not reported as a lockout", not _d.locked)
+check("waiting out the backoff lets the next attempt through",
+      throttle_mod.evaluate([_ago(seconds=30), _ago(seconds=31), _ago(seconds=32)],
+                            _NOW, _S).allowed)
+
+# The required gap doubles per failure. max_failures is pushed out of the way
+# so the backoff curve can be seen on its own.
+_SB = throttle_mod.Settings(max_failures=99, backoff_after=3,
+                            backoff_base_seconds=2, backoff_cap_seconds=30)
+check("the backoff gap doubles with each further failure",
+      [throttle_mod.required_gap_seconds(n, _SB) for n in (2, 3, 4, 5)] == [0, 2, 4, 8])
+check("the backoff gap stops at the cap",
+      throttle_mod.required_gap_seconds(40, _SB) == 30)
+
+_locked = throttle_mod.evaluate([_ago(seconds=i) for i in range(1, 6)], _NOW, _S)
+check("reaching max_failures locks the scope", _locked.locked)
+check("the lockout reports when it ends", _locked.locked_until is not None)
+check("the lockout's Retry-After is about the lockout length",
+      14 * 60 <= _locked.retry_after_seconds <= 15 * 60)
+check("a lockout expires on its own",
+      throttle_mod.evaluate([_ago(minutes=16 + i) for i in range(5)], _NOW, _S).allowed)
+check("failures outside the window are not counted",
+      throttle_mod.evaluate([_ago(minutes=20), _ago(minutes=30)], _NOW, _S).failures == 0)
+
+# The source-wide scope slows but must never lock: an office, a VPN exit or a
+# NAT gateway is shared, so locking one out would let a single attacker deny
+# sign-in to everyone behind it.
+_SRC = _S.for_source()
+_sprayed = throttle_mod.evaluate([_ago(seconds=i) for i in range(1, 60)], _NOW, _SRC)
+check("a sprayed source is slowed", not _sprayed.allowed)
+check("a sprayed source is never locked out", not _sprayed.locked)
+check("the source backoff has its own, higher cap",
+      throttle_mod.required_gap_seconds(99, _SRC) == _SRC.backoff_cap_seconds)
+
+check("the strictest decision wins when scopes disagree",
+      throttle_mod.strictest(throttle_mod.ALLOWED, _locked).locked)
+check("a lockout outranks a backoff",
+      throttle_mod.strictest(_d, _locked).reason == "locked_out")
+check("all-clear scopes stay allowed",
+      throttle_mod.strictest(throttle_mod.ALLOWED, throttle_mod.ALLOWED).allowed)
+
+check("settings come from the environment",
+      throttle_mod.Settings.from_env({"SHADOWFAX_LOGIN_MAX_FAILURES": "9"}).max_failures == 9)
+check("a nonsense setting falls back to the default rather than refusing to start",
+      throttle_mod.Settings.from_env({"SHADOWFAX_LOGIN_MAX_FAILURES": "banana"}).max_failures == 5)
+check("a negative setting falls back too",
+      throttle_mod.Settings.from_env({"SHADOWFAX_LOGIN_MAX_FAILURES": "-1"}).max_failures == 5)
+
+# -- the endpoint -----------------------------------------------------------
+_real_throttle = app_module.LOGIN_THROTTLE
+# Lock after 3, with backoff pushed aside so the lockout can be reached without
+# the test sleeping. The backoff curve is already covered above, purely.
+app_module.LOGIN_THROTTLE = throttle_mod.Settings(
+    window_minutes=15, max_failures=3, lockout_minutes=15, backoff_after=99)
+app_module.SELF_MONITOR = True
+
+_codes = [client.post("/auth/login", json={"username": "victim", "password": "guess"}).status_code
+          for _ in range(3)]
+check("failed sign-ins are refused with 401", _codes == [401, 401, 401])
+
+_r = client.post("/auth/login", json={"username": "victim", "password": "guess"})
+check("the fourth attempt is throttled with 429", _r.status_code == 429)
+check("the refusal carries a Retry-After header", _r.headers.get("retry-after", "").isdigit())
+
+# The lockout beats the credentials. Lock the admin scope with wrong passwords,
+# then offer the right one: it must still be refused, or an attacker who
+# happened to guess correctly on attempt 500 would simply walk in.
+for _ in range(3):
+    client.post("/auth/login", json={"username": "admin", "password": "wrong"})
+_right = client.post("/auth/login", json={"username": "admin", "password": "admin"})
+check("a locked-out scope is refused even with the correct password",
+      _right.status_code == 429)
+# ...and unlocking it lets the same correct password straight through, which is
+# what proves the refusal above came from the lockout and not a broken password.
+client.delete("/auth/lockouts/admin")
+check("once unlocked, the correct password works again",
+      client.post("/auth/login", json={"username": "admin", "password": "admin"}).status_code == 200)
+
+# An unknown username must behave exactly like a known one, or the endpoint
+# becomes a way to discover which accounts exist.
+_ghost = [client.post("/auth/login", json={"username": "no-such-user", "password": "x"})
+          for _ in range(4)]
+check("an unknown username is refused with the same 401",
+      [x.status_code for x in _ghost[:3]] == [401, 401, 401])
+check("an unknown username is throttled the same way", _ghost[3].status_code == 429)
+check("the refusal never says which half was wrong",
+      "username or password" in _ghost[0].json()["detail"])
+
+code, sout, _ = run_cli(["lockouts"])
+check("CLI `lockouts` exits non-zero while a scope is locked", code == 1)
+check("CLI lockouts names the locked scope", "victim" in sout and "LOCKED" in sout)
+code, sout, _ = run_cli(["lockouts", "--json"])
+check("CLI `lockouts --json` emits the machine form",
+      any(s["username"] == "victim" for s in json.loads(sout)["scopes"]))
+
+_lk = client.get("/auth/lockouts").json()
+check("the admin lockout view lists the locked scope",
+      any(s["username"] == "victim" and s["locked"] for s in _lk["scopes"]))
+check("the lockout view reports the settings in force",
+      _lk["settings"]["max_failures"] == 3)
+check("the lockout view is admin-only", viewer.get("/auth/lockouts").status_code == 403)
+
+# -- self-monitoring --------------------------------------------------------
+_self = client.get(f"/actors/{app_module.SELF_ACTOR_ID}").json()
+_types = [e["event_type"] for e in _self["events"]]
+check("a failed sign-in becomes an event in Shadowfax's own log",
+      _types.count("auth_failure") >= 3)
+check("tripping the lockout is recorded too", "auth_lockout" in _types)
+check("the attempted username is metadata, never the actor id",
+      all(e["actor_id"] == app_module.SELF_ACTOR_ID for e in _self["events"])
+      and any(e["metadata"].get("attempted_username") == "victim" for e in _self["events"]))
+check("the source address is recorded with the attempt",
+      all(e["metadata"].get("source") for e in _self["events"]))
+
+_bf = [a for a in _self["alerts"] if a["category"] == "brute_force_auth"]
+check("Shadowfax's own brute-force detector fires on attacks against Shadowfax",
+      len(_bf) >= 1)
+check("the self-monitoring alert carries the same ATT&CK mapping as any other",
+      any(t["id"] == "T1110" for t in _bf[0]["attack"]))
+check("the front door's events are chained into the tamper-evident ledger",
+      client.get("/ledger/verify").json()["ok"] is True)
+
+# An endpoint that only speaks when something happens to it is idle by
+# definition; alerting on that silence would train an analyst to ignore the
+# category, so the actor is exempt in policy.
+check("a quiet front door does not raise dormant_reappearance",
+      not any(a["category"] == "dormant_reappearance" for a in _self["alerts"]))
+
+# An admin can let a locked-out colleague back in, and that release is itself
+# recorded -- "the lockout went away" is exactly the kind of event whose
+# absence from an audit trail would be suspicious.
+_un = client.delete("/auth/lockouts/victim").json()
+check("an admin can clear a lockout", _un["cleared_failures"] >= 3)
+check("clearing a lockout is itself recorded",
+      "auth_lockout_cleared" in
+      [e["event_type"] for e in client.get(f"/actors/{app_module.SELF_ACTOR_ID}").json()["events"]])
+check("the cleared scope no longer appears as locked",
+      not any(s["username"] == "victim" and s["locked"]
+              for s in client.get("/auth/lockouts").json()["scopes"]))
+check("clearing a lockout is admin-only",
+      viewer.delete("/auth/lockouts/victim").status_code == 403)
+# The unknown username locked out earlier is still locked -- releasing it must
+# work exactly like releasing a real one, so even this admin endpoint cannot be
+# turned into a way of asking which accounts exist.
+_ghost_clear = client.delete("/auth/lockouts/no-such-user").json()
+check("releasing a lockout on an unknown username behaves the same",
+      _ghost_clear["cleared_failures"] >= 3)
+code, _, _ = run_cli(["lockouts"])
+check("CLI `lockouts` exits 0 once nothing is locked", code == 0)
+
+# -- the timing side channel ------------------------------------------------
+# Returning early for an unknown user would make the response time a reliable
+# oracle for which accounts exist. dummy_verify burns the same PBKDF2 work.
+import auth as auth_mod
+import time as _time
+
+_u = db_module
+with db_module.get_conn() as _c:
+    _row = db_module.get_user_by_username(_c, "admin")
+_t0 = _time.perf_counter()
+auth_mod.verify_password("wrong", _row["salt"], _row["password_hash"])
+_real_ms = _time.perf_counter() - _t0
+_t0 = _time.perf_counter()
+_dummy_result = auth_mod.dummy_verify("wrong")
+_dummy_ms = _time.perf_counter() - _t0
+check("dummy_verify always fails", _dummy_result is False)
+check("dummy_verify costs about what a real verification costs",
+      _dummy_ms >= _real_ms * 0.5)
+
+# Put the suite back the way it found it: real settings, self-monitoring off,
+# and no recorded attempts left to throttle the sections that follow.
+app_module.LOGIN_THROTTLE = _real_throttle
+app_module.SELF_MONITOR = False
+with db_module.get_conn() as _c:
+    _c.execute("DELETE FROM login_attempts")
+    _c.commit()
 
 print("\n== server-sent events ==")
 import bus

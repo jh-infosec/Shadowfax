@@ -6,6 +6,7 @@ import ActorDrawer from "./components/ActorDrawer.jsx";
 import PolicyEditor from "./components/PolicyEditor.jsx";
 import IncidentsDrawer from "./components/IncidentsDrawer.jsx";
 import DigestDrawer from "./components/DigestDrawer.jsx";
+import LockoutsDrawer from "./components/LockoutsDrawer.jsx";
 import ExplanationModal from "./components/ExplanationModal.jsx";
 import NLSearch from "./components/NLSearch.jsx";
 import Login from "./components/Login.jsx";
@@ -57,6 +58,7 @@ export default function App() {
   const [policy, setPolicy] = useState(null);
   const [incidentsOpen, setIncidentsOpen] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
+  const [lockoutsOpen, setLockoutsOpen] = useState(false);
   // The alert whose explanation modal is open, or null.
   const [explainAlert, setExplainAlert] = useState(null);
   // Active natural-language search result (snapshot), or null for the normal
@@ -264,6 +266,8 @@ export default function App() {
           canEditPolicy={canAnalyst}
           onOpenIncidents={() => setIncidentsOpen(true)}
           onOpenDigest={() => setDigestOpen(true)}
+          onOpenLockouts={() => setLockoutsOpen(true)}
+          canSeeLockouts={canAdmin}
         />
         <div className="main">
           <NLSearch
@@ -296,6 +300,8 @@ export default function App() {
           onSelectActor={(a) => { setDigestOpen(false); setSelectedActorId(a); }}
         />
       )}
+
+      {lockoutsOpen && <LockoutsDrawer onClose={() => setLockoutsOpen(false)} />}
 
       {explainAlert && (
         <ExplanationModal alert={explainAlert} onClose={() => setExplainAlert(null)} />

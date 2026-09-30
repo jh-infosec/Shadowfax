@@ -406,6 +406,46 @@ def cmd_verify(client: Client, args, out) -> int:
     return EXIT_OK if report.get("ok") else EXIT_FAIL
 
 
+def cmd_lockouts(client: Client, args, out) -> int:
+    """Show sign-in scopes currently locked or backing off, or release one.
+
+    Exits non-zero while anything is locked, so a script can notice that the
+    front door is under attack without anyone reading the output -- the same
+    trick `check` uses.
+    """
+    if args.unlock:
+        path = "/auth/lockouts/" + urllib.parse.quote(args.unlock, safe="")
+        result = client.call("DELETE", path)
+        emit(out, result, args.json, lambda o, v: print(
+            f"cleared {v['cleared_failures']} recorded failures for {v['username']}",
+            file=o))
+        return EXIT_OK
+
+    report = client.call("GET", "/auth/lockouts")
+    emit(out, report, args.json, human_lockouts)
+    return EXIT_FAIL if any(s["locked"] for s in report["scopes"]) else EXIT_OK
+
+
+def human_lockouts(out, report) -> None:
+    s = report["settings"]
+    print(f"sign-in throttle: lock after {s['max_failures']} failures in "
+          f"{s['window_minutes']} min, for {s['lockout_minutes']} min "
+          f"(backoff from {s['backoff_after']})", file=out)
+    scopes = report["scopes"]
+    if not scopes:
+        print("no failed sign-ins in the window.", file=out)
+        return
+    print(file=out)
+    print(f"{_col('USERNAME', 24)} {_col('SOURCE', 22)} {_col('FAILS', 6)} "
+          f"{_col('STATE', 9)} LAST FAILURE", file=out)
+    for scope in scopes:
+        state = ("LOCKED" if scope["locked"]
+                 else "backoff" if scope["retry_after_seconds"] else "-")
+        print(f"{_col(scope['username'], 24)} {_col(scope['source'], 22)} "
+              f"{_col(scope['failures'], 6)} {_col(state, 9)} "
+              f"{scope['last_failure'] or ''}", file=out)
+
+
 def cmd_actors(client: Client, args, out) -> int:
     actors = client.call("GET", "/actors")
     emit(out, actors, args.json, human_actors)
@@ -510,6 +550,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="print the deterministic digest text, not the narrative")
 
     sub.add_parser("verify", help="verify the event ledger (non-zero if broken)")
+
+    sp = sub.add_parser("lockouts",
+                        help="sign-in lockouts (non-zero while any scope is locked)")
+    sp.add_argument("--unlock", metavar="USERNAME",
+                    help="clear a username's recorded failures (admin)")
     sub.add_parser("actors", help="list actors with risk scores")
     sub.add_parser("stats", help="alert and event counts")
 
@@ -525,7 +570,7 @@ COMMANDS = {
     "status": cmd_status, "login": cmd_login, "ingest": cmd_ingest,
     "alerts": cmd_alerts, "check": cmd_check, "incidents": cmd_incidents,
     "explain": cmd_explain, "search": cmd_search, "actors": cmd_actors,
-    "digest": cmd_digest, "verify": cmd_verify,
+    "digest": cmd_digest, "verify": cmd_verify, "lockouts": cmd_lockouts,
     "stats": cmd_stats, "policy": cmd_policy,
 }
 

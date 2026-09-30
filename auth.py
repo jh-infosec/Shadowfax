@@ -44,6 +44,26 @@ def verify_password(password: str, salt: str, expected_hash: str) -> bool:
     return hmac.compare_digest(candidate, expected_hash)
 
 
+# A fixed salt used only to burn the same work when no such user exists. It is
+# not a secret and protects nothing by itself -- see dummy_verify().
+_DUMMY_SALT = "00112233445566778899aabbccddeeff"
+
+
+def dummy_verify(password: str) -> bool:
+    """Spend the same time a real verification would, and return False.
+
+    Without this, `POST /auth/login` is a user-enumeration oracle: a known
+    username costs a 200,000-round PBKDF2 derivation while an unknown one
+    returns immediately, and the difference is trivially measurable over the
+    network. Running the same derivation against a throwaway salt makes the two
+    paths cost the same, so the response time stops leaking which accounts
+    exist. Always returns False; the return value exists only so callers cannot
+    accidentally optimise the call away.
+    """
+    hash_password(password, _DUMMY_SALT)
+    return False
+
+
 # Session tokens
 
 def new_session_token() -> str:

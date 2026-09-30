@@ -125,6 +125,24 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_used_at TEXT
 );
+
+-- Sign-in attempts against Shadowfax's own front door (v0.10). This is
+-- operational state for the throttle, not evidence: it is pruned freely and is
+-- deliberately NOT part of the hash-chained ledger. What belongs in the ledger
+-- is the security-relevant outcome (a failed sign-in, a lockout), and app.py
+-- writes those there separately.
+--
+-- Only `outcome = 'failure'` rows drive the throttle; successes are recorded so
+-- an admin can see who got in, and they clear the failure history for the scope.
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    source TEXT NOT NULL,
+    at TEXT NOT NULL,
+    outcome TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_scope
+    ON login_attempts(username, source, at);
 """
 
 
@@ -510,8 +528,10 @@ def get_alert(conn: sqlite3.Connection, alert_id: str) -> dict[str, Any] | None:
 
 
 def wipe_all(conn: sqlite3.Connection) -> None:
-    # Reset clears activity data only. Users, sessions and API keys are left
-    # alone -- a data reset should not log you out or delete your admin account.
+    # Reset clears activity data only. Users, sessions, API keys and recorded
+    # sign-in attempts are left alone -- a data reset should not log you out,
+    # delete your admin account, or quietly lift an active lockout. Clearing a
+    # lockout is its own explicit, audited action (see the unlock endpoint).
     conn.execute("DELETE FROM alerts")
     conn.execute("DELETE FROM alert_state")
     conn.execute("DELETE FROM events")
@@ -617,3 +637,128 @@ def list_api_keys(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def delete_api_key(conn: sqlite3.Connection, key_id: int) -> bool:
     cur = conn.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
     return cur.rowcount > 0
+
+
+# Authentication: sign-in attempts (v0.10)
+#
+# The throttle in throttle.py is a pure function; these are the only functions
+# that give it something to be pure about. Timestamps are stored as UTC ISO
+# strings, consistent with the rest of the schema, and parsed back to aware
+# datetimes on the way out so the throttle never has to guess a timezone.
+
+def record_login_attempt(conn: sqlite3.Connection, username: str, source: str,
+                         outcome: str, at: datetime | None = None) -> None:
+    """Record one sign-in attempt. `outcome` is 'failure', 'success' or 'locked'.
+
+    Called for unknown usernames too -- the throttle must behave identically
+    whether or not the account exists, or the endpoint becomes a way to discover
+    which usernames are real.
+    """
+    conn.execute(
+        "INSERT INTO login_attempts (username, source, at, outcome) VALUES (?, ?, ?, ?)",
+        (username, source, _iso(at or _utc_now()), outcome),
+    )
+
+
+def recent_login_failures(conn: sqlite3.Connection, username: str, source: str,
+                          since: datetime) -> list[datetime]:
+    """Failure timestamps for one (username, source) scope since `since`.
+
+    Scoped to the pair rather than the account on purpose: locking the account
+    would let anyone who knows a username lock its owner out. See throttle.py.
+    """
+    rows = conn.execute(
+        """SELECT at FROM login_attempts
+           WHERE username = ? AND source = ? AND outcome = 'failure' AND at >= ?
+           ORDER BY at ASC""",
+        (username, source, _iso(since)),
+    ).fetchall()
+    return [ts for ts in (_parse_ts(r["at"]) for r in rows) if ts is not None]
+
+
+def recent_source_failures(conn: sqlite3.Connection, source: str,
+                           since: datetime) -> list[datetime]:
+    """Failure timestamps for one source address, across every username tried.
+
+    This is what catches spraying -- one attempt each at many accounts, where no
+    single (username, source) scope ever reaches its own threshold.
+    """
+    rows = conn.execute(
+        """SELECT at FROM login_attempts
+           WHERE source = ? AND outcome = 'failure' AND at >= ?
+           ORDER BY at ASC""",
+        (source, _iso(since)),
+    ).fetchall()
+    return [ts for ts in (_parse_ts(r["at"]) for r in rows) if ts is not None]
+
+
+def clear_login_failures(conn: sqlite3.Connection, username: str,
+                         source: str | None = None) -> int:
+    """Forget the failures for a username, optionally only from one source.
+
+    Called on a successful sign-in, so an occasional typo never accumulates
+    toward a lockout across weeks, and by the admin unlock endpoint.
+    """
+    if source is None:
+        cur = conn.execute(
+            "DELETE FROM login_attempts WHERE username = ? AND outcome = 'failure'",
+            (username,),
+        )
+    else:
+        cur = conn.execute(
+            """DELETE FROM login_attempts
+               WHERE username = ? AND source = ? AND outcome = 'failure'""",
+            (username, source),
+        )
+    return cur.rowcount
+
+
+def login_failure_scopes(conn: sqlite3.Connection,
+                         since: datetime) -> list[dict[str, Any]]:
+    """Every (username, source) with failures since `since`, and their times.
+
+    Feeds the admin lockout view. The throttle decides what is *locked*; this
+    only supplies the raw history, so there is one implementation of the rule.
+    """
+    rows = conn.execute(
+        """SELECT username, source, at FROM login_attempts
+           WHERE outcome = 'failure' AND at >= ?
+           ORDER BY username, source, at ASC""",
+        (_iso(since),),
+    ).fetchall()
+    scopes: dict[tuple[str, str], list[datetime]] = {}
+    for r in rows:
+        ts = _parse_ts(r["at"])
+        if ts is not None:
+            scopes.setdefault((r["username"], r["source"]), []).append(ts)
+    return [{"username": u, "source": s, "failures": times}
+            for (u, s), times in scopes.items()]
+
+
+def prune_login_attempts(conn: sqlite3.Connection, before: datetime) -> int:
+    """Drop attempts older than `before`. This table is operational state, not
+    evidence -- the ledger holds what actually matters -- so it is safe to
+    discard and would otherwise grow without bound under a sustained attack."""
+    cur = conn.execute("DELETE FROM login_attempts WHERE at < ?", (_iso(before),))
+    return cur.rowcount
+
+
+def _parse_ts(value: str) -> datetime | None:
+    """Parse a stored timestamp as naive UTC.
+
+    Everything in this store is naive-UTC ISO text, and the throttle compares
+    these against a clock in the same shape. Normalising an offset-carrying
+    value here rather than at the call site means a mixed-format row cannot
+    surface as a TypeError deep inside the sign-in path.
+
+    Returns None rather than raising: one unparseable row should not be able to
+    take down the sign-in endpoint. A dropped row can only ever make the
+    throttle more permissive by one attempt, never less.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed

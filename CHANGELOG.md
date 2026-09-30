@@ -1,5 +1,100 @@
 # Changelog
 
+## Version 0.10.0
+
+Shadowfax has shipped a `brute_force_auth` detector since v0.1. Until this
+version, its own sign-in endpoint would have sailed straight past it: unlimited
+attempts, no delay, no record. A tool that detects the attack it is itself
+vulnerable to is not a serious tool. This version hardens the front door — and
+then points the engine at it, so an attack on the monitoring platform raises the
+same alerts, through the same detectors, as an attack on anything it watches.
+
+### Added
+
+- **`throttle.py`** — backoff, then lockout. After a few failures the caller
+  must wait a growing interval (2s, 4s, 8s … capped); past the limit the scope
+  is refused outright until the lockout expires. `evaluate()` is a pure function
+  of `(failure timestamps, now, settings)`: it reads no clock and touches no
+  store, which is what lets the tests drive a lockout, a backoff and an expiry
+  in microseconds instead of waiting fifteen real minutes.
+- **Nothing sleeps.** A server that answers a flood of bad sign-ins by holding
+  connections open has turned its own defence into a resource-exhaustion vector.
+  Shadowfax answers immediately with `429` and an honest `Retry-After`.
+- **Two scopes, with different powers.** Hard lockout applies to a
+  **(username, source)** pair — never to the account, because locking an account
+  after N failures hands anyone who knows a username a denial-of-service against
+  its owner. A second, looser scope covers a **source address across every
+  username it tries**, which is what catches password spraying. That one
+  **slows but never locks**: an office, a VPN exit or a NAT gateway is shared,
+  so locking one out would let a single attacker deny sign-in to everyone behind
+  it — the exact attack the control exists to prevent, delivered by the control.
+- **`GET /auth/lockouts`** and **`DELETE /auth/lockouts/{username}`** (admin).
+  The lockout view asks the same `throttle.evaluate()` the sign-in path does, so
+  it cannot drift from the behaviour it describes.
+- **`shadowfax lockouts`**, with `--unlock USERNAME`. Exits non-zero while any
+  scope is locked, so a script can notice the front door is under attack without
+  anyone reading the output.
+- **A "Front door" drawer** in the dashboard (admin), showing what is locked and
+  the one button needed to let a colleague back in.
+
+### Changed
+
+- **Shadowfax now watches its own front door.** Failed sign-ins and lockouts are
+  ingested as ordinary events under the actor `shadowfax-auth`, into the same
+  hash-chained ledger as everything else. The existing `brute_force_auth`
+  detector fires on them with the same `T1110` mapping, with **no special-casing
+  anywhere in the engine** — there is no separate audit path to keep in sync,
+  and no privileged log a compromised admin could edit more quietly than the
+  rest. Switched off with `SHADOWFAX_SELF_MONITOR=0`.
+- **The attempted username is metadata, never the actor id.** It is
+  attacker-controlled text: keying actors on it would let anyone mint actors at
+  will, or post events into a real actor's timeline by "signing in" as them and
+  poison the evidence for an unrelated investigation.
+- **`auth.dummy_verify()` closes a timing side channel.** The old endpoint
+  returned immediately for an unknown username and spent 200,000 PBKDF2 rounds
+  for a known one — a difference trivially measurable over the network, and so a
+  reliable oracle for which accounts exist. Both paths now cost the same.
+- **`dormancy_exempt_actors` in the policy.** An endpoint that only speaks when
+  something happens to it is idle by definition, and alerting on that silence
+  would train an analyst to ignore the whole category. The exemption lives in
+  the policy rather than as a hardcoded name in `detectors.py`, so detectors stay
+  a pure function of `(events, policy)`.
+- Configuration comes from the environment (`SHADOWFAX_LOGIN_*`), **not** the
+  detection policy. The policy governs detection; this is enforcement of the
+  platform's own door. Putting it in the policy would blur the line the project
+  rests on, and would put an auth control behind `PUT /policy` where any analyst
+  could widen it to nothing. A malformed value falls back to the default rather
+  than stopping the API from starting.
+- `POST /reset` leaves recorded sign-in attempts alone. Clearing a lockout is
+  its own explicit, audited action, not a side effect of a data reset.
+
+### Notes on what this is not
+
+`X-Forwarded-For` is deliberately ignored; the source is the socket peer.
+Keying a security control on a header the client sets would hand the control to
+the attacker — rotate the header, reset the counter. An operator behind a proxy
+must terminate it somewhere that presents the real peer address, and that is
+stated in the README rather than quietly assumed.
+
+This slows credential guessing; it does not stop a distributed attacker with
+many source addresses, and it is not a replacement for good passwords or a
+second factor. Recorded attempts are operational state, pruned on a retention
+window — the ledger is what keeps the evidence.
+
+### Tests
+
+52 new checks. The throttle's rules are driven as pure functions (backoff curve,
+cap, lockout, expiry, window, source-scope never locking, strictest-wins,
+environment parsing including garbage and negatives). Over HTTP: the 401→429
+transition, the `Retry-After` header, a locked scope refusing the *correct*
+password and accepting it again once released, an unknown username behaving
+byte-identically to a known one, admin-only access to both new endpoints, and
+releasing a lockout on a username that does not exist. Self-monitoring: failures
+and lockouts becoming events, the attempted username staying out of the actor
+id, `brute_force_auth` firing against the platform with its ATT&CK mapping, the
+ledger still verifying, the dormancy exemption holding, and `dummy_verify`
+costing what a real verification costs. 242 checks in all, green.
+
 ## Version 0.9.0
 
 The tamper-evident event ledger. Every version until now made Shadowfax better at

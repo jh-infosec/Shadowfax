@@ -248,6 +248,41 @@ the queue only when a human acknowledges its alerts.
 assistant's covering narrative, but the assistant receives the order and the
 reasons *after* they are fixed and its prompt forbids re-ordering them.
 
+#### throttle.py
+
+Sign-in backoff and lockout (v0.10). Pure: `evaluate()` is a function of
+`(failure timestamps, now, settings)` and reads no clock, so the tests drive a
+lockout, a backoff and an expiry in microseconds rather than waiting fifteen
+real minutes to learn whether the rule is right.
+
+Two controls in sequence. **Backoff** requires a growing gap between attempts
+once a few failures are on record -- invisible to someone who mistyped, brutal
+for anything working through a list. **Lockout** follows past the limit. Neither
+sleeps: a server that answers a flood of bad sign-ins by holding connections
+open has converted its own defence into a resource-exhaustion vector, so the
+refusal is an immediate `429` with an honest `Retry-After` and the client waits
+on its own time.
+
+Two scopes, with deliberately different powers. Hard lockout applies to the
+**(username, source)** pair, never to the account: locking an account after N
+failures hands anyone who knows a username a denial-of-service against its
+owner. A second scope covers a **source address across every username it has
+tried**, which is what catches spraying -- and it **slows but never locks**,
+because an office, a VPN exit or a NAT gateway is shared, so locking one out
+would let a single attacker deny sign-in to everyone behind it. `strictest()`
+combines the scopes so adding one can only ever tighten the door.
+
+`source` is the socket peer. `X-Forwarded-For` is ignored on purpose: it is set
+by the client, and keying a security control on a value the attacker chooses
+hands them the control.
+
+Settings come from the environment, not the policy. The policy governs
+**detection**; this is **enforcement** of Shadowfax's own front door, and
+putting it in the policy would blur the line the project rests on -- as well as
+placing an auth control behind `PUT /policy`, where any analyst could widen it
+to nothing. A malformed value falls back to the default rather than stopping the
+API from starting.
+
 #### ledger.py
 
 The tamper-evident event ledger (v0.9). Pure, no I/O: given events it computes
@@ -426,6 +461,14 @@ once.
 Branding, connection status, the evidence-integrity badge and the severity
 count summary. The connection dot reflects whether the live stream is up.
 
+#### src/components/LockoutsDrawer.jsx
+
+The front-door view (v0.10), admin-only. Shows which sign-in scopes are locked
+or backing off and offers the one action an admin actually needs -- releasing a
+colleague. Deliberately small: the *alerts* raised by attacks on the platform
+appear in the ordinary table, because they are ordinary alerts, so this drawer
+only carries the operational state that has nowhere else to live.
+
 #### src/components/LedgerBadge.jsx
 
 The evidence-integrity badge (v0.9). Calls `GET /ledger/verify` on mount and
@@ -504,6 +547,24 @@ the severity colours that `constants.js` refers to by variable name.
 4. Detection engine evaluates that history against the active policy
 5. Existing alerts for the actor are deleted and replaced with the new set
 6. A change is published on the bus; subscribed dashboards refetch
+
+### On a sign-in attempt (v0.10)
+
+1. The source address is read from the socket peer
+2. The throttle is consulted for two scopes -- (username, source) and source --
+   **before** the username is looked up, and the strictest decision wins
+3. A refusal returns `429` with `Retry-After` and costs no credential work
+4. Otherwise the password is verified; with no such user, `auth.dummy_verify`
+   spends the same PBKDF2 work so the response time reveals nothing
+5. A failure is recorded, ingested as an event under `shadowfax-auth`, and the
+   actor is rescanned -- so `brute_force_auth` fires through the ordinary
+   detector path
+6. The attempt that trips the limit also writes an `auth_lockout` event, once
+7. A success clears the scope's failures and issues a session token
+
+Steps 2 and 4 are what keep the endpoint from becoming a user-enumeration
+oracle: an unknown username is throttled and costs exactly what a known one
+does.
 
 ### On policy change
 
@@ -600,6 +661,7 @@ auth.py                 bus.py                  attack.py
 attack_registry.json    correlate.py            assistant.py
 seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
+throttle.py
 architecture.md
 README.md
 CHANGELOG.md
@@ -622,4 +684,5 @@ frontend/src/components/ExplanationModal.jsx
 frontend/src/components/NLSearch.jsx
 frontend/src/components/DigestDrawer.jsx
 frontend/src/components/LedgerBadge.jsx
+frontend/src/components/LockoutsDrawer.jsx
 ```

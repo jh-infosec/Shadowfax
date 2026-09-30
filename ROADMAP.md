@@ -172,6 +172,38 @@ Attack-chain correlation, then evidence integrity and ingest.
 
 ---
 
+## Version 0.10
+
+Harden the platform's own front door, then point the engine at it.
+
+- [x] Sign-in throttling and lockout: `throttle.py`, a pure function of
+      `(failure timestamps, now, settings)`. Backoff (2s, 4s, 8s … capped) then
+      lockout; nothing sleeps, so a flood cannot exhaust the server through its
+      own defence. Hard lockout is scoped to a (username, source) pair so it
+      cannot be used to lock a user out of their own account; a looser
+      source-wide scope catches password spraying and deliberately slows without
+      ever locking, because a source address is shared. `GET /auth/lockouts`,
+      `DELETE /auth/lockouts/{username}`, `shadowfax lockouts`, and a "Front
+      door" drawer. Shipped in `v0.10.0`.
+- [x] Close the user-enumeration oracle: the throttle runs before the username
+      lookup, failures are recorded whether or not the account exists, and
+      `auth.dummy_verify()` spends the same PBKDF2 work when it does not — the
+      old early return made response time a reliable signal for which accounts
+      were real. Shipped in `v0.10.0`.
+- [x] Platform self-monitoring: failed sign-ins and lockouts against Shadowfax
+      become ordinary events under the `shadowfax-auth` actor, in the same
+      hash-chained ledger, and raise `brute_force_auth` (T1110) through the
+      existing detector with no special-casing in the engine. The attempted
+      username is metadata, never the actor id. `dormancy_exempt_actors` keeps a
+      quiet front door from raising `dormant_reappearance`. Shipped in
+      `v0.10.0`.
+- [ ] Users and API keys management UI. The endpoints exist and are admin-only;
+      the dashboard still makes you reach for `curl`.
+- [ ] Second factor (TOTP) for admin accounts. Throttling slows guessing; it
+      does not stop a leaked password.
+
+---
+
 ## Version 1.0
 
 - [ ] Electron desktop application

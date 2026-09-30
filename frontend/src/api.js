@@ -159,6 +159,17 @@ export function getLedgerHead() {
   return request("/ledger/head");
 }
 
+// Sign-in lockouts (v0.10). Admin-only. `getLockouts` returns the scopes with
+// failures in the window plus the settings in force; `clearLockout` releases a
+// username and is itself recorded as an event.
+export function getLockouts() {
+  return request("/auth/lockouts");
+}
+
+export function clearLockout(username) {
+  return request(`/auth/lockouts/${encodeURIComponent(username)}`, { method: "DELETE" });
+}
+
 export function getPolicy() {
   return request("/policy");
 }

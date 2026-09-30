@@ -62,6 +62,8 @@ investigation and explainability.
 - Triage digest — the open incidents that most need an analyst, ranked deterministically with the reasons shown
 - Command-line interface — ingest, query, explain and gate on alerts from a shell; `--json` everywhere for agents
 - Tamper-evident event ledger — every event hash-chained to the one before it, so an edit, deletion or reordering breaks the chain at a locatable point
+- Sign-in throttling and lockout — backoff then lockout on the platform's own login, with no enumeration oracle and no sleeping
+- Self-monitoring — attacks on Shadowfax's own front door become ordinary events and raise ordinary alerts, through the same detectors as everything else
 - Automated API testing
 
 ---
@@ -170,6 +172,11 @@ Planned
 
 - Tamper-Evident Event Ledger — shipped (v0.9.0)
 
+### v0.10
+
+- Sign-in Throttling & Lockout — shipped (v0.10.0)
+- Platform Self-Monitoring — shipped (v0.10.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -268,6 +275,13 @@ Verify that the event log has not been tampered with (see Evidence integrity):
 python cli.py verify              # exit 0 if intact, 1 if broken
 ```
 
+See who is failing to sign in, and let a locked-out colleague back in:
+
+```bash
+python cli.py lockouts            # exit 1 while any scope is locked
+python cli.py lockouts --unlock j.bartlett
+```
+
 Point it elsewhere with `--url`, `SHADOWFAX_URL`, or the stored config.
 
 ---
@@ -325,6 +339,90 @@ gets published is deliberately left to the operator rather than claimed here.
 
 ---
 
+## The front door
+
+Shadowfax has shipped a `brute_force_auth` detector since v0.1. Until v0.10 its
+own sign-in endpoint would have sailed straight past it — unlimited attempts, no
+delay, no record. A tool that detects the attack it is itself vulnerable to is
+not a serious tool.
+
+**Backoff, then lockout.** After a few failures the caller must wait a growing
+interval between attempts (2s, 4s, 8s … capped). Someone who fat-fingered their
+password notices nothing; a script working through a wordlist is slowed by
+orders of magnitude. Past the limit the scope is locked outright. Nothing
+sleeps: answering a flood by holding connections open would turn the defence
+into a resource-exhaustion vector, so Shadowfax replies at once with `429` and
+an honest `Retry-After`.
+
+**Hard lockout applies to a (username, source) pair, never to the account.**
+Locking an account after N failures hands anyone who knows a username a
+denial-of-service against its owner. A second, looser scope covers a source
+address across every username it tries — that is what catches password spraying
+— and it **slows but never locks**, because an office, a VPN exit or a NAT
+gateway is shared, and locking one out would let a single attacker deny sign-in
+to everyone behind it.
+
+**No enumeration oracle.** The throttle is consulted before the username is
+looked up, and a failure is recorded whether or not the account exists, so an
+imaginary username locks out exactly like a real one. When there is no such
+user, `auth.dummy_verify` burns the same PBKDF2 work a real check would — the
+old early return made response time a reliable signal for which accounts exist.
+
+```bash
+python cli.py lockouts
+```
+
+```
+sign-in throttle: lock after 5 failures in 15 min, for 15 min (backoff from 3)
+
+USERNAME       SOURCE       FAILS  STATE     LAST FAILURE
+j.bartlett     127.0.0.1    5      LOCKED    2026-09-30T12:02:11
+```
+
+### Shadowfax watches itself
+
+Failed sign-ins and lockouts are ingested as **ordinary events**, under the
+actor `shadowfax-auth`, into the same hash-chained ledger as everything else.
+The existing `brute_force_auth` detector fires on them with the same `T1110`
+mapping, and they appear in the same alert table — with no special-casing
+anywhere in the engine. There is no separate audit path to keep in sync, and no
+privileged log that a compromised admin could edit more quietly than the rest.
+
+The attempted username travels in metadata, never as the actor id: it is
+attacker-controlled text, and keying actors on it would let anyone mint actors
+at will — or post events into a real actor's timeline by "signing in" as them,
+poisoning the evidence for an unrelated investigation.
+
+Set `SHADOWFAX_SELF_MONITOR=0` to turn it off.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SHADOWFAX_LOGIN_MAX_FAILURES` | 5 | failures before a scope is locked |
+| `SHADOWFAX_LOGIN_WINDOW_MINUTES` | 15 | how far back failures count |
+| `SHADOWFAX_LOGIN_LOCKOUT_MINUTES` | 15 | how long a lockout lasts |
+| `SHADOWFAX_LOGIN_BACKOFF_AFTER` | 3 | failures before backoff starts |
+| `SHADOWFAX_LOGIN_BACKOFF_CAP_SECONDS` | 30 | longest per-scope wait |
+| `SHADOWFAX_LOGIN_SOURCE_BACKOFF_AFTER` | 10 | failures from one source before it is slowed |
+| `SHADOWFAX_LOGIN_SOURCE_BACKOFF_CAP_SECONDS` | 60 | longest per-source wait |
+| `SHADOWFAX_SELF_MONITOR` | on | ingest front-door events into the log |
+
+These live in the environment, **not** in the detection policy. The policy
+governs detection; this is enforcement of the platform's own door, and putting
+it behind `PUT /policy` would let any analyst widen it to nothing.
+
+**Behind a proxy:** `X-Forwarded-For` is deliberately ignored — it is set by the
+client, so keying a security control on it would hand the control to the
+attacker, who would simply rotate the header. Terminate the proxy somewhere that
+presents the real peer address, or every request will share one source scope.
+
+This slows credential guessing. It does not stop a distributed attacker with
+many source addresses, and it is not a substitute for good passwords or a second
+factor.
+
+---
+
 ## Security
 
 Every endpoint requires authentication. Analysts sign in for a bearer token
@@ -332,7 +430,9 @@ Every endpoint requires authentication. Analysts sign in for a bearer token
 is role-based: `viewer` reads, `analyst` acknowledges, assigns and edits
 policy, `admin` manages users, keys and resets. Passwords are hashed with
 PBKDF2 and a per-user salt, and only credential fingerprints are stored, never
-the secrets. CORS is restricted to the dashboard origin.
+the secrets. CORS is restricted to the dashboard origin. The sign-in endpoint
+is throttled and locks out, and costs the same whether or not the username
+exists — see The front door above.
 
 On a fresh database the first admin comes from `SHADOWFAX_ADMIN_USERNAME` and
 `SHADOWFAX_ADMIN_PASSWORD`. If those are unset, a default `admin` / `admin` is
