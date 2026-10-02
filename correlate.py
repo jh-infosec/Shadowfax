@@ -20,8 +20,8 @@ from typing import Any
 
 import attack
 
-SEVERITY_WEIGHT = {"critical": 10, "high": 5, "medium": 2, "low": 1}
-SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+SEVERITY_WEIGHT = {"critical": 10, "high": 5, "medium": 2, "low": 1, "info": 0}
+SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 # Human phrases for the summary sentence, keyed by alert category.
 _CATEGORY_PHRASE = {

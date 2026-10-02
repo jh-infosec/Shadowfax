@@ -66,6 +66,14 @@ CREATE TABLE IF NOT EXISTS alerts (
     message TEXT NOT NULL,
     target TEXT NOT NULL,
     attack TEXT NOT NULL DEFAULT '[]',
+    -- Provenance for alerts that came from an ingested findings envelope
+    -- (v0.11). NULL for Shadowfax's own detectors, which is the honest
+    -- representation: "no external emitter claimed this, we found it".
+    -- `validated` is the emitter's own statement about whether it verified the
+    -- claim or is repeating what the subject said about itself.
+    source_tool TEXT,
+    validated INTEGER,
+    evidence TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_actor ON alerts(actor_id);
@@ -177,8 +185,11 @@ def _migrate_legacy_alerts(conn: sqlite3.Connection) -> None:
         return
     cols = conn.execute("PRAGMA table_info(alerts)").fetchall()
     id_col = next((c for c in cols if c["name"] == "id"), None)
-    has_attack = any(c["name"] == "attack" for c in cols)
-    outdated = (id_col is not None and (id_col["type"] or "").upper() == "INTEGER") or not has_attack
+    names = {c["name"] for c in cols}
+    # Any missing column means the table predates a version that added one.
+    # Alerts are derived data, so dropping and rebuilding is lossless.
+    has_columns = {"attack", "source_tool", "validated", "evidence"} <= names
+    outdated = (id_col is not None and (id_col["type"] or "").upper() == "INTEGER") or not has_columns
     if outdated:
         # Old schema (integer id, or pre-v0.4 without the attack column). Alerts
         # are derived, so dropping is lossless: startup rescans and rebuilds them
@@ -294,6 +305,38 @@ def insert_event(conn: sqlite3.Connection, event: dict[str, Any]) -> int:
     return cur.lastrowid
 
 
+def known_finding_ids(conn: sqlite3.Connection, tool: str,
+                      finding_ids: list[str]) -> set[str]:
+    """Which of these finding ids this store has already ingested from `tool`.
+
+    The envelope's id is a function of the finding's content, so re-running an
+    emitter over unchanged input yields the same ids. Without this check every
+    nightly scan would deposit another copy of the same findings and the counts
+    would climb for no reason -- the id rule exists precisely so a consumer can
+    tell "again" from "new".
+
+    Scoped to one tool, because the envelope is explicit that two tools may
+    legitimately produce the same id about the same subject.
+    """
+    if not finding_ids:
+        return set()
+    out: set[str] = set()
+    # Chunked to stay well under SQLite's parameter limit on a large envelope.
+    for start in range(0, len(finding_ids), 400):
+        chunk = finding_ids[start:start + 400]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"""SELECT json_extract(metadata, '$.finding.id') AS fid
+                FROM events
+                WHERE event_type = 'finding'
+                  AND json_extract(metadata, '$.source.tool') = ?
+                  AND json_extract(metadata, '$.finding.id') IN ({placeholders})""",
+            (tool, *chunk),
+        ).fetchall()
+        out.update(r["fid"] for r in rows if r["fid"])
+    return out
+
+
 def get_events_for_actor(conn: sqlite3.Connection, actor_id: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT * FROM events WHERE actor_id = ? ORDER BY timestamp ASC", (actor_id,)
@@ -348,12 +391,17 @@ def replace_alerts_for_actor(conn: sqlite3.Connection, actor_id: str, alerts: li
     conn.execute("DELETE FROM alerts WHERE actor_id = ?", (actor_id,))
     for a in alerts:
         conn.execute(
-            """INSERT INTO alerts (id, event_id, actor_id, actor_type, timestamp, severity, category, message, target, attack)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO alerts (id, event_id, actor_id, actor_type, timestamp,
+                                   severity, category, message, target, attack,
+                                   source_tool, validated, evidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 a["id"], a["event_id"], a["actor_id"], a["actor_type"], a["timestamp"],
                 a["severity"], a["category"], a["message"], a["target"],
                 json.dumps(a.get("attack", [])),
+                a.get("source_tool"),
+                None if a.get("validated") is None else int(bool(a["validated"])),
+                a.get("evidence"),
             ),
         )
 
@@ -413,8 +461,18 @@ def query_alerts(
         d = dict(r)
         d["acknowledged"] = bool(d["acknowledged"])
         d["attack"] = json.loads(d.get("attack") or "[]")
+        _hydrate_validated(d)
         out.append(d)
     return out
+
+
+def _hydrate_validated(alert: dict[str, Any]) -> None:
+    """SQLite has no boolean, so `validated` comes back 0/1 -- or None for an
+    alert Shadowfax raised itself, where "did the emitter verify it" has no
+    meaning. None is preserved rather than coerced to False: "nobody claimed
+    this" and "somebody claimed it without checking" are different statements."""
+    if alert.get("validated") is not None:
+        alert["validated"] = bool(alert["validated"])
 
 
 def set_alert_state(
@@ -469,21 +527,29 @@ def set_alert_state(
 
 def alert_counts(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute("SELECT severity, COUNT(*) as n FROM alerts GROUP BY severity").fetchall()
-    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for r in rows:
+        # An unrecognised severity should never reach the table -- ingest
+        # validates the ladder -- but counting it would be better than crashing
+        # the stats endpoint over a row nobody can explain.
         counts[r["severity"]] = r["n"]
     return counts
 
 
 def actor_risk_scores(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
-    weight = {"critical": 10, "high": 5, "medium": 2, "low": 1}
+    # `info` weighs nothing. The shared severity ladder carries five levels and
+    # an informational finding is context, not risk -- a hundred of them must not
+    # out-score one critical. This is the only change the ladder forces on
+    # Shadowfax's scoring, and it is spelled out in findings-envelope.md.
+    weight = {"critical": 10, "high": 5, "medium": 2, "low": 1, "info": 0}
     rows = conn.execute("SELECT actor_id, actor_type, severity, COUNT(*) as n FROM alerts GROUP BY actor_id, severity").fetchall()
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
         d = out.setdefault(r["actor_id"], {"actor_type": r["actor_type"], "score": 0,
-                                            "critical": 0, "high": 0, "medium": 0, "low": 0})
+                                            "critical": 0, "high": 0, "medium": 0,
+                                            "low": 0, "info": 0})
         d[r["severity"]] = r["n"]
-        d["score"] += weight[r["severity"]] * r["n"]
+        d["score"] += weight.get(r["severity"], 0) * r["n"]
     return out
 
 
@@ -524,6 +590,7 @@ def get_alert(conn: sqlite3.Connection, alert_id: str) -> dict[str, Any] | None:
     d = dict(row)
     d["acknowledged"] = bool(d["acknowledged"])
     d["attack"] = json.loads(d.get("attack") or "[]")
+    _hydrate_validated(d)
     return d
 
 

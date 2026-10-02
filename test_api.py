@@ -737,6 +737,238 @@ code, _, serr = run_cli(["stats"], transport=_anon_tp)
 check("CLI exits 3 on an unauthenticated call", code == 3)
 check("CLI points at how to authenticate", "login" in serr)
 
+print("\n== findings envelope (v0.11) ==")
+import envelope as env_mod
+import tempfile as _tempfile
+from os.path import join as _os_path_join
+
+def _env(**over):
+    """A valid envelope, with overrides. Built fresh each time so one test
+    mutating it cannot quietly change the next."""
+    doc = {
+        "envelope_version": "1.0",
+        "generated": "2026-08-23T09:14:02Z",
+        "source": {"tool": "maltriage", "version": "0.2.0", "run_id": "a3f9c1b2"},
+        "subject": {"kind": "file", "id": "sha256:9f86d081884c7d65",
+                    "label": "dropper.exe"},
+        "findings": [{
+            "id": "4c1f8a02b3d7e619",
+            "key": "writable_executable_section",
+            "severity": "medium",
+            "title": "Section .text1 is both writable and executable",
+            "evidence": "characteristics=0xE0000020 (MEM_WRITE|MEM_EXECUTE|CNT_CODE)",
+            "validated": True,
+            "mitre": "T1027 - Obfuscated Files or Information",
+        }],
+    }
+    doc.update(over)
+    return doc
+
+
+def _rejects(doc, where):
+    """True when validation rejects `doc` at field path `where`."""
+    try:
+        env_mod.validate(doc, _detectors.NATIVE_CATEGORIES)
+    except env_mod.EnvelopeError as exc:
+        return exc.path == where
+    return False
+
+
+import detectors as _detectors
+
+# -- validation is the trust boundary ---------------------------------------
+check("a well-formed envelope validates",
+      env_mod.validate(_env(), _detectors.NATIVE_CATEGORIES) is not None)
+check("an empty findings array is a result, not an error",
+      env_mod.validate(_env(findings=[]), _detectors.NATIVE_CATEGORIES) is not None)
+check("a missing findings array is rejected",
+      _rejects({k: v for k, v in _env().items() if k != "findings"}, "findings"))
+check("a future major envelope version is rejected rather than guessed at",
+      _rejects(_env(envelope_version="2.0"), "envelope_version"))
+check("a same-major version is accepted",
+      env_mod.validate(_env(envelope_version="1.4"), _detectors.NATIVE_CATEGORIES) is not None)
+check("an unparseable generated timestamp is rejected",
+      _rejects(_env(generated="last Tuesday"), "generated"))
+check("source.tool is required", _rejects(_env(source={"version": "1"}), "source.tool"))
+check("an unknown subject kind is rejected",
+      _rejects(_env(subject={"kind": "planet", "id": "mars"}), "subject.kind"))
+
+_f = _env()["findings"][0]
+for _field in ("id", "key", "severity", "title", "evidence", "validated"):
+    check(f"a finding without {_field} is rejected",
+          _rejects(_env(findings=[{k: v for k, v in _f.items() if k != _field}]),
+                   f"findings[0].{_field}"))
+
+check("a sixth severity level is rejected",
+      _rejects(_env(findings=[{**_f, "severity": "catastrophic"}]), "findings[0].severity"))
+check("all five ladder levels are accepted",
+      all(env_mod.validate(_env(findings=[{**_f, "severity": sev, "id": sev}]),
+                           _detectors.NATIVE_CATEGORIES)
+          for sev in ("critical", "high", "medium", "low", "info")))
+check("a non-snake_case key is rejected",
+      _rejects(_env(findings=[{**_f, "key": "Writable Section"}]), "findings[0].key"))
+check("validated must be a boolean, not a string",
+      _rejects(_env(findings=[{**_f, "validated": "yes"}]), "findings[0].validated"))
+check("two findings sharing an id in one envelope is an emitter bug",
+      _rejects(_env(findings=[_f, {**_f, "key": "other_key"}]), "findings[1].id"))
+
+# An emitter may not claim one of Shadowfax's own categories: an alert reading
+# destructive_action must mean Shadowfax's detector found it.
+check("a finding may not claim a native detector category",
+      _rejects(_env(findings=[{**_f, "key": "destructive_action"}]), "findings[0].key"))
+check("every native category is protected",
+      all(_rejects(_env(findings=[{**_f, "key": cat}]), "findings[0].key")
+          for cat in _detectors.NATIVE_CATEGORIES))
+
+# -- translation ------------------------------------------------------------
+_events = env_mod.to_events(_env())
+check("one finding becomes one event", len(_events) == 1)
+check("findings become events, not alerts — so rescans reproduce them",
+      _events[0]["event_type"] == "finding")
+check("a non-actor subject is namespaced by its kind",
+      _events[0]["actor_id"] == "file:sha256:9f86d081884c7d65")
+check("a non-actor subject gets the external actor type",
+      _events[0]["actor_type"] == "external")
+check("the emitter and its version travel with the finding",
+      _events[0]["metadata"]["source"]["tool"] == "maltriage")
+check("the timestamp is normalised to naive UTC, like every other event",
+      _events[0]["timestamp"] == "2026-08-23T09:14:02")
+check("an offset is honoured rather than ignored",
+      env_mod.to_events(_env(generated="2026-08-23T11:14:02+02:00"))[0]["timestamp"]
+      == "2026-08-23T09:14:02")
+check("unknown emitter fields are dropped rather than stored",
+      "nonsense" not in env_mod.to_events(
+          _env(findings=[{**_f, "nonsense": "x"}]))[0]["metadata"]["finding"])
+check("a finding about a tracked actor lands on that actor",
+      env_mod.to_events(_env(subject={"kind": "actor", "id": "recon-agent-3"}),
+                        {"recon-agent-3": "ai_agent"})[0]["actor_id"] == "recon-agent-3")
+check("and inherits that actor's existing type rather than inventing a second",
+      env_mod.to_events(_env(subject={"kind": "actor", "id": "recon-agent-3"}),
+                        {"recon-agent-3": "ai_agent"})[0]["actor_type"] == "ai_agent")
+check("the ATT&CK id is taken from the mitre string, the name from our registry",
+      env_mod.techniques_for(_f) == ["T1027"])
+check("a malformed mitre string yields no technique rather than a wrong one",
+      env_mod.techniques_for({**_f, "mitre": "probably T-something"}) == [])
+
+# -- ingest over HTTP -------------------------------------------------------
+r = client.post("/findings", json=_env())
+check("POST /findings accepts a valid envelope", r.status_code == 200)
+_body = r.json()
+check("it reports what it accepted", _body["accepted"] == 1)
+check("it names the actor the subject mapped to",
+      _body["actor_id"] == "file:sha256:9f86d081884c7d65")
+
+_ext = [a for a in _body["alerts"] if a["category"] == "writable_executable_section"]
+check("the finding became an alert", len(_ext) == 1)
+check("the finding's key became the alert category — titles can be reworded, "
+      "keys are what a dashboard counts", _ext[0]["category"] == "writable_executable_section")
+check("the emitter's severity is carried through", _ext[0]["severity"] == "medium")
+check("the alert names who reported it", _ext[0]["source_tool"] == "maltriage")
+check("the emitter's observed evidence is kept", "0xE0000020" in _ext[0]["evidence"])
+check("the technique resolves against the shared registry",
+      any(t["id"] == "T1027" and t["name"] for t in _ext[0]["attack"]))
+
+# Re-running an emitter over unchanged input must not deposit a second copy.
+_again = client.post("/findings", json=_env()).json()
+check("re-ingesting the same finding is skipped, not duplicated",
+      _again["accepted"] == 0 and _again["skipped"] == 1)
+check("the alert id is derived from the emitter's finding id, so analyst state "
+      "follows the finding", _ext[0]["id"] ==
+      _detectors.external_alert_identity("maltriage", "4c1f8a02b3d7e619"))
+check("a different emitter reporting the same id gets a different alert id",
+      _detectors.external_alert_identity("other-tool", "4c1f8a02b3d7e619")
+      != _ext[0]["id"])
+
+# The whole document is rejected on any structural error, with the field named:
+# a partially-accepted envelope hides an emitter's bug.
+_bad = client.post("/findings", json=_env(findings=[{**_f, "severity": "urgent"}]))
+check("a malformed envelope is rejected whole", _bad.status_code == 400)
+check("the rejection names the field at fault",
+      "findings[0].severity" in _bad.json()["detail"])
+check("nothing from a rejected envelope is stored",
+      all(a["category"] != "urgent" for a in client.get("/alerts").json()))
+
+# -- unvalidated findings ---------------------------------------------------
+_unval = client.post("/findings", json=_env(findings=[{
+    "id": "unval-1", "key": "authenticode_common_name", "severity": "info",
+    "title": "Certificate claims CN=Microsoft Corporation",
+    "evidence": "CN=Microsoft Corporation, O=Microsoft", "validated": False,
+    "mitre": "T1553 - Subvert Trust Controls"}])).json()
+_u = _unval["alerts"][0] if _unval["alerts"] else {}
+_u = next(a for a in _unval["alerts"] if a["category"] == "authenticode_common_name")
+check("an unvalidated finding is ingested, not dropped — the envelope says a "
+      "consumer may not treat it as absent", _u["severity"] == "info")
+check("it is marked unvalidated rather than silently downgraded",
+      _u["validated"] is False and "unvalidated" in _u["message"])
+check("an alert Shadowfax raised itself has no validated flag at all",
+      next(a for a in client.get("/alerts").json()
+           if not a.get("source_tool"))["validated"] is None)
+
+# -- the info level ---------------------------------------------------------
+check("info appears in the alert counts", "info" in client.get("/stats").json()["alert_counts"])
+check("info alerts are filterable",
+      all(a["severity"] == "info"
+          for a in client.get("/alerts?severity=info").json()))
+_file_actor = client.get("/actors/file:sha256:9f86d081884c7d65").json()
+check("info weighs nothing in the risk score — a hundred of them must not "
+      "out-score one critical",
+      _file_actor["risk"]["score"] == 2 and _file_actor["risk"]["info"] == 1)
+
+# -- findings compose with everything else ----------------------------------
+# A recon finding about an actor Shadowfax already tracks, timed before that
+# actor's own alerts and sitting at an earlier ATT&CK tactic.
+client.post("/findings", json={
+    "envelope_version": "1.0", "generated": "2026-08-14T08:55:00Z",
+    "source": {"tool": "claude-recon-agent", "version": "0.4.1"},
+    "subject": {"kind": "actor", "id": "apt-agent-9"},
+    "findings": [{"id": "recon-1", "key": "host_enumeration", "severity": "medium",
+                  "title": "Agent enumerated 14 internal hosts before any authorised task",
+                  "evidence": "14 distinct /24 addresses probed in 90s (session log 204-218)",
+                  "validated": True, "mitre": "T1595 - Active Scanning"}]})
+_apt = client.get("/actors/apt-agent-9").json()
+check("a finding about a tracked actor joins that actor's timeline",
+      any(a["category"] == "host_enumeration" for a in _apt["alerts"]))
+_inc = next(i for i in client.get("/incidents").json() if i["actor_id"] == "apt-agent-9")
+_chain = client.get(f"/incidents/{_inc['id']}").json()["chain"]
+check("an ingested finding can extend a kill chain Shadowfax detected",
+      _chain["stages"][0]["tactic"] == "Reconnaissance"
+      and _chain["stages"][0]["category"] == "host_enumeration")
+check("the chain still reaches its terminal tactic and escalates",
+      _chain["escalated"] and _chain["terminal_tactic"] == "Exfiltration")
+check("the front door's events and the findings share one ledger",
+      client.get("/ledger/verify").json()["ok"] is True)
+
+# Running the native heuristics over finding events would measure the emitter's
+# cadence, not the subject's behaviour.
+_bulk = [{"id": f"bulk-{i}", "key": "bulk_probe", "severity": "low",
+          "title": f"probe {i}", "evidence": f"line {i}", "validated": True}
+         for i in range(25)]
+client.post("/findings", json=_env(
+    subject={"kind": "host", "id": "10.0.0.9"}, findings=_bulk))
+_host = client.get("/actors/host:10.0.0.9").json()
+check("a burst of findings does not trip rate_anomaly on the emitter's cadence",
+      not any(a["category"] == "rate_anomaly" for a in _host["alerts"]))
+check("nor dormant_reappearance when a scanner runs after a long gap",
+      not any(a["category"] == "dormant_reappearance" for a in _host["alerts"]))
+check("all 25 findings still became alerts",
+      sum(1 for a in _host["alerts"] if a["category"] == "bulk_probe") == 25)
+
+# -- the CLI pipe -----------------------------------------------------------
+# `maltriage sample.exe --envelope | shadowfax ingest -` works as the spec
+# writes it: the kind of JSON is detected, not declared with a flag.
+_env_path = _os_path_join(_tempfile.mkdtemp(), "envelope.json")
+with open(_env_path, "w", encoding="utf-8") as _fh:
+    json.dump(_env(subject={"kind": "log_workspace", "id": "ws-7"},
+                   findings=[{**_f, "id": "cli-1", "key": "suspicious_login_burst"}]), _fh)
+code, sout, _ = run_cli(["ingest", _env_path])
+check("CLI `ingest` detects an envelope without being told", code == 0)
+check("CLI reports the emitter and what it ingested",
+      "maltriage" in sout and "1 finding" in sout)
+code, sout, _ = run_cli(["ingest", _env_path])
+check("CLI says plainly when a re-run finds nothing new", "already known" in sout)
+code, sout, _ = run_cli(["alerts", "--severity", "info", "--json"])
+check("CLI accepts info as a severity filter", code == 0)
+
 print("\n== login throttling and self-monitoring (v0.10) ==")
 import throttle as throttle_mod
 from datetime import datetime as _dt, timedelta as _td

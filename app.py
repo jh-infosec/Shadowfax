@@ -40,12 +40,13 @@ import correlate
 import db
 import detectors
 import digest as digest_mod
+import envelope
 import ledger
 import throttle
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -68,6 +69,10 @@ LOGIN_ATTEMPT_RETENTION_HOURS = 24
 # will -- or worse, post events into a real actor's timeline by "signing in" as
 # them, poisoning the evidence for an unrelated investigation. The attempted
 # name travels in metadata, where it is plainly untrusted data.
+# An actor with no alerts at all. `info` is in the ladder from v0.11 and weighs
+# nothing in the score -- see db.actor_risk_scores.
+EMPTY_RISK = {"score": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+
 SELF_ACTOR_ID = "shadowfax-auth"
 SELF_ACTOR_TYPE = "service_account"
 SELF_TARGET = "shadowfax_login"
@@ -359,6 +364,58 @@ def ingest_events(events: list[EventRequest], identity: dict = Depends(allow_ing
     return {"ingested": len(events), "affected_actors": list(affected_actors), "alerts": new_alerts}
 
 
+@app.post("/findings")
+def ingest_findings(doc: dict[str, Any], identity: dict = Depends(allow_ingest)):
+    """Ingest a findings envelope (v0.11). See `findings-envelope.md`.
+
+    Shadowfax knows nothing about the emitter. Anything that writes the envelope
+    is ingestible, which is what makes
+    `maltriage sample.exe --envelope | shadowfax ingest` a pipe rather than an
+    integration.
+
+    Findings are stored as ordinary events and turned back into alerts by a
+    detector, so they obey the same invariant as everything else: alerts are a
+    pure function of (an actor's events, policy), recomputed on every rescan.
+    Writing alert rows directly would have been fewer lines and would have left
+    rows that quietly disappeared at the next rescan of that actor.
+    """
+    try:
+        envelope.validate(doc, detectors.NATIVE_CATEGORIES)
+    except envelope.EnvelopeError as err:
+        # Reject the whole document rather than keeping the findings we happen
+        # to like. A partially-accepted envelope hides an emitter's bug, and
+        # whoever is writing the next emitter deserves to be told exactly which
+        # field is wrong.
+        raise HTTPException(400, f"invalid findings envelope — {err.describe()}")
+
+    tool = doc["source"]["tool"]
+    actor_id = envelope.actor_for(doc["subject"])
+
+    with db.get_conn() as conn:
+        actor_types = dict(db.distinct_actors(conn))
+        events = envelope.to_events(doc, actor_types)
+
+        already = db.known_finding_ids(
+            conn, tool, [e["metadata"]["finding"]["id"] for e in events])
+        fresh = [e for e in events if e["metadata"]["finding"]["id"] not in already]
+
+        for event in fresh:
+            db.insert_event(conn, event)
+        alerts = _rescan_actor(conn, actor_id) if fresh else []
+        conn.commit()
+
+    if fresh:
+        bus.publish({"type": "change", "reason": "findings", "actors": [actor_id]})
+
+    return {
+        "accepted": len(fresh),
+        "skipped": len(already),
+        "actor_id": actor_id,
+        "envelope": envelope.summarise(doc),
+        "alerts": alerts,
+    }
+
+
 @app.get("/events")
 def list_events(actor_id: str | None = None, identity: dict = Depends(require_role("viewer"))):
     with db.get_conn() as conn:
@@ -488,13 +545,14 @@ def list_actors(identity: dict = Depends(require_role("viewer"))):
         out = []
         for actor_id, actor_type in actors:
             events = db.get_events_for_actor(conn, actor_id)
-            r = risk.get(actor_id, {"score": 0, "critical": 0, "high": 0, "medium": 0, "low": 0})
+            r = risk.get(actor_id, EMPTY_RISK)
             out.append({
                 "actor_id": actor_id,
                 "actor_type": actor_type,
                 "event_count": len(events),
                 "risk_score": r["score"],
-                "critical": r["critical"], "high": r["high"], "medium": r["medium"], "low": r["low"],
+                "critical": r["critical"], "high": r["high"], "medium": r["medium"],
+                "low": r["low"], "info": r["info"],
             })
         out.sort(key=lambda a: a["risk_score"], reverse=True)
         return out
@@ -507,7 +565,7 @@ def actor_detail(actor_id: str, identity: dict = Depends(require_role("viewer"))
         if not events:
             raise HTTPException(404, f"no events for actor '{actor_id}'")
         alerts = db.query_alerts(conn, actor_id=actor_id, limit=1000)
-        risk = db.actor_risk_scores(conn).get(actor_id, {"score": 0, "critical": 0, "high": 0, "medium": 0, "low": 0})
+        risk = db.actor_risk_scores(conn).get(actor_id, EMPTY_RISK)
         return {"actor_id": actor_id, "events": events, "alerts": alerts, "risk": risk}
 
 

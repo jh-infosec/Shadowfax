@@ -53,7 +53,23 @@ export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAss
                 {a.severity}
               </div>
             </td>
-            <td className="cat-badge">{a.category}</td>
+            <td className="cat-badge">
+              {a.category}
+              {/* Provenance (v0.11). An alert Shadowfax raised itself says
+                  nothing here; one that arrived over the findings envelope names
+                  the tool that claimed it, and says plainly when that tool did
+                  not verify its own claim. Who says so is part of the finding. */}
+              {a.source_tool && (
+                <span className="src-badge" title={`reported by ${a.source_tool}`}>
+                  via {a.source_tool}
+                </span>
+              )}
+              {a.source_tool && a.validated === false && (
+                <span className="src-badge unvalidated" title="The emitter is repeating something the subject asserted about itself, not something it verified.">
+                  unvalidated
+                </span>
+              )}
+            </td>
             <td className="actor-cell">
               {a.actor_id}
               <span className="actor-type-badge">{a.actor_type}</span>
@@ -69,6 +85,11 @@ export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAss
                 ✦ explain
               </button>
               {a.message}
+              {a.evidence && (
+                <div className="evidence-line" title="What the emitter actually observed">
+                  {a.evidence}
+                </div>
+              )}
               {a.attack && a.attack.length > 0 && (
                 <span className="attack-badges">
                   {a.attack.map((t) => (

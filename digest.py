@@ -29,7 +29,9 @@ from typing import Any
 
 # Points per incident severity. Deliberately coarse: the point is ordering, not
 # false precision.
-SEVERITY_POINTS = {"critical": 50, "high": 25, "medium": 10, "low": 5}
+# `info` scores nothing: informational findings are context for a triage
+# queue, never a reason to be in it.
+SEVERITY_POINTS = {"critical": 50, "high": 25, "medium": 10, "low": 5, "info": 0}
 
 # A completed kill chain is the strongest single signal Shadowfax produces -- it
 # means the actor got all the way to a terminal objective.

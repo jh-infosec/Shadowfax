@@ -64,6 +64,7 @@ investigation and explainability.
 - Tamper-evident event ledger — every event hash-chained to the one before it, so an edit, deletion or reordering breaks the chain at a locatable point
 - Sign-in throttling and lockout — backoff then lockout on the platform's own login, with no enumeration oracle and no sleeping
 - Self-monitoring — attacks on Shadowfax's own front door become ordinary events and raise ordinary alerts, through the same detectors as everything else
+- Findings-envelope ingest — any tool that writes the shared envelope can post findings, and Shadowfax needs to know nothing about it
 - Automated API testing
 
 ---
@@ -177,6 +178,11 @@ Planned
 - Sign-in Throttling & Lockout — shipped (v0.10.0)
 - Platform Self-Monitoring — shipped (v0.10.0)
 
+### v0.11
+
+- Findings-Envelope Ingest — shipped (v0.11.0)
+- The `info` severity level — shipped (v0.11.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -273,6 +279,14 @@ Verify that the event log has not been tampered with (see Evidence integrity):
 
 ```bash
 python cli.py verify              # exit 0 if intact, 1 if broken
+```
+
+Ingest findings from any tool that speaks the shared envelope — the kind of
+JSON is detected, so the same command takes events or an envelope:
+
+```bash
+maltriage sample.exe --envelope | python cli.py ingest -
+python cli.py ingest findings.json
 ```
 
 See who is failing to sign in, and let a locked-out colleague back in:
@@ -420,6 +434,113 @@ presents the real peer address, or every request will share one source scope.
 This slows credential guessing. It does not stop a distributed attacker with
 many source addresses, and it is not a substitute for good passwords or a second
 factor.
+
+---
+
+## Ingesting other tools' findings
+
+`findings-envelope.md` defines a wire format shared across this portfolio:
+maltriage produces findings from a file's bytes, claude-recon-agent from a
+target's services, Shadowfax from an actor's event history. Shadowfax ingests
+that envelope, and **knows nothing about the tool that sent it** — anything that
+writes the format is ingestible, which is what makes this a pipe rather than an
+integration.
+
+```bash
+maltriage sample.exe --envelope | python cli.py ingest -
+```
+
+```
+maltriage 0.2.0 -> file:sha256:9f86d081884c7d65: 2 finding(s) ingested
+  medium: 1  info: 1
+  medium   writable_executable_section
+  info     authenticode_common_name  [unvalidated]
+```
+
+### Findings become events, not alerts
+
+The obvious implementation writes an alert row per finding. It would also break
+the invariant the rest of Shadowfax rests on: alerts are a pure function of
+`(an actor's events, policy)`, recomputed on every rescan and never patched — so
+an alert with no event behind it would survive until the next rescan of that
+actor and then silently vanish.
+
+A finding is therefore stored as an **event**, and a detector turns it back into
+an alert. Rescans reproduce it, the hash-chained ledger covers it, and
+correlation sees it alongside native alerts. The payoff is composition: a
+reconnaissance finding from another tool can form the **first stage of a kill
+chain** whose later stages Shadowfax detected itself —
+
+```
+Reconnaissance → Privilege Escalation → Credential Access → Lateral Movement → Exfiltration
+   (recon agent)   ·········· Shadowfax's own detectors ··········
+```
+
+— with no special-casing anywhere in the engine.
+
+### What Shadowfax will not accept
+
+Validation is the trust boundary, and a malformed envelope is rejected **whole**,
+naming the field at fault. Keeping the findings we happen to like would hide the
+emitter's bug, and whoever writes the next emitter deserves to be told what is
+wrong with theirs.
+
+```
+400 invalid findings envelope — findings[0].severity: must be one of
+critical, high, medium, low, info
+```
+
+A finding's `key` becomes the alert category, so an emitter **may not use one of
+Shadowfax's own sixteen detector categories**. An alert reading
+`destructive_action` must mean Shadowfax's detector found it, not that somebody
+else said so.
+
+### Provenance, and who checked
+
+Every ingested alert carries the tool that reported it, that tool's observed
+evidence, and its `validated` flag — shown as a `via <tool>` badge, an
+`unvalidated` marker and the evidence line beneath the message.
+
+`validated: false` means the emitter is repeating something the subject asserted
+about itself: a certificate common name, a service banner, a `Server:` header.
+Shadowfax marks these and **does not downgrade them**. The envelope is explicit
+that a consumer may treat unvalidated findings differently but may not treat
+them as absent, and quietly lowering another tool's severity would be a hidden
+policy. An alert Shadowfax raised itself carries no `validated` flag at all —
+"nobody claimed this, we found it" is a different statement from "somebody
+claimed it without checking".
+
+Ingested evidence is fenced as untrusted in the investigation assistant's
+prompt, alongside agent-reported fields. It is another tool's report of a file's
+bytes or a service's banner, which is exactly where an injection would be
+planted.
+
+### Re-running an emitter
+
+A finding's id is a function of its content, so re-running a scanner over
+unchanged input produces the same ids and Shadowfax skips them. Analyst state
+follows the finding rather than the row it landed in: acknowledge a finding
+today, re-run the scanner tomorrow, and the acknowledgement is still there.
+
+```
+maltriage 0.2.0 -> file:sha256:9f86d081884c7d65: 0 finding(s) ingested, 2 already known
+```
+
+Shadowfax derives its alert id *from* the emitter's id rather than using it
+directly, under a fixed namespace, so an emitter cannot send a crafted id that
+inherits an unrelated alert's acknowledgement.
+
+### Subjects and the `info` level
+
+A `kind: actor` subject lands on that actor's real timeline and inherits its
+existing actor type. Every other kind is namespaced — `file:sha256:…`,
+`host:10.0.0.9`, `log_workspace:ws-7` — under a new `external` actor type, so a
+file called `admin` cannot quietly become the user `admin`.
+
+The envelope's ladder has five levels; Shadowfax's own detectors emit the top
+four and `info` arrives from outside. It is **weighted 0** in risk scoring,
+incident scoring and the triage digest: informational findings are context, and
+a hundred of them must not out-score one critical.
 
 ---
 

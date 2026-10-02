@@ -145,13 +145,21 @@ Attack-chain correlation, then evidence integrity and ingest.
       `shadowfax verify`, and a dashboard integrity badge. Tamper-evident, not
       tamper-proof — anchoring the head off-box is left to the operator.
       Shipped in `v0.9.0`.
-- [ ] Findings-envelope ingest: accept the envelope defined in
+- [x] Findings-envelope ingest: accept the envelope defined in
       `findings-envelope.md` from `maltriage` and `claude-recon-agent`.
       Envelope findings become alerts without Shadowfax knowing anything about
-      the emitter.
-- [ ] Weight `info` at 0 in risk scoring. The shared severity ladder carries
+      the emitter. `envelope.py` validates strictly and translates findings into
+      **events**, so a detector produces the alerts and the "alerts are a pure
+      function of (events, policy)" invariant holds -- which also means an
+      ingested finding composes with correlation and can form the first stage of
+      a kill chain Shadowfax completes itself. `POST /findings`, and
+      `shadowfax ingest` detects an envelope rather than taking a flag.
+      Shipped in `v0.11.0`.
+- [x] Weight `info` at 0 in risk scoring. The shared severity ladder carries
       five levels and Shadowfax currently defines four; this is the only change
-      the shared ladder forces.
+      the shared ladder forces. Applied to risk scoring, incident scoring and the
+      triage digest: informational findings are context, and a hundred of them
+      must not out-score one critical. Shipped in `v0.11.0`.
 
 ---
 
@@ -201,6 +209,23 @@ Harden the platform's own front door, then point the engine at it.
       the dashboard still makes you reach for `curl`.
 - [ ] Second factor (TOTP) for admin accounts. Throttling slows guessing; it
       does not stop a leaked password.
+
+---
+
+## Version 0.11
+
+- [x] The two v0.6 items above, closing that version's list.
+- [x] Alert provenance: `source_tool`, `validated` and `evidence` on ingested
+      alerts, with the emitter's id deriving (never becoming) the Shadowfax alert
+      id, so re-ingest is idempotent and analyst state follows the finding while
+      a crafted id cannot inherit a native alert's acknowledgement. Shipped in
+      `v0.11.0`.
+- [ ] Emit the envelope as well as ingest it. Shadowfax's own alerts are already
+      a near-exact fit for a finding; `GET /findings` would let the portfolio's
+      tools consume Shadowfax the way Shadowfax consumes them.
+- [ ] Subject pages. A `file:` or `host:` actor is an actor only by convention,
+      and the actor drawer shows it an event timeline when what it wants is a
+      findings report grouped by emitter.
 
 ---
 

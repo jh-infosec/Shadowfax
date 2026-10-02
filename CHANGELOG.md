@@ -1,5 +1,105 @@
 # Changelog
 
+## Version 0.11.0
+
+`findings-envelope.md` has sat in this repository since v0.4 describing a wire
+format three tools in this portfolio could share — maltriage from a file's
+bytes, claude-recon-agent from a target's services, Shadowfax from an actor's
+event history. This version builds Shadowfax's side of it. Anything that writes
+the envelope is now ingestible, and `maltriage sample.exe --envelope |
+shadowfax ingest -` is a pipe rather than an integration.
+
+Nothing in this release names another tool, and nothing in it is allowed to.
+That is the whole point of a contract.
+
+### Added
+
+- **`envelope.py`** — strict validation of the wire format and translation into
+  Shadowfax events. Pure: no I/O, and the native category list is passed in
+  rather than imported, so the collision rule can be driven directly in a test.
+- **`POST /findings`** (ingest key or analyst). Returns what was accepted, what
+  was already known, and the alerts raised.
+- **`shadowfax ingest` detects an envelope**, by the presence of
+  `envelope_version`, rather than taking a flag. The spec's own example works as
+  written; asking which kind of JSON was just piped in would be asking for
+  something the document already states.
+- **The `info` severity level**, the fifth rung of the shared ladder, weighted
+  **0** in risk scoring, incident scoring and the triage digest. The envelope
+  called this out as the only new decision the ladder forces on Shadowfax, and
+  it is the right one: a hundred informational findings must not out-score one
+  critical. Shadowfax's own detectors still emit the top four; `info` arrives
+  from outside.
+- **Provenance on alerts.** `source_tool`, `validated` and `evidence` columns,
+  shown in the dashboard as a `via <tool>` badge, an `unvalidated` marker and
+  the emitter's observed evidence under the message. An alert Shadowfax raised
+  itself carries `validated: null` — "nobody claimed this, we found it" and
+  "somebody claimed it without checking" are different statements and are
+  stored differently.
+- **21 more ATT&CK techniques** in the shared registry: static-triage and
+  reconnaissance territory the other two emitters work in. The registry has
+  always been the portfolio's single source of technique metadata; it now
+  covers more than Shadowfax's own detectors need, because a finding may
+  reference any technique and an id the registry does not know is dropped
+  rather than guessed at.
+
+### Design decisions worth the words
+
+- **Findings become events, not alerts.** Writing an alert row per finding would
+  have been fewer lines and would have broken the invariant everything else
+  rests on: alerts are a pure function of `(an actor's events, policy)`,
+  recomputed on every rescan and never patched. An alert with no event behind it
+  would have survived until the next rescan of that actor and then silently
+  vanished. As events, findings are reproduced by rescans, covered by the
+  hash-chained ledger, and visible to correlation and kill-chain detection —
+  **a recon finding can now form the first stage of a chain whose later stages
+  Shadowfax detected itself**, with no special-casing anywhere.
+- **The detector stops at a finding.** Running the native heuristics over
+  finding events would measure the *emitter's* cadence rather than the subject's
+  behaviour: a tool reporting forty findings at once would trip `rate_anomaly`,
+  and a scanner that runs nightly would trip `dormant_reappearance` every night.
+  Neither tells an analyst anything true.
+- **A key may not impersonate a detector.** A finding's `key` becomes the alert
+  category, so an emitter may not use one of Shadowfax's sixteen native
+  categories. An alert reading `destructive_action` must mean Shadowfax's
+  detector found it, not that somebody else said so. The rejection names the
+  collision.
+- **The emitter's id is derived from, never used as, the alert id.** Deriving it
+  under a fixed `external` namespace makes re-ingestion idempotent — analyst
+  state follows the finding, which is what the envelope's id rule exists for —
+  while making a collision with a native alert id impossible by construction.
+  An emitter sending a crafted id cannot inherit another alert's acknowledgement.
+- **A whole envelope is rejected on any structural error**, with the exact field
+  path at fault. Keeping the findings we happen to like would hide the emitter's
+  bug, and whoever writes the next emitter deserves to be told what is wrong
+  with theirs.
+- **Unvalidated findings are marked, never downgraded.** The envelope is
+  explicit that a consumer may treat them differently but may not treat them as
+  absent. Quietly lowering another tool's severity would be a hidden policy;
+  Shadowfax says who claimed it and whether they checked, and leaves the
+  judgement to the analyst.
+- **A non-actor subject is namespaced by its kind** (`file:sha256:…`,
+  `host:10.0.0.9`) under a new `external` actor type, so a file called `admin`
+  cannot quietly become the user `admin`. A `kind: actor` subject lands on that
+  actor's real timeline — which is the point — and inherits its existing actor
+  type rather than introducing a second one for the same actor.
+- **Ingested evidence is fenced as untrusted in the assistant's prompt**,
+  alongside agent-reported fields. It is another tool's report of a file's bytes
+  or a service's banner: exactly where an injection would be planted.
+
+### Tests
+
+65 new checks. Validation (every required field, the five-level ladder,
+snake_case keys, boolean `validated`, duplicate ids, native-category collisions
+for all sixteen, future versions, bad timestamps); translation (namespacing,
+actor-type inheritance, UTC normalisation including offsets, unknown fields
+dropped, technique extraction); ingest over HTTP (acceptance, de-duplication on
+re-run, derived alert ids, whole-document rejection with the field named, and
+that nothing from a rejected envelope is stored); the `info` level weighing
+nothing; composition (a finding extending a detected kill chain, the ledger
+still verifying, a burst of findings not tripping `rate_anomaly` or
+`dormant_reappearance`); and the CLI detecting an envelope without being told.
+307 checks in all, green.
+
 ## Version 0.10.0
 
 Shadowfax has shipped a `brute_force_auth` detector since v0.1. Until this

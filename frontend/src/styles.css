@@ -17,6 +17,10 @@
   --med-dim: #38321a;
   --low: #5bb6d6;
   --low-dim: #1c3038;
+  /* info (v0.11): the fifth rung of the shared ladder. Deliberately the
+     quietest colour on the page -- it is context, not a call to action. */
+  --info: #7a8499;
+  --info-dim: #22272f;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
 }
@@ -75,6 +79,7 @@ input[type="text"], textarea { font-family: var(--sans); }
 .stat.high { color: var(--high); border-color: var(--high-dim); }
 .stat.med { color: var(--med); border-color: var(--med-dim); }
 .stat.low { color: var(--low); border-color: var(--low-dim); }
+.stat.info { color: var(--info); border-color: var(--info-dim); }
 
 .btn {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
@@ -507,4 +512,25 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .lockout-foot code {
   font-family: var(--mono); font-size: 11px; color: var(--muted);
   background: var(--bg); padding: 1px 4px; border-radius: 3px;
+}
+
+/* ---- ingested findings (v0.11) ---------------------------------------- */
+
+.src-badge {
+  display: inline-block; margin-left: 6px; padding: 1px 5px;
+  border-radius: 3px; font-family: var(--mono); font-size: 9.5px;
+  letter-spacing: 0.02em; color: var(--muted-2);
+  background: var(--panel-2); border: 1px solid var(--border-soft);
+  white-space: nowrap; vertical-align: middle;
+}
+/* An unverified claim is marked, never silently downgraded: the envelope says a
+   consumer may treat unvalidated findings differently but may not treat them as
+   absent. */
+.src-badge.unvalidated { color: var(--med); border-color: var(--med-dim); }
+
+.evidence-line {
+  margin-top: 4px; padding-left: 8px;
+  border-left: 2px solid var(--border);
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted-2);
+  line-height: 1.5; word-break: break-word;
 }

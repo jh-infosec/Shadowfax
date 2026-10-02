@@ -36,6 +36,11 @@ export default function TopBar({ stats, connected, onReset, canReset, user, onLo
         <div className="stat high">HIGH <b>{stats?.alert_counts?.high ?? 0}</b></div>
         <div className="stat med">MED <b>{stats?.alert_counts?.medium ?? 0}</b></div>
         <div className="stat low">LOW <b>{stats?.alert_counts?.low ?? 0}</b></div>
+        {/* Only shown when there are any: info arrives over the findings
+            envelope, so an install with no emitters never sees an empty box. */}
+        {(stats?.alert_counts?.info ?? 0) > 0 && (
+          <div className="stat info">INFO <b>{stats.alert_counts.info}</b></div>
+        )}
       </div>
 
       {user && (

@@ -179,5 +179,30 @@ shared, and putting recovered secrets in it turns a detection into a leak.
 3. Shadowfax ingests it, and separately adopts the deterministic id rule for
    its own alerts, which closes its stable-identity constraint.
 
+### Status
+
+Step 3 is **done** as of Shadowfax `v0.11.0`: `POST /findings`, or
+`<emitter> --envelope | shadowfax ingest -`, which detects an envelope by its
+`envelope_version` rather than taking a flag. Shadowfax adopted the
+deterministic id rule for its own alerts earlier, in `v0.3`.
+
+Notes for an emitter, from building the consumer:
+
+- A finding's `key` becomes Shadowfax's alert category, so it may not collide
+  with one of Shadowfax's sixteen native detector categories. The rejection
+  names the collision.
+- The whole envelope is rejected on any structural error, with the field path at
+  fault, rather than the valid findings being kept.
+- `id` is not re-derivable by the consumer: the formula includes a
+  `discriminator` the envelope does not transmit. Shadowfax takes the id as
+  given and derives its own alert id from it under a namespace, which keeps
+  re-ingest idempotent without trusting an outside value as a key. An emitter
+  must therefore apply the rule honestly -- an id that changes between runs over
+  unchanged input will duplicate on every run.
+- `generated` is normalised to UTC. An offset is honoured; a missing one is
+  taken as UTC.
+- Steps 1 and 2 are still open: neither maltriage nor claude-recon-agent emits
+  the envelope yet.
+
 Emitting is additive in every case. No tool changes its existing output to
 adopt this; each adds an envelope alongside what it already produces.

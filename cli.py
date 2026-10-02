@@ -314,23 +314,58 @@ def cmd_login(client: Client, args, out) -> int:
 
 
 def cmd_ingest(client: Client, args, out) -> int:
-    """Read events as JSON (a list, or one object) from a file or stdin. This is
-    the integration point for a harness or agent emitting its own trace."""
+    """Read JSON from a file or stdin: either Shadowfax events or a findings
+    envelope. This is the integration point for a harness or agent emitting its
+    own trace, and for any tool that speaks `findings-envelope.md`.
+
+    The two are told apart by `envelope_version`, not by a flag, so the spec's
+    own example works as written:
+
+        maltriage sample.exe --envelope | shadowfax ingest -
+
+    Asking the user to tell us which kind of JSON they just piped in would be
+    asking them for something the document already says.
+    """
     raw = sys.stdin.read() if args.source == "-" else Path(args.source).read_text(encoding="utf-8")
     try:
-        events = json.loads(raw)
+        payload = json.loads(raw)
     except ValueError as exc:
         raise ApiError(f"input is not valid JSON: {exc}", EXIT_USAGE)
-    if isinstance(events, dict):
-        events = [events]
+
+    if isinstance(payload, dict) and "envelope_version" in payload:
+        result = client.call("POST", "/findings", body=payload)
+        emit(out, result, args.json, human_findings)
+        return EXIT_OK
+
+    events = [payload] if isinstance(payload, dict) else payload
     if not isinstance(events, list) or not events:
-        raise ApiError("expected a non-empty JSON array of events", EXIT_USAGE)
+        raise ApiError("expected a non-empty JSON array of events, or a findings "
+                       "envelope (an object with envelope_version)", EXIT_USAGE)
     result = client.call("POST", "/events", body=events)
     emit(out, result, args.json,
          lambda o, v: print(f"ingested {v.get('ingested', 0)} event(s); "
                             f"{len(v.get('alerts', []))} alert(s) for "
                             f"{', '.join(v.get('affected_actors', []))}", file=o))
     return EXIT_OK
+
+
+def human_findings(out, result) -> None:
+    env = result.get("envelope", {})
+    line = (f"{env.get('tool', '?')} {env.get('version', '')} -> "
+            f"{result.get('actor_id', '?')}: "
+            f"{result.get('accepted', 0)} finding(s) ingested")
+    if result.get("skipped"):
+        # Worth saying out loud: a re-run that reports nothing new is the id
+        # rule working, not the pipe silently failing.
+        line += f", {result['skipped']} already known"
+    print(line, file=out)
+    by_severity = env.get("by_severity") or {}
+    if by_severity:
+        print("  " + "  ".join(f"{sev}: {n}" for sev, n in by_severity.items()), file=out)
+    for alert in result.get("alerts", []):
+        if alert.get("source_tool"):
+            mark = "" if alert.get("validated") else "  [unvalidated]"
+            print(f"  {alert['severity']:<8} {alert['category']}{mark}", file=out)
 
 
 def cmd_alerts(client: Client, args, out) -> int:
@@ -509,7 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_filters(sp):
         sp.add_argument("--severity", action="append",
-                        choices=["critical", "high", "medium", "low"])
+                        choices=["critical", "high", "medium", "low", "info"])
         sp.add_argument("--actor-type", dest="actor_type", action="append",
                         choices=["human", "ai_agent", "service_account"])
         sp.add_argument("--category", action="append")

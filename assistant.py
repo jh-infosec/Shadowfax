@@ -138,6 +138,14 @@ def build_alert_brief(alert: dict[str, Any], events: list[dict[str, Any]]) -> di
         ],
         "triggering_event": _event_line(trigger) if trigger else None,
         "actor_activity": context,
+        # Provenance for an ingested finding (v0.11). The assistant must be able
+        # to say "another tool reported this and did not verify it" rather than
+        # narrating it as something Shadowfax observed -- the two are different
+        # claims and only one of them is Shadowfax's.
+        **({"reported_by": alert["source_tool"],
+            "emitter_verified_this": bool(alert.get("validated")),
+            "emitter_evidence": alert.get("evidence")}
+           if alert.get("source_tool") else {}),
     }
 
 
@@ -241,6 +249,12 @@ def _untrusted_fields(brief: dict[str, Any]) -> list[str]:
     trig = brief.get("triggering_event")
     if trig and trig.get("detail"):
         out.append(str(trig["detail"]))
+    # An ingested finding's evidence comes from outside Shadowfax entirely --
+    # another tool's report of a file's bytes or a service's banner, which is
+    # exactly where a prompt injection would be planted. It is fenced like any
+    # other field Shadowfax did not produce itself.
+    if brief.get("emitter_evidence"):
+        out.append(str(brief["emitter_evidence"]))
     # de-duplicate, preserve order
     seen: set[str] = set()
     uniq: list[str] = []

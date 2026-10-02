@@ -14,8 +14,41 @@ from typing import Any
 from urllib.parse import urlparse
 
 import attack
+import envelope
 
 TOOL_NAME = "shadowfax"
+
+# Every category this engine can raise. Ingest consults it so an external
+# finding cannot claim one: an alert reading `destructive_action` must mean
+# Shadowfax's own detector found it, not that somebody else said so. Kept here,
+# beside the detectors that raise them, because a list of categories maintained
+# anywhere else is a list that goes stale.
+NATIVE_CATEGORIES: frozenset[str] = frozenset({
+    "allowlist_violation", "blocked_target_access", "brute_force_auth",
+    "canary_triggered", "capability_resurrection", "completion_fraud",
+    "destructive_action", "dormant_reappearance", "exfiltration_volume",
+    "impossible_travel", "lateral_movement", "off_hours_access",
+    "out_of_scope_action", "privilege_escalation", "rate_anomaly",
+    "token_spend_anomaly",
+})
+
+
+def external_alert_identity(tool: str, finding_id: str) -> str:
+    """The alert id for an ingested finding (v0.11).
+
+    Derived from the emitter's deterministic finding id rather than from the
+    event row, so re-ingesting the same finding lands on the same alert and
+    carries its acknowledgement, assignment and notes with it -- the property
+    `findings-envelope.md` says the id rule exists to provide.
+
+    The emitter's id is *derived from*, never used as, the alert id. It is a
+    value from outside Shadowfax, and an emitter that sent an id colliding with
+    a native alert's would otherwise inherit that alert's analyst state. Hashing
+    it under a fixed `external` namespace makes such a collision impossible by
+    construction.
+    """
+    raw = f"{TOOL_NAME}|external|{tool}|{finding_id}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def alert_identity(actor_id: str, category: str, event_id: int, discriminator: str = "") -> str:
@@ -33,6 +66,43 @@ def alert_identity(actor_id: str, category: str, event_id: int, discriminator: s
     """
     raw = f"{TOOL_NAME}|{actor_id}|{category}|{event_id}|{discriminator}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _external_alert(event: dict, meta: dict) -> dict | None:
+    """Turn one ingested finding back into an alert (v0.11).
+
+    The finding's `key` becomes the alert category, because the envelope says a
+    key is what a consumer groups, filters and counts on, while the `title` is
+    the sentence a person reads -- rewording a title must not change what a
+    dashboard has been counting.
+
+    An unvalidated finding is marked as such in the message rather than being
+    downgraded or dropped. The envelope is explicit that a consumer may treat
+    unvalidated findings differently but may not treat them as absent, and
+    quietly lowering someone else's severity would be a hidden policy. Shadowfax
+    says who claimed it and whether they checked, and leaves the judgement to
+    the analyst.
+    """
+    finding = meta.get("finding")
+    source = meta.get("source") or {}
+    if not isinstance(finding, dict) or not finding.get("key"):
+        # A finding event without a finding is a storage anomaly, not an alert.
+        return None
+
+    tool = source.get("tool", "unknown")
+    message = f"{finding.get('title', '').strip()} — reported by {tool}"
+    if finding.get("validated") is False:
+        message += " (unvalidated: asserted by the subject, not verified)"
+
+    alert = _mk_alert(event, finding["severity"], finding["key"], message,
+                      technique_ids=envelope.techniques_for(finding))
+    # Replace the event-derived id with one keyed on the emitter's finding id,
+    # so analyst state follows the finding rather than the row it landed in.
+    alert["id"] = external_alert_identity(tool, finding.get("id", ""))
+    alert["source_tool"] = tool
+    alert["validated"] = bool(finding.get("validated"))
+    alert["evidence"] = finding.get("evidence")
+    return alert
 
 
 def _mk_alert(event: dict, severity: str, category: str, message: str,
@@ -179,6 +249,22 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
     for e in events:
         ts = datetime.fromisoformat(e["timestamp"])
         meta = e.get("metadata") or {}
+
+        # Ingested findings (v0.11).
+        #
+        # A finding arrived already adjudicated by another tool, so Shadowfax
+        # does not re-judge it -- it carries the emitter's severity, key and
+        # evidence through, and stops. The `continue` is the point: running the
+        # native heuristics over a finding event would measure the *emitter's*
+        # cadence rather than the subject's behaviour, so a tool reporting forty
+        # findings at once would trip rate_anomaly, and a scanner that runs
+        # nightly would trip dormant_reappearance every single night. Neither
+        # tells an analyst anything true.
+        if e["event_type"] == envelope.EVENT_TYPE:
+            found = _external_alert(e, meta)
+            if found:
+                alerts.append(found)
+            continue
 
         # allowlist
         task = e.get("task")

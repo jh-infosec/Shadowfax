@@ -11,7 +11,7 @@ export default function ActorDrawer({ detail, onClose }) {
     flaggedByEvent[a.event_id].push(a);
   });
 
-  const total = (risk.critical || 0) + (risk.high || 0) + (risk.medium || 0) + (risk.low || 0) || 1;
+  const total = (risk.critical || 0) + (risk.high || 0) + (risk.medium || 0) + (risk.low || 0) + (risk.info || 0) || 1;
   const seg = (n, colour) => (n ? <div className="risk-seg" style={{ width: `${(n / total) * 100}%`, background: colour }} /> : null);
 
   return (
@@ -32,9 +32,10 @@ export default function ActorDrawer({ detail, onClose }) {
           {seg(risk.high, SEVERITY_COLOUR.high)}
           {seg(risk.medium, SEVERITY_COLOUR.medium)}
           {seg(risk.low, SEVERITY_COLOUR.low)}
+          {seg(risk.info, SEVERITY_COLOUR.info)}
         </div>
         <div className="risk-note">
-          {risk.critical || 0} critical &middot; {risk.high || 0} high &middot; {risk.medium || 0} medium &middot; {risk.low || 0} low
+          {risk.critical || 0} critical &middot; {risk.high || 0} high &middot; {risk.medium || 0} medium &middot; {risk.low || 0} low &middot; {risk.info || 0} info
         </div>
 
         <div className="timeline-title">Full activity timeline</div>

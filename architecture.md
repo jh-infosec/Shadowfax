@@ -248,6 +248,39 @@ the queue only when a human acknowledges its alerts.
 assistant's covering narrative, but the assistant receives the order and the
 reasons *after* they are fixed and its prompt forbids re-ordering them.
 
+#### envelope.py
+
+Findings-envelope ingest (v0.11), the portfolio's shared wire format. Pure: no
+I/O, and the native category list arrives as an argument rather than an import,
+so the collision rule can be driven directly in a test.
+
+**Findings become events, not alerts.** The obvious implementation writes an
+alert row per finding, and it would break the invariant everything else rests
+on: alerts are a pure function of `(an actor's events, policy)`, recomputed on
+every rescan and never patched. An alert with no event behind it would survive
+until the next rescan of that actor and then silently vanish. Stored as events
+instead, findings are reproduced by rescans, hash-chained into the ledger, and
+visible to correlation -- so an ingested reconnaissance finding can form the
+first stage of a kill chain whose later stages Shadowfax detected itself, with
+no special-casing in the engine.
+
+`validate()` is the trust boundary and rejects a whole document on any
+structural error, naming the field at fault. Partial acceptance would hide the
+emitter's bug, and whoever writes the next emitter deserves to be told what is
+wrong with theirs. The one thing dropped quietly is an unknown ATT&CK id, which
+matches the existing `attack.enrich()` rule: a missing badge, never an invented
+technique.
+
+A finding's `key` becomes the alert category, because the envelope says a key is
+what a consumer groups and counts on while a title is what a person reads. An
+emitter therefore may not use one of `detectors.NATIVE_CATEGORIES`: an alert
+reading `destructive_action` must mean Shadowfax's detector found it.
+
+`to_events()` namespaces a non-actor subject by its kind (`file:…`, `host:…`)
+under the `external` actor type, so a file called `admin` cannot become the user
+`admin`; a `kind: actor` subject lands on that actor's real timeline and
+inherits its existing actor type, passed in as data to keep the function pure.
+
 #### throttle.py
 
 Sign-in backoff and lockout (v0.10). Pure: `evaluate()` is a function of
@@ -566,6 +599,19 @@ Steps 2 and 4 are what keep the endpoint from becoming a user-enumeration
 oracle: an unknown username is throttled and costs exactly what a known one
 does.
 
+### On a findings envelope (v0.11)
+
+1. The envelope is validated whole; any structural error rejects it with the
+   field path at fault, and nothing is stored
+2. The subject maps to an actor -- its own id for `kind: actor`, otherwise
+   namespaced by kind under the `external` actor type
+3. Findings whose ids this store already holds from that emitter are skipped,
+   so re-running a scanner over unchanged input deposits nothing
+4. The rest are inserted as `finding` events, hash-chained like any other
+5. The actor is rescanned; the detector turns each finding event into an alert
+   whose id derives from the emitter's finding id, so analyst state follows the
+   finding rather than the row
+
 ### On policy change
 
 1. New policy received at `PUT /policy`
@@ -661,7 +707,7 @@ auth.py                 bus.py                  attack.py
 attack_registry.json    correlate.py            assistant.py
 seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
-throttle.py
+throttle.py             envelope.py
 architecture.md
 README.md
 CHANGELOG.md
