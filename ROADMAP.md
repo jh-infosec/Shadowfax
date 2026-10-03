@@ -229,11 +229,35 @@ Harden the platform's own front door, then point the engine at it.
 
 ---
 
+## Version 0.12
+
+Make it runnable. Everything above is invisible to anyone who gives up during
+setup, and setup was two processes, two package managers and a CORS allowlist.
+
+- [x] One-command packaging: a two-stage `Dockerfile` (Node builds the
+      dashboard, Python runs the API and serves it from its own origin) and a
+      `docker-compose.yml` with a named volume for the event store. Non-root
+      user; Node does not survive into the final image. `GET /healthz` and
+      `SHADOWFAX_DB` exist for the same reason. Shipped in `v0.12.0`.
+- [x] Scripted attack replay: `demo.py` drives a compromise through a running
+      instance in three acts -- a kill chain forming from separate alerts, an
+      external tool's findings attaching to the same actor over the shared
+      envelope, and an attack on Shadowfax itself raising an ordinary alert.
+      The attack's clock and the replay's pacing are deliberately separate, and
+      the replay honours the server's `Retry-After` so it demonstrates the
+      detection as well as the throttle. Shipped in `v0.12.0`.
+- [ ] Publish the image, so `docker run ghcr.io/jh-infosec/shadowfax` needs no
+      clone at all.
+- [ ] A recorded terminal/dashboard capture of the replay in the README, for
+      people who will not run anything.
+
+---
+
 ## Version 1.0
 
 - [ ] Electron desktop application
 - [ ] PostgreSQL support
 - [ ] Multi-user support
-- [ ] Docker images
+- [x] Docker images -- shipped in `v0.12.0` (building locally; publishing one is still open above).
 - [ ] SIEM integrations
 - [ ] Production deployment

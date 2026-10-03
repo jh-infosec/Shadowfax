@@ -248,6 +248,25 @@ the queue only when a human acknowledges its alerts.
 assistant's covering narrative, but the assistant receives the order and the
 reasons *after* they are fixed and its prompt forbids re-ordering them.
 
+#### demo.py
+
+The scripted attack replay (v0.12). Not part of the product and not a test: it
+drives a compromise through a *running* Shadowfax over HTTP, printing what the
+attacker did and what the engine should make of it, so detection can be judged
+against behaviour instead of taken on trust.
+
+Two decisions keep it honest. The attack's own clock (event timestamps, minutes
+apart) is separate from the replay's pacing (`--speed`, `--fast`): tie them
+together and a fast replay quietly stops tripping the time-windowed detectors.
+And the brute-force act honours the server's `Retry-After` rather than
+hammering, because the v0.10 backoff stops unthrottled guessing before the
+detector has enough failures to call it brute force -- a replay that did not
+wait would demonstrate the throttle while silently failing to demonstrate the
+detection.
+
+It is an ordinary client: it signs in, holds a bearer token, uses the same
+endpoints as the dashboard and the CLI, and never touches the database.
+
 #### envelope.py
 
 Findings-envelope ingest (v0.11), the portfolio's shared wire format. Pure: no
@@ -697,6 +716,32 @@ With SSE push a new alert reaches open dashboards in well under a second. The
 remaining latency is the change signal plus the follow-up `/alerts` fetch, not
 a fixed polling interval.
 
+## Packaging (v0.12)
+
+One image, two stages. Node builds the dashboard; Python runs the API and serves
+the built dashboard from its own origin. Node is not carried into the final
+image -- a build toolchain inside a running security container is attack surface
+that earns nothing -- and the process runs as a non-root user.
+
+Serving both halves from one origin is what removes the two things that made
+"just try it" fail: a second server to start, and a CORS allowlist that had to
+agree with whichever port the dashboard ended up on. The one change that allows
+it is reading `VITE_API_BASE` with `??` rather than `||`, so an explicitly empty
+value survives as "same origin" instead of falling back to a hardcoded host.
+CORS stays closed; it is not widened to make the demo work.
+
+The static mount is registered after every API route, because routes match in
+order. If that ordering regressed, the symptom would be a static-file 404 where
+an endpoint should be, which is what the v0.12 tests watch for.
+
+`SHADOWFAX_DB` points the event store at a mounted volume so it outlives the
+container and is never baked into an image layer; `.dockerignore` excludes
+`*.db` so a local database cannot be shipped inside an image and mistaken for
+seed data. `GET /healthz` is unauthenticated because an orchestrator has no
+credential, and reports only status, service and version -- a health endpoint
+that described internals would be free reconnaissance for anyone who could
+reach the port.
+
 ## Required Files
 
 The following files are part of the project structure and must be preserved:
@@ -708,6 +753,8 @@ attack_registry.json    correlate.py            assistant.py
 seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
 throttle.py             envelope.py
+demo.py                 Dockerfile              docker-compose.yml
+.dockerignore
 architecture.md
 README.md
 CHANGELOG.md

@@ -4,7 +4,14 @@
 // talks to SQLite directly -- it only ever calls this API, matching the
 // "dashboard communicates only with the API" rule in architecture.md.
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+// Where the backend lives.
+//
+// `??`, not `||`: an explicitly empty VITE_API_BASE is a real answer, not a
+// missing one. It means "same origin as this page", which is how the packaged
+// container serves things -- one process, one port, and no CORS to configure.
+// Unset (the dev server, where Vite is on :5173 and uvicorn on :8000) still
+// falls back to the local backend.
+const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 const TOKEN_KEY = "shadowfax_token";
 
 // The bearer token, mirrored to localStorage so a reload keeps the session.

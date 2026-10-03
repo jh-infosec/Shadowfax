@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import sqlite3
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -30,6 +31,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import assistant
@@ -46,7 +48,7 @@ import throttle
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -486,6 +488,16 @@ def explain_alert(alert_id: str, identity: dict = Depends(require_role("viewer")
         events = db.get_events_for_actor(conn, alert["actor_id"])
     brief = assistant.build_alert_brief(alert, events)
     return assistant.explain(brief)
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness, for a container runtime. Unauthenticated by necessity and
+    deliberately uninteresting: a health check that needed a credential would be
+    useless to an orchestrator, and one that reported internals would be a free
+    reconnaissance endpoint. It says the process is up and which version is
+    running -- nothing about the data, the users or the configuration."""
+    return {"status": "ok", "service": APP_NAME, "version": VERSION}
 
 
 @app.get("/stats")
@@ -962,3 +974,25 @@ def delete_api_key(key_id: int, identity: dict = Depends(require_role("admin")))
     if not deleted:
         raise HTTPException(404, f"no API key with id {key_id}")
     return {"status": "deleted"}
+
+
+# Serving the dashboard (v0.12)
+#
+# When a built dashboard is present, the API serves it from its own origin. This
+# is what makes the packaged container a single process on a single port: no
+# second web server, no CORS to configure, and no "works on my machine" gap
+# between the port the dashboard was built for and the port it ends up on.
+#
+# The mount is registered last, after every API route, because routes are
+# matched in order -- so /alerts, /docs and the rest keep winning and only
+# genuinely unclaimed paths fall through to a file. The dashboard has no
+# client-side router, so there are no deep links for this to mishandle.
+#
+# In development there is no dist/ directory and nothing is mounted: the Vite
+# dev server serves the dashboard on :5173 and talks to this API on :8000,
+# which is the CORS allowlist's reason for existing.
+_DASHBOARD_DIST = Path(__file__).parent / "frontend" / "dist"
+
+if _DASHBOARD_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(_DASHBOARD_DIST), html=True),
+              name="dashboard")

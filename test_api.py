@@ -737,6 +737,77 @@ code, _, serr = run_cli(["stats"], transport=_anon_tp)
 check("CLI exits 3 on an unauthenticated call", code == 3)
 check("CLI points at how to authenticate", "login" in serr)
 
+print("\n== packaging and the demo replay (v0.12) ==")
+import demo as demo_mod
+import app as _app_mod
+from pathlib import Path as _Path
+
+# -- health, for a container runtime ----------------------------------------
+_h = anon.get("/healthz")
+check("GET /healthz needs no credential — an orchestrator has none",
+      _h.status_code == 200)
+check("it reports the running version", _h.json()["version"] == _app_mod.VERSION)
+# A health check that leaked internals would be a free reconnaissance endpoint
+# for anyone who could reach the port.
+check("it reports nothing about the data, users or configuration",
+      set(_h.json()) == {"status", "service", "version"})
+
+# -- the database path comes from the environment ---------------------------
+# The container points this at a mounted volume so the event store survives a
+# rebuild instead of living in an image layer.
+import importlib as _importlib
+_saved_db_path = db_module.DB_PATH
+os.environ["SHADOWFAX_DB"] = "/tmp/shadowfax-env-probe.db"
+try:
+    _reloaded = _importlib.reload(db_module)
+    check("SHADOWFAX_DB chooses the database path",
+          str(_reloaded.DB_PATH) == "/tmp/shadowfax-env-probe.db")
+finally:
+    del os.environ["SHADOWFAX_DB"]
+    _importlib.reload(db_module)
+    # Put the test's own isolated database back: the reload above reset
+    # DB_PATH to the packaged default, and every later section writes through
+    # this module.
+    db_module.DB_PATH = _saved_db_path
+check("without it, the database sits beside the code",
+      db_module.DB_PATH == _saved_db_path)
+
+# -- serving the dashboard from the API --------------------------------------
+# The mount is registered after every route, so API paths keep winning. If that
+# ordering ever broke, these would start returning a static-file 404 instead.
+check("an API route is not shadowed by the dashboard mount",
+      anon.get("/alerts").status_code == 401)
+check("the docs are not shadowed either", anon.get("/docs").status_code == 200)
+check("the dashboard mount is absent until a build exists, so dev is unaffected",
+      _app_mod._DASHBOARD_DIST.name == "dist")
+
+# -- the replay is a scenario, not a test, but it must still be coherent -----
+check("the replay targets one actor throughout", demo_mod.ACTOR)
+check("the replay's own clock is separate from its pacing — a fast replay must "
+      "still trip the time-windowed detectors",
+      demo_mod.START < _dt.utcnow())
+
+_d = demo_mod.Demo("http://127.0.0.1:1", speed=0.0, colour=False)
+check("--fast means no pauses at all", _d.speed == 0.0)
+check("the replay shows only what each step newly raised",
+      _d.seen == set())
+_sample = [{"id": "a", "severity": "high", "category": "x", "attack": []}]
+import contextlib as _contextlib, io as _io2
+with _contextlib.redirect_stdout(_io2.StringIO()):
+    _d.observed(_sample)
+    _d.observed(_sample)   # the second showing must be suppressed
+check("an alert already shown is not reprinted by a later step",
+      _d.seen == {"a"})
+
+# The replay is an ordinary client with no privileged path of its own: it signs
+# in, holds a bearer token, and calls the same endpoints as the dashboard.
+_src = (_Path(__file__).parent / "demo.py").read_text(encoding="utf-8")
+check("the replay signs in like any other client", "/auth/login" in _src)
+check("the replay reaches Shadowfax only over HTTP, never the database",
+      "import db" not in _src and "sqlite3" not in _src)
+check("the replay needs nothing but the standard library",
+      "import requests" not in _src)
+
 print("\n== findings envelope (v0.11) ==")
 import envelope as env_mod
 import tempfile as _tempfile

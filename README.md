@@ -65,6 +65,7 @@ investigation and explainability.
 - Sign-in throttling and lockout — backoff then lockout on the platform's own login, with no enumeration oracle and no sleeping
 - Self-monitoring — attacks on Shadowfax's own front door become ordinary events and raise ordinary alerts, through the same detectors as everything else
 - Findings-envelope ingest — any tool that writes the shared envelope can post findings, and Shadowfax needs to know nothing about it
+- One-command packaging — `docker compose up`, plus a scripted attack replay that makes the engine demonstrate itself
 - Automated API testing
 
 ---
@@ -106,6 +107,10 @@ Current stack
 - SQLite
 - React
 - Vite
+
+Also
+
+- Docker (one-command packaging)
 
 Planned
 
@@ -183,6 +188,11 @@ Planned
 - Findings-Envelope Ingest — shipped (v0.11.0)
 - The `info` severity level — shipped (v0.11.0)
 
+### v0.12
+
+- Docker packaging, one command — shipped (v0.12.0)
+- Scripted attack replay — shipped (v0.12.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -194,22 +204,65 @@ Planned
 
 ## Running Shadowfax
 
+```bash
+docker compose up --build
+```
+
+Open `http://localhost:8000` and sign in as `admin` / `admin`. One process, one
+port: the API serves the dashboard from its own origin, so there is no second
+server to start and no CORS allowlist to reconcile with whichever port the
+dashboard ended up on.
+
+### Watch it work
+
+Reading that a tool detects a kill chain is not the same as seeing one form.
+Leave the dashboard open and run:
+
+```bash
+docker compose exec shadowfax python demo.py
+```
+
+A scripted attack unfolds against the running instance, in three acts. Because
+the dashboard is live over Server-Sent Events, the alerts appear as the attack
+does — nothing needs refreshing.
+
+```
+━━ ACT 1 · An agent exceeds its brief
+
+   2. It grants itself root, with no approval marker.
+      expect → privilege_escalation (T1548)
+      ▸ HIGH    privilege_escalation  T1548
+   ...
+  ⛓ KILL CHAIN  Privilege Escalation → Credential Access → Lateral Movement → Exfiltration
+    escalated to CRITICAL — the chain reached Exfiltration
+    correlated from 9 separate alerts, deterministically
+```
+
+Act 2 has another tool post findings over the shared envelope, which attach to
+the same actor and push the chain back a stage to Reconnaissance. Act 3 turns
+the attack on Shadowfax itself, and Shadowfax raises an ordinary brute-force
+alert about it.
+
+Every step prints what the attacker did *and* what Shadowfax should make of it,
+so the detection can be judged against the behaviour rather than taken on trust
+— and a step that does not fire is visible rather than quietly absent.
+
+`--fast` drops the pauses; `--speed 3` slows them down for talking over.
+
+`docker compose down` keeps the event store; `down -v` discards it.
+
+### Without Docker
+
 The backend and the dashboard run as two processes.
 
-Backend, from the repository root
+Backend, from the repository root:
 
 ```bash
 pip install -r requirements.txt
 uvicorn app:app --reload --port 8000
 ```
 
-Interactive API documentation is available at
-
-```
-http://127.0.0.1:8000/docs
-```
-
-Dashboard, in a second terminal
+Dashboard, in a second terminal:
 
 ```bash
 cd frontend
@@ -217,14 +270,15 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` and sign in. On a fresh database the default
-login is `admin` / `admin` (see Security); create further accounts from the
-API as an admin.
+Open `http://localhost:5173` and sign in. Interactive API documentation is at
+`http://127.0.0.1:8000/docs`, and `GET /healthz` answers without a credential.
 
 The dashboard reads `VITE_API_BASE` for the backend URL, defaulting to
-`http://127.0.0.1:8000`. Set it in `frontend/.env` if the backend runs
-elsewhere. If you serve the dashboard from another origin, add it to
-`SHADOWFAX_CORS_ORIGINS` on the backend.
+`http://127.0.0.1:8000`. Setting it to the **empty** string means "same origin",
+which is how the container serves it. If you serve the dashboard from another
+origin, add that origin to `SHADOWFAX_CORS_ORIGINS` on the backend.
+
+`SHADOWFAX_DB` chooses where the database lives; it defaults to beside the code.
 
 ---
 

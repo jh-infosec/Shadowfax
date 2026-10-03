@@ -18,13 +18,20 @@ of (that actor's ordered event history, current policy).
 from __future__ import annotations
 import json
 import ledger
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-DB_PATH = Path(__file__).parent / "shadowfax.db"
+# Where the database lives. SHADOWFAX_DB lets a container point it at a mounted
+# volume, so the data survives the container and is not baked into the image
+# layer. Defaults beside the code, which is what a local checkout wants.
+#
+# The tests reassign this module attribute directly rather than setting the
+# variable, so it stays a plain module-level value and not a function call.
+DB_PATH = Path(os.environ.get("SHADOWFAX_DB") or (Path(__file__).parent / "shadowfax.db"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (

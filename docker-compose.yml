@@ -1,0 +1,45 @@
+# Shadowfax in one command (v0.12).
+#
+#   docker compose up --build
+#
+# Then open http://localhost:8000 and sign in. To watch the engine work rather
+# than read about it:
+#
+#   docker compose exec shadowfax python demo.py
+#
+# `docker compose down` keeps the database; `docker compose down -v` throws it
+# away. That asymmetry is deliberate -- losing an investigation should take an
+# extra flag.
+
+services:
+  shadowfax:
+    build: .
+    image: shadowfax:local
+    ports:
+      - "8000:8000"
+    volumes:
+      # The event store, outside the image, so a rebuild does not reset it.
+      - shadowfax-data:/data
+    environment:
+      # Local-development credentials, and they look it. Change these before
+      # this is reachable by anyone but you -- the API prints a warning on
+      # startup while they are the defaults, which is the honest behaviour for
+      # a tool that would otherwise ship with a known password.
+      SHADOWFAX_ADMIN_USERNAME: admin
+      SHADOWFAX_ADMIN_PASSWORD: admin
+
+      # The dashboard is served by the API itself here, so the only origin in
+      # play is this one. CORS stays closed rather than being widened to make
+      # the demo work.
+      SHADOWFAX_CORS_ORIGINS: http://localhost:8000,http://127.0.0.1:8000
+
+      # Set these to have the investigation assistant write its narratives with
+      # a model. Everything works without them -- explanations fall back to the
+      # deterministic brief and search to a keyword parser -- because a security
+      # tool that needs an API key to be useful is one you cannot evaluate.
+      # ANTHROPIC_API_KEY: ""
+      # SHADOWFAX_LLM_MODEL: ""
+    restart: unless-stopped
+
+volumes:
+  shadowfax-data:

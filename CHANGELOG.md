@@ -1,5 +1,87 @@
 # Changelog
 
+## Version 0.12.0
+
+Shadowfax could do a great deal by v0.11 and almost nobody could see it. Trying
+it meant installing Python dependencies, installing npm dependencies, running
+two processes and getting the CORS allowlist to agree with whichever port the
+dashboard ended up on. Every one of those is a place to give up.
+
+This version is one command, and a scripted attack that makes the engine
+demonstrate itself.
+
+```bash
+docker compose up --build          # then open http://localhost:8000
+docker compose exec shadowfax python demo.py
+```
+
+### Added
+
+- **`Dockerfile`** — two stages. Node builds the dashboard; Python runs the API
+  and serves the built dashboard **from its own origin**. Node does not survive
+  into the final image: a build toolchain inside a running security container is
+  attack surface that earns nothing. Runs as a non-root user, because a tool
+  that spends its time reporting privilege escalation should not need root to
+  say so.
+- **`docker-compose.yml`** — one service, one port, a named volume for the
+  event store. `docker compose down` keeps the database and `down -v` discards
+  it; losing an investigation should take an extra flag.
+- **`demo.py`** — a narrated attack replay against a running instance, in three
+  acts, each covering something a screenshot cannot show:
+  1. An AI agent exceeds its brief, and five separate alerts turn out to be one
+     kill chain running **Privilege Escalation → Exfiltration**.
+  2. Another tool's findings arrive over the shared envelope, attach to the same
+     actor, and push the chain back a stage to **Reconnaissance** — from a tool
+     Shadowfax knows nothing about.
+  3. The attacker turns on Shadowfax, and Shadowfax's own front door raises an
+     ordinary `brute_force_auth` alert about the attack on Shadowfax.
+- **`GET /healthz`** — unauthenticated by necessity, since an orchestrator has
+  no credential, and deliberately uninteresting: status, service name, version.
+  A health check that reported internals would be a free reconnaissance endpoint
+  for anyone who could reach the port.
+- **`SHADOWFAX_DB`** — the database path from the environment, so the container
+  can point it at a mounted volume instead of an image layer.
+- **`.dockerignore`** — notably excluding `*.db`. A database copied into an
+  image would ship someone's events and, worse, would look like seed data to
+  whoever ran it.
+
+### Changed
+
+- **The API serves the dashboard when a build is present.** The mount is
+  registered after every route, so API paths keep winning and only genuinely
+  unclaimed paths fall through to a file. In development there is no `dist/`,
+  nothing is mounted, and the Vite dev server on `:5173` works exactly as
+  before — which is what the CORS allowlist is for.
+- **`VITE_API_BASE` is read with `??`, not `||`.** An explicitly empty value is
+  a real answer meaning "same origin as this page", not a missing one. That is
+  the single change that lets one process serve both halves with CORS still
+  closed, rather than widening it to make a demo work.
+
+### Notes on the replay
+
+The attack's own clock and the replay's pacing are separate. Events carry
+timestamps minutes apart so the time-windowed detectors behave as they would in
+life; `--speed` and `--fast` only change how fast the narration is read out. Tie
+the two together and a fast replay quietly stops tripping half the engine.
+
+In Act 3 the replay **waits out the server's `Retry-After`**, because hammering
+only collects 429s: the v0.10 backoff stops the guessing before the detector has
+enough failures to call it brute force. A demo that did not wait would be
+demonstrating the throttle while silently failing to demonstrate the detection.
+
+The replay is an ordinary client. It signs in, holds a bearer token, uses the
+same endpoints as the dashboard and the CLI, and reaches the database never.
+
+### Tests
+
+16 new checks: `/healthz` needing no credential and leaking nothing beyond
+status, service and version; `SHADOWFAX_DB` choosing the path and the default
+standing without it; API routes not being shadowed by the dashboard mount (the
+failure mode if that ordering ever regressed is a static-file 404 where an
+endpoint should be); and the replay's own invariants — attack clock separate
+from pacing, each step printing only what it newly raised, standard library
+only, and no path to the database. 323 checks in all, green.
+
 ## Version 0.11.0
 
 `findings-envelope.md` has sat in this repository since v0.4 describing a wire
