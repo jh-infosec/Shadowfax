@@ -1,0 +1,153 @@
+# Shadowfax CI (v0.13).
+#
+# Two jobs, answering two different questions.
+#
+#   checks     Does the engine behave? 300+ assertions in-process, plus a
+#              dashboard build, because a broken component is a broken product
+#              even when every Python test passes.
+#
+#   container  Does the thing people are told to run actually run? It builds the
+#              image, starts it, and replays a scripted attack against it over
+#              real HTTP, asserting that the detections the README claims
+#              actually happen. A README that says `docker compose up` and a
+#              Dockerfile nobody builds is a promise with nothing behind it.
+#
+# The second job is the one that earns its keep. The unit suite never leaves the
+# process; this exercises ingest, sixteen detectors, correlation, kill-chain
+# ordering, findings-envelope ingest, the sign-in throttle and the hash-chained
+# ledger, against a real server, in the image that ships.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push makes an in-flight run irrelevant; let it go rather than
+  # queueing results nobody will read.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Test suite and dashboard build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the test suite
+        # Exits non-zero on the first failure and names the check that broke.
+        run: python test_api.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dashboard dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: frontend
+
+      - name: Build the dashboard
+        run: npm run build
+        working-directory: frontend
+
+  container:
+    name: Packaged image, end to end
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build the image
+        # Exactly what `docker compose up --build` does, so a broken Dockerfile
+        # fails here rather than on someone else's first try.
+        run: docker build -t shadowfax:ci .
+
+      - name: Start it
+        run: |
+          docker run -d --name shadowfax -p 8000:8000 \
+            -e SHADOWFAX_ADMIN_USERNAME=admin \
+            -e SHADOWFAX_ADMIN_PASSWORD=admin \
+            shadowfax:ci
+
+      - name: Wait for it to report healthy
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/healthz > /dev/null; then
+              echo "healthy after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "never became healthy; container log follows:"
+          docker logs shadowfax
+          exit 1
+
+      - name: It runs as a non-root user
+        # A tool that spends its time reporting privilege escalation should not
+        # need root to say it.
+        run: |
+          whoami_in_container=$(docker exec shadowfax whoami)
+          echo "running as: ${whoami_in_container}"
+          test "${whoami_in_container}" != "root"
+
+      - name: The dashboard is served from the API's own origin
+        # One process, one port. If this regressed, the image would still start
+        # and still answer the API while serving nothing a person could use.
+        run: |
+          curl -fsS http://127.0.0.1:8000/ | grep -q 'id="root"'
+
+      - name: An API route is not shadowed by the dashboard mount
+        # 401 means the endpoint answered and demanded a credential. A 404 would
+        # mean the static mount had swallowed it.
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/alerts)
+          echo "GET /alerts -> ${code}"
+          test "${code}" = "401"
+
+      - name: Replay a scripted attack, and assert what it must detect
+        # The real test. Ingest, detection, correlation, kill-chain ordering,
+        # findings-envelope ingest, the front door and the ledger -- over HTTP,
+        # against the image that ships. Non-zero if any step fails to raise what
+        # the narration said it would.
+        run: python demo.py --fast --assert --no-colour
+
+      - name: The CLI can gate on what it found
+        # `check` exits non-zero WHEN ALERTS MATCH -- the inversion that lets an
+        # agent harness fail its own build. The replay leaves criticals behind,
+        # so a zero exit here would mean the gate had stopped working.
+        env:
+          SHADOWFAX_PASSWORD: admin
+          SHADOWFAX_URL: http://127.0.0.1:8000
+        run: |
+          python cli.py login -u admin
+          python cli.py verify
+          if python cli.py check --severity critical; then
+            echo "check exited 0 with critical alerts present — the gate is broken"
+            exit 1
+          fi
+          echo "check correctly exited non-zero on matching alerts"
+
+      - name: Container log
+        if: always()
+        run: docker logs shadowfax
