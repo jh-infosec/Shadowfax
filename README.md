@@ -1,5 +1,7 @@
 # Shadowfax
 
+[![CI](https://github.com/jh-infosec/Shadowfax/actions/workflows/ci.yml/badge.svg)](https://github.com/jh-infosec/Shadowfax/actions/workflows/ci.yml)
+
 > AI Security Operations Platform for Monitoring Autonomous AI Agents
 
 ---
@@ -66,6 +68,7 @@ investigation and explainability.
 - Self-monitoring — attacks on Shadowfax's own front door become ordinary events and raise ordinary alerts, through the same detectors as everything else
 - Findings-envelope ingest — any tool that writes the shared envelope can post findings, and Shadowfax needs to know nothing about it
 - One-command packaging — `docker compose up`, plus a scripted attack replay that makes the engine demonstrate itself
+- CI that builds the image and replays the attack against it, so every commit proves the detections still happen
 - Automated API testing
 
 ---
@@ -193,6 +196,10 @@ Planned
 - Docker packaging, one command — shipped (v0.12.0)
 - Scripted attack replay — shipped (v0.12.0)
 
+### v0.13
+
+- CI: test suite, image build, and the replay asserted end to end — shipped (v0.13.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -284,13 +291,51 @@ origin, add that origin to `SHADOWFAX_CORS_ORIGINS` on the backend.
 
 ## Testing
 
-Run the backend test suite
+Run the backend test suite:
 
 ```bash
 python test_api.py
 ```
 
 The dashboard has no automated tests yet.
+
+### The replay is also a test
+
+`demo.py` prints what each step expects before it happens. With `--assert`,
+those claims are checked and the run exits non-zero naming any that failed:
+
+```bash
+python demo.py --fast --assert
+```
+
+```
+━━ ASSERTIONS FAILED
+
+  ✗ step 8: expected shadowfax-auth / brute_force_auth — not raised
+```
+
+That turns the demo into an end-to-end check of the whole stack — ingest,
+sixteen detectors, correlation, kill-chain ordering, findings-envelope ingest,
+the front door and the ledger — against a real server over real HTTP. It is a
+different kind of evidence from the unit suite, which never leaves the process.
+
+Expectations are recorded qualified by actor as well as category: Act 1 and
+Act 3 both raise `brute_force_auth`, and an unqualified check would pass on
+Act 1's alert and never notice that self-monitoring had stopped working.
+
+Without `--assert` it is still a demo and still returns 0 whatever happens.
+
+### Continuous integration
+
+Every push runs two jobs. **checks** runs the test suite and builds the
+dashboard. **container** builds the Docker image, starts it, and replays the
+attack against it — proving that the image builds, runs as a non-root user,
+serves the dashboard from the API's own origin, does not let the static mount
+shadow an API route, raises the detections the README claims, and that
+`shadowfax check` still exits non-zero when alerts match.
+
+A README that says `docker compose up` and a Dockerfile nobody builds is a
+promise with nothing behind it.
 
 ---
 

@@ -742,6 +742,32 @@ credential, and reports only status, service and version -- a health endpoint
 that described internals would be free reconnaissance for anyone who could
 reach the port.
 
+## Continuous integration (v0.13)
+
+Two jobs, because they answer different questions. **checks** runs the test
+suite and builds the dashboard. **container** builds the image, starts it, and
+replays the scripted attack against it over HTTP.
+
+The second is the one that earns its keep. The unit suite never leaves the
+process, so it cannot tell you whether the image builds, whether the dashboard
+is reachable, or whether the static mount has started shadowing an API route --
+all of which would leave the product broken with every Python test still green.
+The replay run with `--assert` covers the rest end to end: ingest, the
+detectors, correlation, kill-chain ordering, findings-envelope ingest, the
+sign-in throttle and the ledger, in the image that ships.
+
+`--assert` works by making the narration load-bearing. Each step already
+declared what it expected; that claim is now recorded and compared against what
+was raised, and the run fails naming the step. Expectations are qualified by
+actor as well as category, because two acts legitimately raise
+`brute_force_auth` and an unqualified check would pass on the first one while
+self-monitoring was silently broken. Four further assertions cover what no
+single alert can establish: that an incident correlated, that the chain is at
+least four stages, that it begins at Reconnaissance (true only if the ingested
+finding attached), and that the ledger verifies.
+
+Without `--assert` the replay returns 0 whatever happens. It is a demo first.
+
 ## Required Files
 
 The following files are part of the project structure and must be preserved:
@@ -754,7 +780,7 @@ seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
 throttle.py             envelope.py
 demo.py                 Dockerfile              docker-compose.yml
-.dockerignore
+.dockerignore           .github/workflows/ci.yml
 architecture.md
 README.md
 CHANGELOG.md

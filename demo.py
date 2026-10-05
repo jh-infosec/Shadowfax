@@ -61,7 +61,8 @@ CYAN = "\033[36m"
 
 
 class Demo:
-    def __init__(self, url: str, speed: float, colour: bool):
+    def __init__(self, url: str, speed: float, colour: bool,
+                 assert_expectations: bool = False):
         self.url = url.rstrip("/")
         self.speed = speed
         self.colour = colour
@@ -72,6 +73,12 @@ class Demo:
         # API and useless for a narration, since step five would reprint
         # everything from steps one to four. Each step shows only what it added.
         self.seen: set[str] = set()
+        # What each step claimed it would raise, and what actually appeared.
+        # Compared at the end under --assert.
+        self.expected: list[tuple[int, str, str]] = []
+        self.raised: set[str] = set()
+        self.failures: list[str] = []
+        self.assert_expectations = assert_expectations
 
     # -- plumbing ----------------------------------------------------------
 
@@ -107,16 +114,31 @@ class Demo:
         print()
         self.pause(1.5)
 
-    def narrate(self, what: str, expect: str) -> None:
+    def narrate(self, what: str, expect: str, category: str | None = None) -> None:
+        """Announce a step and, when `category` is given, record what it must
+        raise.
+
+        The "expect →" line was decoration until v0.13: a step that silently
+        stopped firing read exactly like a step that was never meant to. Naming
+        the category makes the claim checkable, so `--assert` can fail the run
+        and CI can tell a working engine from a broken one.
+        """
         self.step += 1
         print(f"  {self._c(f'{self.step:>2}.', DIM)} {what}")
         print(f"      {self._c('expect →', DIM)} {self._c(expect, DIM)}")
+        if category:
+            self.expected.append((self.step, category, expect))
         self.pause(1.2)
 
     def observed(self, alerts: list[dict]) -> None:
         """Print what this step newly raised, which may be nothing."""
         alerts = [a for a in alerts if a["id"] not in self.seen]
         self.seen.update(a["id"] for a in alerts)
+        # Recorded both bare and qualified by actor. Act 1 and Act 3 both raise
+        # brute_force_auth, so an unqualified check there would pass on Act 1's
+        # alert and never notice that self-monitoring had stopped working.
+        self.raised.update(a["category"] for a in alerts)
+        self.raised.update(f"{a.get('actor_id')}:{a['category']}" for a in alerts)
         if not alerts:
             note = "· no alert (this step is setup, or a detector disagreed)"
             print(f"      {self._c(note, DIM)}")
@@ -173,26 +195,29 @@ class Demo:
         self.observed(self.send(0, "file_access", "customer_churn_dataset"))
 
         self.narrate("It grants itself root, with no approval marker.",
-                     "privilege_escalation (T1548)")
+                     "privilege_escalation (T1548)", "privilege_escalation")
         self.observed(self.send(2, "privilege_change", "analysis_workstation",
                                 new_level="root", elevated=True))
 
         self.narrate("Four failed logins against the internal VPN.",
-                     "brute_force_auth (T1110) once the window fills")
+                     "brute_force_auth (T1110) once the window fills",
+                     "brute_force_auth")
         for n in range(4):
             alerts = self.send(4 + n, "auth_failure", "corp_vpn",
                                source_ip="10.10.5.44")
         self.observed(alerts)
 
         self.narrate("It touches six databases in eleven minutes.",
-                     "lateral_movement (T1021) past the distinct-target threshold")
+                     "lateral_movement (T1021) past the distinct-target threshold",
+                     "lateral_movement")
         for n, target in enumerate(["finance_db", "hr_records_db", "billing_db",
                                     "crm_db", "payroll_db", "audit_db"]):
             alerts = self.send(8 + n, "file_access", target)
         self.observed(alerts)
 
         self.narrate("500 MB leaves for an internal staging bucket.",
-                     "exfiltration_volume (T1048), and the chain completes")
+                     "exfiltration_volume (T1048), and the chain completes",
+                     "exfiltration_volume")
         self.observed(self.send(15, "data_transfer", "internal_staging_bucket",
                                 bytes_transferred=500_000_000))
 
@@ -205,7 +230,8 @@ class Demo:
                  "contract.")
 
         self.narrate("A recon tool posts findings about the same actor.",
-                     "ingested as events, raising alerts with the emitter named")
+                     "ingested as events, raising alerts with the emitter named",
+                     "host_enumeration")
         status, body = self.call("POST", "/findings", {
             "envelope_version": "1.0",
             "generated": (START - timedelta(minutes=5)).isoformat() + "Z",
@@ -266,7 +292,8 @@ class Demo:
 
         self.narrate("A patient attacker guesses at a Shadowfax account, "
                      "waiting out each refusal.",
-                     "401s, then 429s — and Shadowfax alerting on the attempt")
+                     "401s, then 429s — and Shadowfax alerting on the attempt",
+                     "shadowfax-auth:brute_force_auth")
         self.brute_force("j.bartlett")
         self.pause(1)
 
@@ -281,6 +308,62 @@ class Demo:
 
         self.pause(1)
         self.finish(incident)
+        return self.verdict()
+
+    def verdict(self) -> int:
+        """Check every claim the narration made, if asked to.
+
+        Without --assert this is a demo and returns 0 whatever happened: a
+        person watching can see for themselves. With it, the replay becomes an
+        end-to-end check of the whole stack -- ingest, sixteen detectors,
+        correlation, kill-chain ordering, envelope ingest, the front door and
+        the ledger -- against a real server over real HTTP. That is a different
+        kind of evidence from the unit suite, which never leaves the process.
+        """
+        if not self.assert_expectations:
+            return 0
+
+        for step, category, described in self.expected:
+            if category not in self.raised:
+                where = category.replace(":", " / ")
+                self.failures.append(
+                    f"step {step}: expected {where} ({described}) — not raised")
+
+        # The chain is the claim that matters most, and it is the one no single
+        # alert can establish: it exists only in the relationship between them.
+        _, incidents = self.call("GET", "/incidents")
+        mine = next((i for i in incidents if i["actor_id"] == ACTOR), None)
+        if not mine:
+            self.failures.append(f"no incident correlated for {ACTOR}")
+        else:
+            _, detail = self.call("GET", f"/incidents/{mine['id']}")
+            chain = detail.get("chain") or {}
+            stages = [s["tactic"] for s in chain.get("stages", [])]
+            if len(stages) < 4:
+                self.failures.append(
+                    f"kill chain too short: {' → '.join(stages) or 'none detected'}")
+            if stages and stages[0] != "Reconnaissance":
+                self.failures.append(
+                    f"chain should start at Reconnaissance (the ingested finding), "
+                    f"starts at {stages[0]}")
+            if not chain.get("escalated"):
+                self.failures.append("chain reached a terminal tactic but did not escalate")
+
+        _, ledger = self.call("GET", "/ledger/verify")
+        if not ledger.get("ok"):
+            self.failures.append(f"ledger does not verify: {ledger.get('summary')}")
+
+        if self.failures:
+            print(self._c("━━ ASSERTIONS FAILED", BOLD + RED))
+            print()
+            for failure in self.failures:
+                print(f"  {self._c('✗ ' + failure, RED)}")
+            print()
+            return 1
+
+        checks = len(self.expected) + 4
+        print(self._c(f"━━ ALL {checks} ASSERTIONS HELD", BOLD + GREEN))
+        print()
         return 0
 
     def brute_force(self, username: str, attempts: int = 5) -> None:
@@ -389,10 +472,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fast", action="store_true",
                         help="no pauses at all — for a terminal-only check")
     parser.add_argument("--no-colour", action="store_true", help="plain output")
+    parser.add_argument("--assert", dest="assert_expectations", action="store_true",
+                        help="fail with a non-zero exit when a step does not "
+                             "raise what it said it would — turns the replay "
+                             "into an end-to-end check for CI")
     args = parser.parse_args(argv)
 
     demo = Demo(args.url, 0.0 if args.fast else args.speed,
-                not args.no_colour and sys.stdout.isatty())
+                not args.no_colour and sys.stdout.isatty(),
+                assert_expectations=args.assert_expectations)
     try:
         return demo.run()
     except KeyboardInterrupt:

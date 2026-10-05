@@ -1,5 +1,71 @@
 # Changelog
 
+## Version 0.13.0
+
+v0.12 added a `Dockerfile` and a README whose first line says `docker compose
+up`. Nothing was building that Dockerfile. A promise with nothing behind it is
+worse than no promise, so this version makes every commit prove the claim.
+
+### Added
+
+- **`.github/workflows/ci.yml`** — two jobs answering two different questions.
+  **checks** runs the 300+ assertions and builds the dashboard, because a
+  broken component is a broken product even when every Python test passes.
+  **container** builds the image, starts it, and replays a scripted attack
+  against it over real HTTP.
+- **`demo.py --assert`** — the replay becomes an end-to-end check. Every step
+  already printed what it expected; now that claim is recorded and verified,
+  and the run exits non-zero naming any step that failed to raise what it said
+  it would. Plus four assertions no single alert can establish: that an incident
+  correlated at all, that the kill chain is at least four stages, that it starts
+  at Reconnaissance (which only happens if the ingested finding attached), and
+  that the ledger still verifies.
+
+### Why the container job is the one that matters
+
+The unit suite never leaves the process. This exercises ingest, sixteen
+detectors, correlation, kill-chain ordering, findings-envelope ingest, the
+sign-in throttle and the hash-chained ledger — against a real server, over real
+HTTP, **in the image that ships**. It also checks the things that would leave
+the product broken while every unit test still passed:
+
+- the image builds at all;
+- it runs as a **non-root** user;
+- the dashboard is served from the API's own origin;
+- an API route is **not** shadowed by the static mount (a `401` proves the
+  endpoint answered; a `404` would mean the mount had swallowed it);
+- `shadowfax check` still exits **non-zero when alerts match** — the inversion
+  that lets an agent harness fail its own build. The replay leaves criticals
+  behind, so a zero exit there means the gate has quietly stopped working.
+
+### The "expect →" line is now load-bearing
+
+It was decoration. A step that silently stopped firing read exactly like a step
+that was never meant to fire. Naming the expected category makes the claim
+checkable, and the failure output names the step:
+
+```
+━━ ASSERTIONS FAILED
+
+  ✗ step 8: expected shadowfax-auth / brute_force_auth (401s, then 429s — and
+    Shadowfax alerting on the attempt) — not raised
+```
+
+Expectations are recorded **qualified by actor as well as category**, because
+Act 1 and Act 3 both raise `brute_force_auth`. An unqualified check would pass
+on Act 1's alert and never notice that self-monitoring had stopped working —
+which is exactly the regression that failure above was produced by, running the
+replay against a server started with `SHADOWFAX_SELF_MONITOR=0`.
+
+Without `--assert` the replay is still a demo and still returns 0 whatever
+happens: a person watching can see for themselves.
+
+### Tests
+
+3 new checks covering the assertion machinery itself: that a step's declared
+expectation is recorded, that what was raised is tracked both bare and qualified
+by actor, and that the replay never fails without `--assert`. 326 in all, green.
+
 ## Version 0.12.0
 
 Shadowfax could do a great deal by v0.11 and almost nobody could see it. Trying

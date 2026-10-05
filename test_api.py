@@ -791,13 +791,27 @@ _d = demo_mod.Demo("http://127.0.0.1:1", speed=0.0, colour=False)
 check("--fast means no pauses at all", _d.speed == 0.0)
 check("the replay shows only what each step newly raised",
       _d.seen == set())
-_sample = [{"id": "a", "severity": "high", "category": "x", "attack": []}]
+_sample = [{"id": "a", "severity": "high", "category": "x", "attack": [],
+            "actor_id": "demo-agent-1"}]
 import contextlib as _contextlib, io as _io2
 with _contextlib.redirect_stdout(_io2.StringIO()):
     _d.observed(_sample)
     _d.observed(_sample)   # the second showing must be suppressed
 check("an alert already shown is not reprinted by a later step",
       _d.seen == {"a"})
+# The "expect →" line is checked, not decorative: --assert fails the run when a
+# step stops raising what it claimed. Qualified by actor as well as category,
+# because two acts legitimately raise the same category.
+check("what a step raised is recorded both bare and qualified by actor",
+      _d.raised == {"x", "demo-agent-1:x"})
+_dx = demo_mod.Demo("http://127.0.0.1:1", speed=0.0, colour=False,
+                    assert_expectations=True)
+with _contextlib.redirect_stdout(_io2.StringIO()):
+    _dx.narrate("a step", "something that will not happen", "never_fires")
+check("an expectation a step declared is recorded for checking",
+      _dx.expected == [(1, "never_fires", "something that will not happen")])
+check("without --assert the replay is a demo and never fails",
+      demo_mod.Demo("http://127.0.0.1:1", 0.0, False).verdict() == 0)
 
 # The replay is an ordinary client with no privileged path of its own: it signs
 # in, holds a bearer token, and calls the same endpoints as the dashboard.

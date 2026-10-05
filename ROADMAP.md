@@ -253,6 +253,28 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 
 ---
 
+## Version 0.13
+
+- [x] CI: `.github/workflows/ci.yml`. **checks** runs the suite and builds the
+      dashboard; **container** builds the image, starts it, and replays the
+      scripted attack against it over HTTP, asserting the detections the README
+      claims. Also checks the things that leave the product broken while every
+      unit test passes: the image builds, runs non-root, serves the dashboard
+      from the API's own origin, does not let the static mount shadow an API
+      route, and `shadowfax check` still exits non-zero when alerts match.
+      Shipped in `v0.13.0`.
+- [x] `demo.py --assert`: the narration's "expect →" line becomes a checked
+      claim, qualified by actor as well as category, plus assertions on the
+      chain's existence, length, starting tactic and the ledger. Shipped in
+      `v0.13.0`.
+- [ ] Frontend tests. The dashboard is still only exercised by hand and by the
+      screenshot pass; CI builds it but cannot tell a built bundle from a
+      working one.
+- [ ] Publish the image on a tag, so `docker run ghcr.io/jh-infosec/shadowfax`
+      needs no clone. The CI that builds it already exists; this is the push.
+
+---
+
 ## Version 1.0
 
 - [ ] Electron desktop application
