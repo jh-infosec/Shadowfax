@@ -1,5 +1,28 @@
 # Changelog
 
+## Version 0.13.1
+
+CI's first run failed, which is the best thing it could have done.
+
+`test_api.py` has needed **httpx** since v0.3 — `fastapi.testclient` imports it
+internally and raises at import time without it — and nothing declared it. Every
+machine the suite had ever run on happened to have it already, so the gap was
+invisible for ten versions. The first clean checkout found it in ten seconds.
+
+- **`requirements-dev.txt`** — pulls in `requirements.txt` and adds `httpx`.
+  Kept separate so the shipped container stays lean: a security tool's runtime
+  image should not carry a test client, and `pip install -r requirements.txt`
+  is still all a deployment needs. The container CI job deliberately installs
+  neither, because it tests the image, whose dependencies are the runtime ones
+  alone.
+- **A missing httpx now reads as an instruction**, not a stack trace: the suite
+  catches the import error and prints the command to fix it.
+
+The container job passed on that same run — the image builds, starts, runs as a
+non-root user, serves the dashboard from the API's own origin, and the replay's
+assertions all held on a clean runner. That was the half of v0.13.0 that had
+never been proven anywhere.
+
 ## Version 0.13.0
 
 v0.12 added a `Dockerfile` and a README whose first line says `docker compose

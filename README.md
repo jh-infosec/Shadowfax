@@ -294,8 +294,13 @@ origin, add that origin to `SHADOWFAX_CORS_ORIGINS` on the backend.
 Run the backend test suite:
 
 ```bash
+pip install -r requirements-dev.txt
 python test_api.py
 ```
+
+`requirements-dev.txt` adds what only the suite needs (`httpx`, which
+`fastapi.testclient` imports internally). A deployment still needs nothing
+beyond `requirements.txt` — the shipped container carries no test client.
 
 The dashboard has no automated tests yet.
 

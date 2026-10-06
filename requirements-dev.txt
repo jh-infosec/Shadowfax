@@ -1,0 +1,12 @@
+# Dependencies the test suite needs on top of the runtime ones.
+#
+# Kept separate so the shipped container stays lean: a security tool's runtime
+# image should not carry a test client. CI installs this file; `pip install -r
+# requirements.txt` is still all a deployment needs.
+-r requirements.txt
+
+# fastapi.testclient needs httpx. It is not imported by name anywhere in this
+# repository -- Starlette imports it internally and raises at import time if it
+# is missing -- which is exactly why its absence went unnoticed until CI ran the
+# suite on a clean machine.
+httpx>=0.27

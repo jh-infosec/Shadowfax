@@ -14,7 +14,12 @@ db_module.DB_PATH = db_module.Path(__file__).parent / "test_shadowfax.db"
 if db_module.DB_PATH.exists():
     db_module.DB_PATH.unlink()
 
-from fastapi.testclient import TestClient
+try:
+    from fastapi.testclient import TestClient
+except RuntimeError as exc:  # starlette raises this when httpx is absent
+    print(f"{exc}\n\nThe test suite needs httpx, which the runtime does not:\n"
+          f"    pip install -r requirements-dev.txt")
+    raise SystemExit(2)
 import app as app_module
 from app import app
 
