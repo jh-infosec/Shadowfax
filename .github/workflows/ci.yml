@@ -47,7 +47,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install backend dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Run the test suite
         # Exits non-zero on the first failure and names the check that broke.
