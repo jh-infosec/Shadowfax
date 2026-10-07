@@ -267,9 +267,14 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       claim, qualified by actor as well as category, plus assertions on the
       chain's existence, length, starting tactic and the ledger. Shipped in
       `v0.13.0`.
-- [ ] Frontend tests. The dashboard is still only exercised by hand and by the
-      screenshot pass; CI builds it but cannot tell a built bundle from a
-      working one.
+- [x] Frontend tests. `test_dashboard.py` drives a real browser against a real
+      Shadowfax: sixteen checks that what the engine found reaches the screen --
+      rows with severities and techniques, an ingested finding naming its
+      emitter, the ledger badge, a drawn kill chain, and filtering that filters.
+      A component that throws on mount is reported as a named finding with the
+      underlying error rather than a bare selector timeout, and console errors
+      fail the run. Runs in CI straight after the replay, which is what puts the
+      data there. Shipped in `v0.14.0`.
 - [ ] Publish the image on a tag, so `docker run ghcr.io/jh-infosec/shadowfax`
       needs no clone. The CI that builds it already exists; this is the push.
 

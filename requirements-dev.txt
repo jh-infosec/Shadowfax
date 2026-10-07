@@ -10,3 +10,8 @@
 # is missing -- which is exactly why its absence went unnoticed until CI ran the
 # suite on a clean machine.
 httpx>=0.27
+
+# The dashboard tests drive a real browser. Also developer-only: the shipped
+# container has neither Playwright nor a browser in it, and should not.
+#   python -m playwright install chromium
+playwright>=1.44

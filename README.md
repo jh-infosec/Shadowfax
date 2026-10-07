@@ -69,6 +69,7 @@ investigation and explainability.
 - Findings-envelope ingest — any tool that writes the shared envelope can post findings, and Shadowfax needs to know nothing about it
 - One-command packaging — `docker compose up`, plus a scripted attack replay that makes the engine demonstrate itself
 - CI that builds the image and replays the attack against it, so every commit proves the detections still happen
+- Dashboard checked in a real browser — building a bundle proves it compiles, not that anything reaches the screen
 - Automated API testing
 
 ---
@@ -200,6 +201,10 @@ Planned
 
 - CI: test suite, image build, and the replay asserted end to end — shipped (v0.13.0)
 
+### v0.14
+
+- Dashboard tests in a real browser — shipped (v0.14.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -302,7 +307,29 @@ python test_api.py
 `fastapi.testclient` imports internally). A deployment still needs nothing
 beyond `requirements.txt` — the shipped container carries no test client.
 
-The dashboard has no automated tests yet.
+### The dashboard, in a real browser
+
+Building the dashboard proves it compiles, not that it works. Vite exits 0 on a
+page that renders nothing — a component throwing on mount, an API field quietly
+renamed, a filter that drops every row all ship green.
+
+```bash
+python demo.py --fast          # put something on the dashboard first
+python test_dashboard.py
+```
+
+Sixteen checks, each one an assertion a person makes when they glance at the
+dashboard and believe it: that the alerts the engine found are rendered as rows,
+that rows carry a severity and an ATT&CK technique, that an ingested finding
+names the tool that reported it, that the ledger badge reads verified, that a
+correlated kill chain is *drawn* with its tactics and its escalation, and that
+filtering actually filters.
+
+They refuse to run against an empty instance, because a test that passes on a
+dashboard rendering nothing is worse than no test. `--headed` shows the browser.
+
+Playwright is a developer dependency (`requirements-dev.txt`), not a runtime
+one: the shipped container has neither it nor a browser, and should not.
 
 ### The replay is also a test
 

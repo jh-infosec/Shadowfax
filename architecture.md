@@ -248,6 +248,31 @@ the queue only when a human acknowledges its alerts.
 assistant's covering narrative, but the assistant receives the order and the
 reasons *after* they are fixed and its prompt forbids re-ordering them.
 
+#### test_dashboard.py
+
+The dashboard's browser checks (v0.14). CI had built the dashboard since v0.13
+and could not tell a built bundle from a working one: Vite exits 0 on a page
+that renders nothing, so a component throwing on mount, a renamed API field or a
+filter that drops every row all shipped green.
+
+Each check asserts that *what the engine found reaches the screen*, never that
+some markup exists -- a test for "a table element is present" passes on an empty
+table, which is the failure it most needs to catch. So the assertions are rows
+with severities and ATT&CK techniques, an ingested finding naming its emitter,
+the ledger badge reading verified, a correlated kill chain drawn with its
+tactics and escalation, and a filter that actually narrows and restores.
+
+Two design points. A component that throws on mount takes the page with it and
+the first symptom is a selector that never appears, so the exception is caught
+and reported as a named finding carrying the underlying error -- CI fails either
+way, but only one of them says what broke. And the run refuses to start against
+an instance with no alerts, because checks that pass on an empty dashboard are
+worse than no checks; `demo.py` is what populates it, which is why CI runs this
+immediately after the replay.
+
+Playwright is a developer dependency. The shipped image has neither it nor a
+browser.
+
 #### demo.py
 
 The scripted attack replay (v0.12). Not part of the product and not a test: it
@@ -779,7 +804,8 @@ attack_registry.json    correlate.py            assistant.py
 seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
 throttle.py             envelope.py
-demo.py                 Dockerfile              docker-compose.yml
+demo.py                 test_dashboard.py       Dockerfile
+docker-compose.yml
 .dockerignore           .github/workflows/ci.yml
 architecture.md
 README.md

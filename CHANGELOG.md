@@ -1,5 +1,62 @@
 # Changelog
 
+## Version 0.14.0
+
+CI has built the dashboard since v0.13 and could not tell a built bundle from a
+working one. Vite exits 0 on a page that renders nothing — a component throwing
+on mount, an API field quietly renamed, a filter that drops every row all ship
+green. The one part of Shadowfax a person actually looks at was the one part
+nothing checked.
+
+### Added
+
+- **`test_dashboard.py`** — sixteen checks against a real browser, driving a
+  real Shadowfax. They are the assertions a human makes when they glance at the
+  dashboard and believe it: that the alerts the engine found are rendered as
+  rows, that rows carry a severity and an ATT&CK technique, that the top bar's
+  counts are not all zero, that an ingested finding names the tool that reported
+  it, that the ledger badge reads verified, that a correlated kill chain is
+  *drawn* with its tactics and its escalation, and that filtering actually
+  filters.
+- **A page crash is reported, not thrown.** A component that throws on mount
+  takes the page with it, and the first symptom is a selector that never
+  appears. That is caught and reported as a named finding with the underlying
+  error, because CI fails either way but only one of them tells you what broke.
+- **Console and page errors fail the run**, de-duplicated to the message —
+  React reports the same mount failure several times over, and three copies of
+  one error reads as three problems.
+- **`playwright` in `requirements-dev.txt`**, developer-only. The shipped
+  container has neither Playwright nor a browser in it and should not.
+- **A CI step** between the replay and the CLI gate, so the browser checks run
+  against the instance the replay has just populated.
+
+### Checks that cannot fail are worse than no checks
+
+Three of these started out vacuous. "A search that matches nothing empties the
+table" and "clearing the search brings the rows back" both passed on a
+dashboard that was already rendering nothing — zero rows before, zero after.
+They are now guarded on there being rows to filter in the first place, and the
+absence of rows is itself a failure.
+
+The third was "the incidents drawer opens", which accepted any drawer longer
+than fifty characters — including an empty one with a heading. It now asserts
+the drawer *lists incidents*, which is what opening it is supposed to achieve.
+
+All sixteen were verified to fail as well as pass: a component made to throw on
+mount produces two failures naming the underlying error rather than a bare
+timeout, and silently renaming the provenance badge's class fails exactly one
+check — the one about provenance — while the other fifteen stay green.
+
+The whole set was then verified against two deliberate breakages:
+
+- **An alert table rendering no rows.** `npm run build` exited 0 and the page
+  loaded cleanly; five checks failed, naming the empty table.
+- **A component throwing on mount.** The build again exited 0; the run reported
+  `the dashboard rendered far enough to finish the checks — TimeoutError` and
+  `the dashboard logged no console errors — Error: simulated component crash`.
+
+Both are exactly the failure CI could not see before this version.
+
 ## Version 0.13.1
 
 CI's first run failed, which is the best thing it could have done.
