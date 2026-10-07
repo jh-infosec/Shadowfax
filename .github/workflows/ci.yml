@@ -132,6 +132,12 @@ jobs:
         # the narration said it would.
         run: python demo.py --fast --assert --no-colour
 
+      - name: Check the dashboard in a real browser
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+          python test_dashboard.py --url http://127.0.0.1:8000
+          
       - name: The CLI can gate on what it found
         # `check` exits non-zero WHEN ALERTS MATCH -- the inversion that lets an
         # agent harness fail its own build. The replay leaves criticals behind,
