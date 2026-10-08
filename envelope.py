@@ -324,3 +324,132 @@ def _parse_generated(value: Any) -> datetime | None:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed.replace(microsecond=0)
+
+# ---------------------------------------------------------------------------
+# Emitting (v0.15)
+#
+# v0.11 made Shadowfax a consumer of the envelope. This makes it a producer.
+# Writing both halves against the same document is the only thing that really
+# tests a wire format: a spec with one implementation is a spec with one
+# opinion, and the disagreements only surface when something else has to read
+# what you wrote.
+# ---------------------------------------------------------------------------
+
+TOOL_NAME = "shadowfax"
+
+# Event metadata safe to quote in evidence.
+#
+# An allowlist, not a denylist, and deliberately so. An envelope is a thing that
+# gets piped, stored and shared, and `findings-envelope.md` forbids carrying
+# secret material -- so the question is not "what should we strip" but "what do
+# we know is safe to include". Counts, thresholds, levels and flags are. An
+# agent's `arguments` and `tool` strings are not: a tool call is exactly where a
+# credential ends up, and a detection is not worth turning into a leak.
+EVIDENCE_METADATA_KEYS = (
+    "bytes_transferred", "tokens", "new_level", "elevated", "approved",
+    "geo", "source_ip", "claimed_targets", "previously_blocked", "mark_blocked",
+)
+
+
+def finding_from_alert(alert: dict[str, Any],
+                       event: dict[str, Any] | None) -> dict[str, Any]:
+    """One Shadowfax alert as one envelope finding.
+
+    The id needs no new scheme: `detectors.alert_identity` has followed the
+    envelope's rule since v0.3 -- sha256(tool | subject | key | discriminator),
+    where the subject is the actor, the key is the category and the
+    discriminator is the event that produced it. An alert id *is* a conformant
+    finding id, which is why re-exporting unchanged data produces the same ids
+    and a consumer can tell "again" from "new".
+    """
+    techniques = alert.get("attack") or []
+    finding: dict[str, Any] = {
+        "id": alert["id"],
+        # The category is the machine-stable key a consumer groups and counts
+        # on; the message is the sentence a person reads. The envelope keeps
+        # them apart for the same reason Shadowfax does.
+        "key": alert["category"],
+        "severity": alert["severity"],
+        "title": alert["message"],
+        "evidence": evidence_for(alert, event),
+        # See `_VALIDATED_NOTE`. True, with a stated scope.
+        "validated": True,
+        "data": {
+            "actor_type": alert.get("actor_type"),
+            "target": alert.get("target"),
+            "event_id": alert.get("event_id"),
+            "acknowledged": bool(alert.get("acknowledged")),
+        },
+    }
+    if techniques:
+        # The envelope carries one technique as "Txxxx - Name"; the rest, and
+        # their URLs, go in refs where a consumer can still find them.
+        first = techniques[0]
+        finding["mitre"] = f"{first['id']} - {first['name']}"
+        refs = [t["url"] for t in techniques if t.get("url")]
+        if refs:
+            finding["refs"] = refs
+    return finding
+
+
+def evidence_for(alert: dict[str, Any], event: dict[str, Any] | None) -> str:
+    """What Shadowfax actually recorded, not what it concluded.
+
+    `evidence` must be observed, never narrated -- that rule is what keeps a
+    model out of the finding path, and it applies to a deterministic emitter
+    too. So this is the triggering event as stored: when, who, what, against
+    what, plus whichever metadata the allowlist says is safe to quote. The
+    conclusion drawn from it is the `title`, and the two are not interchangeable.
+    """
+    if not event:
+        # An alert whose event has gone is still a finding; it just cannot show
+        # its working, and says so rather than inventing a line.
+        return (f"{alert.get('timestamp')} {alert.get('actor_id')} "
+                f"-> {alert.get('target')} (triggering event no longer stored)")
+
+    line = (f"{event['timestamp']} {event['actor_id']} {event['event_type']} "
+            f"-> {event['target']}")
+    meta = event.get("metadata") or {}
+    quoted = [f"{k}={meta[k]}" for k in EVIDENCE_METADATA_KEYS if k in meta]
+    return f"{line} ({', '.join(quoted)})" if quoted else line
+
+
+def from_alerts(actor_id: str, alerts: list[dict[str, Any]],
+                events: list[dict[str, Any]], version: str,
+                generated: datetime | None = None) -> dict[str, Any]:
+    """Shadowfax's findings about one actor, as an envelope.
+
+    **Ingested alerts are excluded.** An alert carrying a `source_tool` came
+    from somebody else, and re-emitting it under `source.tool: shadowfax` would
+    make this a laundering service: another tool's claim, restated in our name,
+    with our `validated` flag on it. A consumer asking Shadowfax what Shadowfax
+    found should get exactly that. What maltriage found is maltriage's to
+    publish.
+    """
+    by_event = {e["id"]: e for e in events}
+    own = [a for a in alerts if not a.get("source_tool")]
+    at = generated or datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+    return {
+        "envelope_version": ENVELOPE_VERSION,
+        "generated": at.isoformat() + "Z",
+        "source": {"tool": TOOL_NAME, "version": version},
+        "subject": {"kind": "actor", "id": actor_id, "label": actor_id},
+        "findings": [finding_from_alert(a, by_event.get(a.get("event_id")))
+                     for a in own],
+    }
+
+
+# Why `validated` is true, and what it is true *about*.
+#
+# The envelope says true means the emitter verified the claim by a mechanism it
+# controls, and false means it is repeating something the input asserted. Every
+# Shadowfax alert is a conclusion its own deterministic engine computed over the
+# record it holds -- a count of distinct targets, a run of failures in a window,
+# an ordering of tactics. None of it is a self-description passed along.
+#
+# What is verified is a property of the recorded history, not a fact about the
+# world: the events themselves were reported by the thing being watched, and
+# Shadowfax has no way to confirm an agent really touched eight databases. That
+# is the same scope the hash-chained ledger claims -- a statement about the
+# store -- and it is stated here rather than implied, because a flag that
+# promises more than it can keep is worse than no flag.

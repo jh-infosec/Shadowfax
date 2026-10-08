@@ -441,6 +441,24 @@ def cmd_verify(client: Client, args, out) -> int:
     return EXIT_OK if report.get("ok") else EXIT_FAIL
 
 
+def cmd_export(client: Client, args, out) -> int:
+    """Write Shadowfax's findings as envelopes, for another tool to read.
+
+    The mirror of `ingest`. Prints JSON to stdout and nothing else, so it pipes:
+
+        shadowfax export --actor apt-agent-9 | some-other-tool --envelope -
+
+    Always JSON -- there is no human rendering, because the output is a wire
+    format and a prettified version of it would be a different thing wearing
+    the same name.
+    """
+    params = {"actor_id": args.actor} if args.actor else None
+    doc = client.call("GET", "/findings", params=params)
+    json.dump(doc, out, indent=2)
+    print(file=out)
+    return EXIT_OK
+
+
 def cmd_lockouts(client: Client, args, out) -> int:
     """Show sign-in scopes currently locked or backing off, or release one.
 
@@ -586,6 +604,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("verify", help="verify the event ledger (non-zero if broken)")
 
+    sp = sub.add_parser("export",
+                        help="write findings as envelopes for another tool")
+    sp.add_argument("--actor", metavar="ACTOR_ID",
+                    help="one actor's envelope instead of all of them")
+
     sp = sub.add_parser("lockouts",
                         help="sign-in lockouts (non-zero while any scope is locked)")
     sp.add_argument("--unlock", metavar="USERNAME",
@@ -606,6 +629,7 @@ COMMANDS = {
     "alerts": cmd_alerts, "check": cmd_check, "incidents": cmd_incidents,
     "explain": cmd_explain, "search": cmd_search, "actors": cmd_actors,
     "digest": cmd_digest, "verify": cmd_verify, "lockouts": cmd_lockouts,
+    "export": cmd_export,
     "stats": cmd_stats, "policy": cmd_policy,
 }
 

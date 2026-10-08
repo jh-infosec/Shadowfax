@@ -181,6 +181,11 @@ shared, and putting recovered secrets in it turns a detection into a leak.
 
 ### Status
 
+Shadowfax is now both a consumer and a producer: it ingests the envelope as of
+`v0.11.0` and emits it as of `v0.15.0` (`GET /findings`, `shadowfax export`).
+Writing both halves against this document is what actually exercised it; the
+notes below are what that turned up.
+
 Step 3 is **done** as of Shadowfax `v0.11.0`: `POST /findings`, or
 `<emitter> --envelope | shadowfax ingest -`, which detects an envelope by its
 `envelope_version` rather than taking a flag. Shadowfax adopted the
@@ -203,6 +208,23 @@ Notes for an emitter, from building the consumer:
   taken as UTC.
 - Steps 1 and 2 are still open: neither maltriage nor claude-recon-agent emits
   the envelope yet.
+
+From writing the producer (`v0.15.0`):
+
+- An emitter should **not re-emit findings it ingested from elsewhere**. Doing
+  so restates another tool's claim under your `source.tool` and your
+  `validated` flag. Shadowfax excludes any alert carrying a `source_tool`.
+- The "no secret material" rule is easier to keep with an **allowlist** of
+  metadata fields than a denylist. Shadowfax quotes counts, thresholds, levels
+  and flags; it never quotes an agent's `tool` or `arguments` strings, which is
+  where a credential actually ends up.
+- `validated: true` is defensible for a derived conclusion even when the
+  underlying input is attacker-supplied -- but say what it is true *about*.
+  Shadowfax verifies a property of the record it holds, not a fact about the
+  world, and the docs say so.
+- A consumer that rejects keys colliding with its own categories will reject its
+  own output. That is a feature: it makes a feedback loop impossible by
+  construction.
 
 Emitting is additive in every case. No tool changes its existing output to
 adopt this; each adds an envelope alongside what it already produces.

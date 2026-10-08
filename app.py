@@ -48,7 +48,7 @@ import throttle
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.14.0"
+VERSION = "0.15.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -364,6 +364,45 @@ def ingest_events(events: list[EventRequest], identity: dict = Depends(allow_ing
         conn.commit()
     bus.publish({"type": "change", "reason": "ingest", "actors": list(affected_actors)})
     return {"ingested": len(events), "affected_actors": list(affected_actors), "alerts": new_alerts}
+
+
+@app.get("/findings")
+def export_findings(actor_id: str | None = None,
+                    identity: dict = Depends(require_role("viewer"))):
+    """Export Shadowfax's findings as envelopes (v0.15). See
+    `findings-envelope.md`.
+
+    v0.11 made Shadowfax a consumer of the shared format; this makes it a
+    producer, so the portfolio's other tools can read Shadowfax the way
+    Shadowfax reads them. Read-only.
+
+    One envelope per actor, because the format describes a single subject.
+    Without `actor_id` the response is a JSON array of them -- the array is
+    Shadowfax's own convenience and is **not** part of the format; each element
+    is a conformant envelope, and a consumer that wants one takes one.
+
+    Worth knowing: Shadowfax's own ingest will refuse these. A finding's key
+    becomes an alert category and `POST /findings` rejects any key that
+    collides with a native detector category -- which is every key in here.
+    That is not an oversight. It means Shadowfax cannot be fed its own output,
+    and the feedback loop is closed by construction rather than by a rule
+    somebody has to remember.
+    """
+    with db.get_conn() as conn:
+        if actor_id is not None:
+            if not db.get_events_for_actor(conn, actor_id):
+                raise HTTPException(404, f"no events for actor '{actor_id}'")
+            actors = [actor_id]
+        else:
+            actors = [a for a, _ in db.distinct_actors(conn)]
+
+        envelopes = []
+        for aid in actors:
+            alerts = db.query_alerts(conn, actor_id=aid, limit=1000)
+            events = db.get_events_for_actor(conn, aid)
+            envelopes.append(envelope.from_alerts(aid, alerts, events, VERSION))
+
+    return envelopes[0] if actor_id is not None else envelopes
 
 
 @app.post("/findings")

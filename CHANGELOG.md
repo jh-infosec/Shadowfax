@@ -1,5 +1,99 @@
 # Changelog
 
+## Version 0.15.0
+
+v0.11 made Shadowfax a **consumer** of the shared findings envelope. This makes
+it a **producer**, so maltriage and claude-recon-agent can read Shadowfax the
+way Shadowfax already reads them.
+
+Writing both halves against the same document is the only thing that really
+tests a wire format. A spec with one implementation is a spec with one opinion;
+the disagreements only surface when something else has to read what you wrote.
+
+### Added
+
+- **`GET /findings`** (read-only, viewer). One envelope per actor, because the
+  format describes a single subject. `?actor_id=` returns one; without it the
+  response is a JSON array of them — and that array is **Shadowfax's own
+  convenience, not part of the format**. Each element is a conformant envelope.
+- **`shadowfax export`**, the mirror of `ingest`. JSON to stdout and nothing
+  else, so it pipes:
+  ```bash
+  shadowfax export --actor apt-agent-9 | some-other-tool --envelope -
+  ```
+  Always JSON, with no human rendering: the output is a wire format, and a
+  prettified version of it would be a different thing wearing the same name.
+- **`envelope.from_alerts()`** and `finding_from_alert()` — pure translation,
+  no I/O.
+
+### The id needed no new scheme
+
+`detectors.alert_identity` has followed the envelope's rule since **v0.3** —
+`sha256(tool | subject | key | discriminator)`, where the subject is the actor,
+the key is the category and the discriminator is the triggering event. A
+Shadowfax alert id *is* a conformant finding id. Re-exporting unchanged data
+therefore produces the same ids, and a consumer can tell "again" from "new"
+exactly as Shadowfax can when ingesting.
+
+### Shadowfax does not launder other tools' claims
+
+**Ingested alerts are excluded from the export.** An alert carrying a
+`source_tool` came from somebody else, and re-emitting it under
+`source.tool: shadowfax` would restate another tool's claim in our name, with
+our `validated` flag on it. Ask Shadowfax what Shadowfax found and you get
+exactly that. What maltriage found is maltriage's to publish.
+
+### Evidence is observed, and an allowlist decides what is safe to quote
+
+`evidence` carries the triggering event as recorded — when, who, what, against
+what — never the conclusion, which is the `title`. That rule is what keeps a
+model out of the finding path, and it binds a deterministic emitter just as
+tightly.
+
+Metadata is quoted from an **allowlist**, not filtered by a denylist. An
+envelope gets piped, stored and shared, and the spec forbids carrying secret
+material, so the question is not "what should we strip" but "what do we know is
+safe". Counts, thresholds, levels and flags are. An agent's `tool` and
+`arguments` strings are not — a tool call is exactly where a credential ends
+up, and a detection is not worth turning into a leak.
+
+### `validated: true`, and what it is true *about*
+
+Every Shadowfax alert is a conclusion its own deterministic engine computed over
+the record it holds: a count of distinct targets, a run of failures in a window,
+an ordering of tactics. None of it is a self-description passed along, so `true`
+is right.
+
+What is verified is a property of the **recorded history**, not a fact about the
+world — the events were reported by the thing being watched, and Shadowfax
+cannot confirm an agent really touched eight databases. That is the same scope
+the hash-chained ledger claims, and it is stated rather than implied: a flag
+that promises more than it can keep is worse than no flag.
+
+### The loop is closed by construction
+
+Shadowfax's own ingest **refuses** Shadowfax's own envelope. A finding's key
+becomes an alert category, and `POST /findings` rejects any key colliding with a
+native detector category — which is every key in the export.
+
+That is not an oversight to be fixed. It means Shadowfax cannot be fed its own
+output, and the feedback loop is prevented by the shape of the thing rather than
+by a rule somebody has to remember.
+
+### Tests
+
+28 new checks. The round trip above all — what the producer emits is handed to
+the consumer's own validator, for every actor. Plus the id rule holding against
+`alert_identity`, re-export being stable, key and title staying separate
+fields, ATT&CK as `Txxxx - Name` with URLs in `refs`, evidence quoting the event
+rather than the conclusion, ingested findings not being re-emitted, the export
+being refused by ingest, and the CLI piping cleanly.
+
+One of them exists because it caught itself being useless: the secret-safety
+checks originally ran against an agent tool call that tripped no detector, so
+there was no finding, no evidence, and "the secret is absent" passed on an empty
+envelope. The probe now trips a real detector, and a check asserts it did.
+
 ## Version 0.14.0
 
 CI has built the dashboard since v0.13 and could not tell a built bundle from a

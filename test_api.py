@@ -1059,6 +1059,118 @@ check("CLI says plainly when a re-run finds nothing new", "already known" in sou
 code, sout, _ = run_cli(["alerts", "--severity", "info", "--json"])
 check("CLI accepts info as a severity filter", code == 0)
 
+print("\n== emitting the findings envelope (v0.15) ==")
+
+# v0.11 made Shadowfax a consumer of the shared format. This makes it a
+# producer, and the only test that really matters is the round trip: feed what
+# the producer emits to the consumer's own validator. A spec with one
+# implementation is a spec with one opinion.
+
+_exported = client.get("/findings?actor_id=apt-agent-9").json()
+check("GET /findings returns an envelope for one actor",
+      _exported["subject"]["id"] == "apt-agent-9")
+check("it names Shadowfax as the emitter, with its version",
+      _exported["source"]["tool"] == "shadowfax"
+      and _exported["source"]["version"] == _app_mod.VERSION)
+check("the subject is an actor, which is what Shadowfax reports on",
+      _exported["subject"]["kind"] == "actor")
+
+# -- the round trip ---------------------------------------------------------
+# frozenset() because Shadowfax's own ingest would refuse these for a reason
+# checked further down; what is being tested here is conformance to the format.
+check("what Shadowfax emits passes Shadowfax's own validator",
+      env_mod.validate(_exported, frozenset()) is not None)
+_all = client.get("/findings").json()
+check("every actor gets an envelope", len(_all) >= 5)
+check("all of them validate",
+      all(env_mod.validate(d, frozenset()) for d in _all))
+
+# -- the id rule ------------------------------------------------------------
+# detectors.alert_identity has followed the envelope's rule since v0.3, so no
+# new identity scheme was needed. This is the assertion that keeps it that way.
+_f = _exported["findings"][0]
+check("a finding's id is the alert id, which already follows the envelope rule",
+      _f["id"] == _detectors.alert_identity(
+          "apt-agent-9", _f["key"], _f["data"]["event_id"]))
+check("re-exporting unchanged data produces the same ids — so a consumer can "
+      "tell 'again' from 'new'",
+      [x["id"] for x in client.get("/findings?actor_id=apt-agent-9").json()["findings"]]
+      == [x["id"] for x in _exported["findings"]])
+
+# -- key and title stay apart -----------------------------------------------
+check("the alert's category becomes the machine-stable key",
+      all(x["key"] for x in _exported["findings"]))
+check("the alert's message becomes the human title, and they are different fields",
+      any(x["title"] != x["key"] for x in _exported["findings"]))
+check("every emitted severity is on the shared ladder",
+      all(x["severity"] in env_mod.SEVERITIES for x in _exported["findings"]))
+check("an ATT&CK technique is emitted as 'Txxxx - Name'",
+      any(x.get("mitre", "").startswith("T") and " - " in x.get("mitre", "")
+          for x in _exported["findings"]))
+check("the technique's URL travels in refs",
+      any("attack.mitre.org" in r
+          for x in _exported["findings"] for r in x.get("refs", [])))
+
+# -- evidence is observed, not narrated -------------------------------------
+check("evidence quotes the triggering event, not the conclusion",
+      all(x["evidence"] and x["evidence"] != x["title"]
+          for x in _exported["findings"]))
+_ev = next(x for x in _exported["findings"] if x["key"] == "exfiltration_volume")
+check("evidence carries what was actually recorded",
+      "data_transfer" in _ev["evidence"] and "bytes_transferred=" in _ev["evidence"])
+
+# An envelope is piped, stored and shared, and the spec forbids carrying secret
+# material. Metadata is quoted from an allowlist, so a credential sitting in an
+# agent's tool arguments cannot ride along inside a detection.
+# The tool call has to actually trip a detector, or there is no finding, no
+# evidence, and the two checks below pass on an empty envelope -- which is how
+# a secret-handling test quietly stops testing anything.
+client.post("/events", json=[{
+    "timestamp": "2026-08-20T10:00:00", "actor_id": "secret-probe",
+    "actor_type": "ai_agent", "task": "x", "event_type": "tool_call",
+    "target": "/var/www/html",
+    "metadata": {"tool": "bash",
+                 "arguments": "rm -rf /var/www/html --token sk-SUPERSECRET",
+                 "bytes_transferred": 10}}])
+_probe = client.get("/findings?actor_id=secret-probe").json()
+_probe_text = json.dumps(_probe)
+check("the probe actually raised a finding, so the checks below are not vacuous",
+      len(_probe["findings"]) > 0)
+check("a secret in an agent's tool arguments never reaches the envelope",
+      "SUPERSECRET" not in _probe_text)
+check("nor do the raw argument or tool strings it sat in",
+      "curl -H" not in _probe_text and '"bash"' not in _probe_text)
+check("while allowlisted metadata still travels",
+      "bytes_transferred=10" in _probe_text)
+
+# -- Shadowfax does not launder other tools' claims --------------------------
+# apt-agent-9 carries an ingested host_enumeration finding from v0.11's section.
+check("an ingested finding is not re-emitted under Shadowfax's name",
+      all(x["key"] != "host_enumeration" for x in _exported["findings"]))
+check("only Shadowfax's own detections are claimed",
+      all(x["validated"] is True for x in _exported["findings"]))
+
+# -- the loop is closed by construction --------------------------------------
+# Every key here is a native detector category, and POST /findings refuses
+# those. Shadowfax cannot be fed its own output, and not because of a rule
+# anybody has to remember.
+_loop = client.post("/findings", json=_exported)
+check("Shadowfax's own ingest refuses Shadowfax's own envelope",
+      _loop.status_code == 400)
+check("and says why", "detector categories" in _loop.json()["detail"])
+
+check("exporting an unknown actor is a 404",
+      client.get("/findings?actor_id=nobody").status_code == 404)
+check("export needs a credential", anon.get("/findings").status_code == 401)
+
+code, sout, _ = run_cli(["export", "--actor", "apt-agent-9"])
+check("CLI `export` exits 0", code == 0)
+check("CLI export emits a parseable envelope on stdout",
+      json.loads(sout)["source"]["tool"] == "shadowfax")
+code, sout, _ = run_cli(["export"])
+check("CLI export without --actor emits every envelope",
+      isinstance(json.loads(sout), list))
+
 print("\n== login throttling and self-monitoring (v0.10) ==")
 import throttle as throttle_mod
 from datetime import datetime as _dt, timedelta as _td

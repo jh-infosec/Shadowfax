@@ -320,6 +320,28 @@ what a consumer groups and counts on while a title is what a person reads. An
 emitter therefore may not use one of `detectors.NATIVE_CATEGORIES`: an alert
 reading `destructive_action` must mean Shadowfax's detector found it.
 
+**Emitting (v0.15).** `from_alerts()` is the mirror, and also pure. Three rules
+shape it. Ingested alerts -- those carrying a `source_tool` -- are excluded,
+because re-emitting another tool's claim under `source.tool: shadowfax` with
+Shadowfax's own `validated` flag on it would make this a laundering service.
+`evidence` quotes the triggering event as recorded and never the conclusion,
+with metadata taken from an **allowlist**: an envelope is piped and shared and
+the spec forbids carrying secret material, so the question is what is known
+safe, not what to strip -- counts and levels are, an agent's `arguments` string
+is not. And `validated` is true, because every alert is a conclusion the
+deterministic engine computed rather than a self-description passed along --
+with the scope stated, since what is verified is a property of the recorded
+history, not a fact about the world.
+
+The id needed no new scheme: `detectors.alert_identity` has followed the
+envelope's rule since v0.3, so an alert id already is a conformant finding id
+and re-export is stable.
+
+One consequence is worth naming: **Shadowfax's own ingest refuses Shadowfax's
+own export**, because every key in it is a native detector category and ingest
+rejects those. The feedback loop is prevented by the shape of the thing rather
+than by a rule somebody has to remember.
+
 `to_events()` namespaces a non-actor subject by its kind (`file:…`, `host:…`)
 under the `external` actor type, so a file called `admin` cannot become the user
 `admin`; a `kind: actor` subject lands on that actor's real timeline and

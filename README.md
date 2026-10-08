@@ -67,6 +67,7 @@ investigation and explainability.
 - Sign-in throttling and lockout — backoff then lockout on the platform's own login, with no enumeration oracle and no sleeping
 - Self-monitoring — attacks on Shadowfax's own front door become ordinary events and raise ordinary alerts, through the same detectors as everything else
 - Findings-envelope ingest — any tool that writes the shared envelope can post findings, and Shadowfax needs to know nothing about it
+- Findings-envelope export — Shadowfax speaks the format as well as reads it, so the portfolio's other tools can consume it in turn
 - One-command packaging — `docker compose up`, plus a scripted attack replay that makes the engine demonstrate itself
 - CI that builds the image and replays the attack against it, so every commit proves the detections still happen
 - Dashboard checked in a real browser — building a bundle proves it compiles, not that anything reaches the screen
@@ -204,6 +205,10 @@ Planned
 ### v0.14
 
 - Dashboard tests in a real browser — shipped (v0.14.0)
+
+### v0.15
+
+- Findings-Envelope Export — shipped (v0.15.0)
 
 ### v1.0
 
@@ -425,6 +430,14 @@ See who is failing to sign in, and let a locked-out colleague back in:
 ```bash
 python cli.py lockouts            # exit 1 while any scope is locked
 python cli.py lockouts --unlock j.bartlett
+```
+
+Write Shadowfax's own findings out for another tool to read — the mirror of
+`ingest`:
+
+```bash
+python cli.py export --actor apt-agent-9 | some-other-tool --envelope -
+python cli.py export > shadowfax-findings.json
 ```
 
 Point it elsewhere with `--url`, `SHADOWFAX_URL`, or the stored config.
@@ -660,6 +673,44 @@ maltriage 0.2.0 -> file:sha256:9f86d081884c7d65: 0 finding(s) ingested, 2 alread
 Shadowfax derives its alert id *from* the emitter's id rather than using it
 directly, under a fixed namespace, so an emitter cannot send a crafted id that
 inherits an unrelated alert's acknowledgement.
+
+### Speaking the format, not just reading it
+
+Shadowfax emits the envelope as well as ingesting it, so the portfolio's other
+tools can consume Shadowfax the way it consumes them. `GET /findings` returns
+one envelope per actor; `?actor_id=` returns a single one.
+
+Writing a producer and a consumer against the same document is the only real
+test of a wire format — a spec with one implementation is a spec with one
+opinion. The test suite round-trips it: what the producer emits is handed
+straight to the consumer's own validator.
+
+**The id needed no new scheme.** `alert_identity` has followed the envelope's
+rule since v0.3, so a Shadowfax alert id already *is* a conformant finding id.
+Re-exporting unchanged data produces the same ids, and a consumer can tell
+"again" from "new".
+
+**Ingested findings are not re-emitted.** An alert carrying a `source_tool` came
+from somebody else; restating it under `source.tool: shadowfax`, with
+Shadowfax's `validated` flag on it, would make this a laundering service. Ask
+Shadowfax what Shadowfax found and you get exactly that.
+
+**Metadata is quoted from an allowlist.** An envelope is piped, stored and
+shared, and the spec forbids carrying secret material — so the question is not
+what to strip but what is known safe. Counts, thresholds and levels are; an
+agent's `tool` and `arguments` strings are not, because a tool call is exactly
+where a credential ends up.
+
+**`validated: true`, with a stated scope.** Every alert is a conclusion
+Shadowfax's own engine computed over the record it holds, not a self-description
+passed along. But what is verified is a property of the *recorded history*, not
+of the world: the events came from the thing being watched. Same scope the
+ledger claims, and said out loud rather than implied.
+
+**Shadowfax refuses its own envelope.** Every key in the export is a native
+detector category, and ingest rejects those — so Shadowfax cannot be fed its own
+output. The loop is closed by the shape of the thing, not by a rule anyone has
+to remember.
 
 ### Subjects and the `info` level
 
