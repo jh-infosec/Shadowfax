@@ -52,6 +52,13 @@ async function request(path, { headers: extraHeaders, ...options } = {}) {
     const body = await res.text().catch(() => "");
     const err = new Error(`${options.method || "GET"} ${path} failed: ${res.status} ${body}`);
     err.status = res.status;
+    // Keep the server's structured reason, so a refusal that lists its problems
+    // can be shown as a list rather than as a line of JSON.
+    try {
+      err.detail = JSON.parse(body).detail;
+    } catch {
+      err.detail = undefined;
+    }
     // A 401 on anything other than the login attempt means the session died.
     if (res.status === 401 && path !== "/auth/login") {
       setToken(null);

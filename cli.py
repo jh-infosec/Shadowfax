@@ -33,10 +33,12 @@ Usage:
     python cli.py explain incident <id>
     python cli.py search "critical destructive actions by ai agents"
     python cli.py check --severity critical      # exit 1 if any match
+    python cli.py permissions recon-agent-3 --tool nc   # exit 1 if outside
 
 Exit codes:
     0  success (and, for `check`, nothing matched)
-    1  matches found (`check`) or the command failed
+    1  matches found (`check`), an action outside an agent's permissions
+       (`permissions --tool/--target`), or the command failed
     2  usage error
     3  authentication / authorisation failure
     4  could not reach the API
@@ -179,6 +181,11 @@ class Client:
 def _detail(payload: Any) -> str:
     if isinstance(payload, dict):
         d = payload.get("detail", payload)
+        # A refused policy (v0.16) lists its problems; one per line reads far
+        # better than a line of JSON when there are several.
+        if isinstance(d, dict) and isinstance(d.get("problems"), list):
+            return d.get("message", "refused") + ":\n" + "\n".join(
+                f"  - {p}" for p in d["problems"])
         return d if isinstance(d, str) else json.dumps(d)
     return str(payload)
 
@@ -499,6 +506,57 @@ def human_lockouts(out, report) -> None:
               f"{scope['last_failure'] or ''}", file=out)
 
 
+def cmd_permissions(client: Client, args, out) -> int:
+    """Show an actor's declared permission profile, or ask whether an action
+    would fall outside it (v0.16).
+
+    With --tool and/or --target it is a question with an exit code: 0 if the
+    action is within the profile, 1 if Shadowfax would report it. That makes it
+    usable as a pre-flight check from an agent harness:
+
+        shadowfax permissions build-agent-2 --tool bash || refuse_the_call
+    """
+    params = {"actor_type": args.actor_type}
+    if args.tool is not None:
+        params["tool"] = args.tool
+    if args.target is not None:
+        params["target"] = args.target
+    path = "/actors/" + urllib.parse.quote(args.actor, safe="") + "/permissions"
+    report = client.call("GET", path, params=params)
+    emit(out, report, args.json, human_permissions)
+    verdict = report.get("check")
+    return EXIT_FAIL if verdict and not verdict["within_permissions"] else EXIT_OK
+
+
+def human_permissions(out, report) -> None:
+    if not report["enabled"]:
+        print("permission profiles are switched off in the policy.", file=out)
+    elif not report["profile"]:
+        print(f"{report['actor_id']}: no permission profile declared.", file=out)
+    else:
+        how = "exact" if report["matched_by"] == "exact" else "by pattern"
+        print(f"{report['actor_id']}: profile '{report['profile']}' (matched {how})",
+              file=out)
+        if report.get("description"):
+            print(f"  {report['description']}", file=out)
+        for key, values in (report.get("grants") or {}).items():
+            shown = ("not restricted" if values is None
+                     else "none granted" if not values else ", ".join(values))
+            print(f"  {_col(key.replace('_', ' '), 16)} {shown}", file=out)
+    verdict = report.get("check")
+    if verdict:
+        asked = " ".join(f"{k} '{verdict[k]}'" for k in ("tool", "target")
+                         if verdict.get(k) is not None)
+        print(file=out)
+        if verdict["within_permissions"]:
+            print(f"within permissions: {asked}", file=out)
+        else:
+            print(f"OUTSIDE PERMISSIONS ({verdict['severity']}, "
+                  f"{verdict['category']}): {asked}", file=out)
+            for reason in verdict["reasons"]:
+                print(f"  - {reason}", file=out)
+
+
 def cmd_actors(client: Client, args, out) -> int:
     actors = client.call("GET", "/actors")
     emit(out, actors, args.json, human_actors)
@@ -613,6 +671,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="sign-in lockouts (non-zero while any scope is locked)")
     sp.add_argument("--unlock", metavar="USERNAME",
                     help="clear a username's recorded failures (admin)")
+    sp = sub.add_parser("permissions",
+                        help="an actor's declared permissions; with --tool/--target, "
+                             "non-zero if that action would be reported")
+    sp.add_argument("actor", metavar="ACTOR_ID")
+    sp.add_argument("--tool", help="a tool the actor might call")
+    sp.add_argument("--target", help="a target the actor might touch")
+    sp.add_argument("--actor-type", dest="actor_type", default="ai_agent",
+                    choices=["human", "ai_agent", "service_account"],
+                    help="judged as this kind of actor (default ai_agent)")
     sub.add_parser("actors", help="list actors with risk scores")
     sub.add_parser("stats", help="alert and event counts")
 
@@ -629,7 +696,7 @@ COMMANDS = {
     "alerts": cmd_alerts, "check": cmd_check, "incidents": cmd_incidents,
     "explain": cmd_explain, "search": cmd_search, "actors": cmd_actors,
     "digest": cmd_digest, "verify": cmd_verify, "lockouts": cmd_lockouts,
-    "export": cmd_export,
+    "export": cmd_export, "permissions": cmd_permissions,
     "stats": cmd_stats, "policy": cmd_policy,
 }
 

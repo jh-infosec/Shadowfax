@@ -41,7 +41,7 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across sixteen alert categories, including AI-agent tool-call analysis
+- Rule-based detection engine across eighteen alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
@@ -50,6 +50,7 @@ investigation and explainability.
 - Dashboard sign-in, with the UI adapting to the signed-in user's role
 - Live push over Server-Sent Events — the dashboard updates the instant data changes
 - Agent-trace ingest — flags destructive tool calls and out-of-scope actions by AI agents
+- Agent permissions — declare which tools and targets each agent was given; the first step outside its profile is reported, with no baseline needed, and undeclared agents are flagged
 - MITRE ATT&CK mapping — every alert tagged with technique IDs from a shared registry
 - Alert correlation — related alerts grouped into incidents, each with a generated report
 - Attack-chain detection — incidents whose alerts advance through the ATT&CK kill chain in order are flagged, and completed chains escalate to critical
@@ -210,6 +211,10 @@ Planned
 
 - Findings-Envelope Export — shipped (v0.15.0)
 
+### v0.16
+
+- Agent permission profiles — shipped (v0.16.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -323,12 +328,13 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Sixteen checks, each one an assertion a person makes when they glance at the
+Nineteen checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
-correlated kill chain is *drawn* with its tactics and its escalation, and that
-filtering actually filters.
+correlated kill chain is *drawn* with its tactics and its escalation, that
+filtering actually filters, and that an agent's declared permissions are shown
+beside the breaches of them.
 
 They refuse to run against an empty instance, because a test that passes on a
 dashboard rendering nothing is worse than no test. `--headed` shows the browser.
@@ -352,7 +358,7 @@ python demo.py --fast --assert
 ```
 
 That turns the demo into an end-to-end check of the whole stack — ingest,
-sixteen detectors, correlation, kill-chain ordering, findings-envelope ingest,
+eighteen detectors, correlation, kill-chain ordering, findings-envelope ingest,
 the front door and the ledger — against a real server over real HTTP. It is a
 different kind of evidence from the unit suite, which never leaves the process.
 
@@ -440,7 +446,78 @@ python cli.py export --actor apt-agent-9 | some-other-tool --envelope -
 python cli.py export > shadowfax-findings.json
 ```
 
+Ask what an agent is allowed to do — or whether one action would be reported,
+with an exit code a harness can act on (see Agent permissions):
+
+```bash
+python cli.py permissions recon-agent-3              # the profile that governs it
+python cli.py permissions recon-agent-3 --tool nc    # exit 1: outside permissions
+```
+
 Point it elsewhere with `--url`, `SHADOWFAX_URL`, or the stored config.
+
+---
+
+## Agent permissions
+
+Every other detector here infers that something is *wrong* from the fact that
+it is *unusual* — more targets than usual, faster than its baseline, more bytes
+than a threshold. None of them knows what an agent was for. A permission profile
+says so: which tools the agent was given, and which targets it may touch.
+
+```json
+"agent_permissions": {
+  "unprofiled_agents": "alert",
+  "profiles": {
+    "recon-agent-*": {
+      "description": "Authorised recon for engagement alpha: scan and fetch, never a shell.",
+      "allowed_tools":  ["nmap", "curl", "dig", "nikto"],
+      "denied_tools":   ["nc", "ncat", "netcat", "bash", "sh", "powershell"],
+      "denied_targets": ["~/.ssh/*", "/etc/*", "*.pem"]
+    }
+  }
+}
+```
+
+An action outside the profile raises `permission_violation` — **critical** if
+it was explicitly denied, **high** if it was merely never granted — naming the
+profile and each way the event breached it. It needs no baseline, so an agent's
+very first action can trip it. With `"unprofiled_agents": "alert"`, an AI agent
+that nobody declared raises one `undeclared_agent` alert.
+
+The rules are chosen so that the profile cannot quietly fail open:
+
+| Rule | Why |
+|---|---|
+| A grant left out means *unrestricted*; an empty list means *nothing* | Two different statements, kept different |
+| Deny wins over allow | Something written down as forbidden stays forbidden |
+| A deny matches any spelling of a tool (`/usr/bin/nc`, `NC`, `nc.exe`) | Renaming the binary must not dodge a denial |
+| An allow matches only as written, against the *resolved* target | `/repo/../etc/shadow` is not under `/repo/*`, and a `python` in `/tmp` is not the granted one |
+| A tool call with no tool name, or an event with no target, is not granted | Silence is not permission |
+| Malformed profiles are refused at `PUT /policy` with every problem listed | `"allowed_tools": "nmap"` would grant `n`, `m`, `a` and `p`; `alowed_tools` would grant everything |
+| One alert per distinct breach | Forty retries of one denied tool are one finding, not forty |
+
+Deny lists are a backstop; **the allow-list is the control**. A relative path
+such as `../../etc/passwd` cannot be resolved without the agent's working
+directory, so no deny pattern will reliably catch it — but it was never granted,
+so an allow-list catches it without trying.
+
+Profiles are keyed by actor id or by pattern. An exact id wins; otherwise the
+most specific pattern does (`build-prod-*` over `build-*` over `*`), the same
+way every time. Because a profile is policy, changing one rescans history:
+declare a profile for an agent that has run for a month and every recorded
+action is judged against it.
+
+The actor drawer shows the governing profile beside the timeline, so an alert
+reading *outside declared permissions* sits next to what was declared.
+
+**Asking ahead.** `GET /actors/{id}/permissions?tool=nc&target=...` (or
+`shadowfax permissions`) answers whether an action would be reported — the
+detector's own judgement, asked in advance, and held by a test to the same
+answer the detector gives afterwards. An agent runtime can use it to refuse a
+call before making it. Shadowfax itself still only observes: a monitor that is
+also the gate becomes the thing an attacker most wants to stop, and enforcement
+belongs in the runtime.
 
 ---
 
@@ -635,7 +712,7 @@ critical, high, medium, low, info
 ```
 
 A finding's `key` becomes the alert category, so an emitter **may not use one of
-Shadowfax's own sixteen detector categories**. An alert reading
+Shadowfax's own eighteen detector categories**. An alert reading
 `destructive_action` must mean Shadowfax's detector found it, not that somebody
 else said so.
 

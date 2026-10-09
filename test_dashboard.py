@@ -209,12 +209,26 @@ def _run_checks(page, url: str) -> None:
           "Exfiltration" in detail and ("Lateral Movement" in detail
                                         or "Credential Access" in detail),
           detail[:120].replace("\n", " "))
-    check("a completed chain shows it escalated", "ESCALATED" in detail.upper())
+    # Asserted on the chain's own state, not on the "escalated high -> critical"
+    # caption. That caption only appears when escalation *changed* the severity,
+    # and since v0.16 the replayed agent's incident is critical before the chain
+    # completes (its first breach of its permission profile is critical). The
+    # text check then failed on a chain that was escalated -- it was testing the
+    # severity history, not the claim in its name.
+    check("a completed chain is marked as escalated",
+          page.locator(".drawer .kill-chain.escalated").count() > 0
+          and "reaches Exfiltration" in detail,
+          detail[:120].replace("\n", " "))
 
     # -- filtering still filters --------------------------------------------
     # A filter that silently matches everything looks identical to a working one
     # until you count.
-    page.keyboard.press("Escape")
+    # Closed with its own button. This used to press Escape, which the dashboard
+    # does not handle: the drawer stayed open over the table, and the filter
+    # checks only passed because typing into the search box needs no click.
+    # The first check that had to click a row (v0.16) found the overlay in the
+    # way.
+    page.click(".drawer-close")
     page.wait_for_timeout(600)
     before = page.locator(".table-wrap tbody tr").count()
     search = page.locator('input[placeholder*="actor"]')
@@ -235,6 +249,28 @@ def _run_checks(page, url: str) -> None:
     else:
         check("the filter checks had rows to work with", False,
               "no rows were rendered, so filtering could not be tested")
+
+    # -- declared permissions, beside what the agent did (v0.16) ------------
+    # An alert reading "outside declared permissions" is half an answer until
+    # the declaration is on screen next to it. recon-agent-3 is in the bundled
+    # sample data, so this holds whether or not the replay has run.
+    if search.count():
+        search.fill("recon-agent-3")
+        page.wait_for_timeout(1500)
+        recon_rows = page.locator(".table-wrap tbody tr")
+        if recon_rows.count():
+            recon_rows.first.click()
+            page.wait_for_selector(".perm-panel", timeout=10000)
+            panel = page.inner_text(".perm-panel")
+            check("the actor drawer shows the profile that governs the agent",
+                  "recon-agent-*" in panel, panel[:120].replace("\n", " "))
+            check("denied grants are shown as denied",
+                  page.locator(".perm-panel .perm-chip.deny").count() > 0)
+            check("a breach of the profile is on the agent's timeline",
+                  "permission_violation" in page.inner_text(".drawer"))
+        else:
+            check("the sample agent's alerts could be found to open its drawer",
+                  False, "no rows for recon-agent-3")
 
 
 def main(argv: list[str] | None = None) -> int:

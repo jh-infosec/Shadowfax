@@ -285,6 +285,27 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 
 ---
 
+## Version 0.16
+
+- [x] Agent permission profiles: `policy.agent_permissions` declares, per agent
+      or per pattern, the tools it was given and the targets it may touch.
+      `permission_violation` (critical when denied, high when not granted) and
+      `undeclared_agent` for AI agents nobody declared. Denials match any
+      spelling of a tool; allows match only the resolved target, so a traversal
+      can neither dodge one nor ride the other. Malformed profiles are refused
+      at `PUT /policy`. `GET /actors/{id}/permissions` and `shadowfax
+      permissions` ask the detector's question ahead of time; the actor drawer
+      shows the profile beside the timeline. Shipped in `v0.16.0`.
+- [ ] Close drawers with Escape. The dashboard test that assumed it could was
+      quietly leaving the incidents drawer open; the test is fixed, the
+      keyboard handling is still missing.
+- [ ] Permission profiles from the agent's own manifest. An agent framework that
+      already declares its tools (an MCP server list, a tool schema) could post
+      that declaration as the profile, so what the agent was *configured* with
+      and what it is *permitted* are compared rather than written twice.
+
+---
+
 ## Version 1.0
 
 - [ ] Electron desktop application

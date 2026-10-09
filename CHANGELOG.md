@@ -1,5 +1,150 @@
 # Changelog
 
+## Version 0.16.0
+
+Every detector before this one is an inference. Lateral movement is "more
+distinct targets than usual", a rate anomaly is "faster than its own baseline",
+exfiltration is "more bytes than a threshold". They notice that something is
+*unusual* and cannot say that it is *wrong*, because nothing ever told them what
+an agent was for.
+
+A **permission profile** is that missing statement. It declares, per agent,
+which tools it was given and which targets it may touch, and Shadowfax reports
+the moment a recorded action falls outside it. This is least privilege for
+autonomous agents, written as policy — and it is the one detector here that
+needs no baseline: an agent's very first action can breach its profile.
+
+### Added
+
+- **`policy.agent_permissions`** — profiles keyed by actor id or by pattern
+  (`recon-agent-*`), each with any of `allowed_tools`, `denied_tools`,
+  `allowed_targets`, `denied_targets` and a `description`.
+- **Two new native categories**, bringing the engine to eighteen:
+  - `permission_violation` — **critical** for anything explicitly denied,
+    **high** for anything merely not granted. One alert per event, naming the
+    profile and every way the event breached it.
+  - `undeclared_agent` (**medium**) — with `"unprofiled_agents": "alert"`, an
+    AI agent that nobody declared is reported once, on its first action. Only
+    `ai_agent` actors: a person or service account *may* be given a profile and
+    is then held to it, but is never reported for lacking one.
+- **`GET /actors/{id}/permissions`** — the profile that governs an actor, and,
+  given `?tool=` and/or `?target=`, whether that action would be reported. It
+  does not 404 for an actor with no events: the most useful time to ask what a
+  new agent may do is before it has done anything.
+- **`shadowfax permissions <actor> [--tool] [--target]`** — the same question
+  with an exit code (1 if the action would be reported), so a harness can ask
+  before it acts.
+- **Declared permissions in the actor drawer**, beside the timeline: allowed
+  grants in blue, denials in red, "not restricted" and "none granted" kept
+  visibly different. An alert reading *outside declared permissions* is half an
+  answer until you can see what was declared.
+- `permissions.py` — resolution, evaluation and validation as pure functions.
+- `demo.py` Act 1 gains a step: the churn-analysis agent opens a shell and reads
+  `/etc/passwd`. No statistical detector notices; its profile does, critically.
+
+### Every design decision is a way this could otherwise fail open
+
+- **A missing grant means unrestricted; an empty one means nothing.**
+  `allowed_tools` left out says the profile does not constrain tools;
+  `"allowed_tools": []` says the agent was granted none.
+- **Deny wins.** Something on both lists is denied.
+- **A deny matches any spelling; an allow must match the resolved one.** An
+  agent reporting `/usr/bin/nc`, `NC` or `C:\tools\nc.exe` is still running
+  `nc`, so a denial of `nc` catches all three. But a `python` dropped in `/tmp`
+  is not the granted `python`, so allows match only as written. Targets are
+  resolved before an allow-list is consulted — `/repo/../etc/shadow` is *at*
+  `/etc/shadow`, so `/repo/*` does not grant it — and the alert shows both what
+  was reported and where it really pointed. A traversal can neither dodge a
+  deny nor ride an allow.
+- **Unprovable is not granted.** A tool call that does not name its tool, or an
+  event with an empty target, cannot be shown to be within an allow-list, so it
+  is reported against one. Silence is not permission.
+- **Deny lists are a backstop; the allow-list is the control.** A relative path
+  like `../../etc/passwd` cannot be resolved without the agent's working
+  directory, so no deny written as `/etc/*` will catch it. An allow-list catches
+  it without trying, because it was never granted. The sample profiles lead with
+  what is allowed for that reason.
+- **Malformed policy is refused, not tolerated.** `"allowed_tools": "nmap"` is a
+  string where a list belongs, and iterating it would quietly grant the tools
+  `n`, `m`, `a` and `p`. A misspelt `alowed_tools` would leave the agent
+  unrestricted with nobody told. `PUT /policy` now returns **400** with every
+  problem listed (and the right spelling suggested), *before* anything is stored
+  or rescanned. The dashboard's policy editor and `shadowfax policy set` show
+  the problems one per line.
+- **A section with no switch is on.** Writing profiles and forgetting
+  `"enabled": true` should not leave them silently inert.
+- **One alert per distinct breach.** An agent retrying a denied tool forty
+  times has committed one breach forty times; forty identical alerts would bury
+  the next, different one. Repeats stay on the timeline. A new breach — another
+  tool, another target — is a new alert.
+- **Ambiguity resolves the same way every time.** An exact actor id beats any
+  pattern; otherwise the pattern with the most literal characters wins
+  (`build-prod-*` over `build-*` over `*`), ties broken by the pattern text. A
+  rescan must never move an alert because two patterns both matched.
+
+### Asking ahead, and why Shadowfax still does not enforce
+
+`GET /actors/{id}/permissions?tool=nc` is the detector's own judgement asked in
+advance, and a test holds the two to the same answer across allowed and denied
+cases: a runtime told "yes" must not then be reported. That makes it usable as a
+pre-flight check from an agent harness:
+
+```bash
+shadowfax permissions build-agent-2 --tool bash || refuse_the_call
+```
+
+Shadowfax is still the observer, not the gate. A monitor that also stands
+between the agent and its tools becomes the thing an attacker most wants to
+stop, and one that fails closed takes every agent down with it. Enforcement
+belongs in the agent's runtime; this lets that runtime ask the same question
+Shadowfax will answer afterwards.
+
+### Policy, so history is re-judged
+
+A profile is policy, and alerts are a pure function of (events, policy). Declare
+a profile for an agent that has been running for a month and every one of its
+recorded actions is judged against it on the rescan — including the ones from
+before the profile existed. Declaring one for a flagged agent clears its
+`undeclared_agent` alert. Switching profiles off removes every alert they
+raised; switching them back restores the same alerts, with the same ids.
+
+### No ATT&CK mapping, on purpose
+
+`permission_violation` and `undeclared_agent` map to no technique. They say an
+agent broke what it was *declared* to do, which is a policy fact, not an
+adversary technique. When the same action is both — `bash` writing to
+`~/.ssh/authorized_keys` — the detector that recognises the technique raises it
+separately, and both appear on the timeline.
+
+### Fixed
+
+- **A dashboard test that pressed Escape to close a drawer.** The dashboard does
+  not handle Escape, so the incidents drawer stayed open over the alert table
+  and the filter checks only passed because typing needs no click. The first
+  check that had to click a row found the overlay in the way. It now closes the
+  drawer with its own button.
+- **A dashboard test asserting on the wrong thing.** "A completed chain shows it
+  escalated" looked for the caption *escalated high → critical*, which only
+  appears when escalation changed the severity. With the replayed agent's first
+  breach now critical, its incident is critical before the chain completes, and
+  the check failed on a chain that *was* escalated. It now asserts the chain's
+  escalated state, which is what its name claims.
+
+### Tests
+
+**424** API checks (from 354) and **19** dashboard checks (from 16).
+
+Each new class of check was shown able to fail, by breaking the code it guards
+and watching the right check go red: denials matched only by exact spelling;
+allow-lists checked against the unresolved target; duplicate breaches no longer
+collapsed; string grants tolerated; profiles needing an explicit switch;
+`undeclared_agent` firing per event instead of per agent. In the browser,
+rendering denials as allows failed exactly one check — *denied grants are shown
+as denied* — and left the other eighteen green. The agreement test between
+asking ahead and detecting afterwards carries its own guard that its cases
+include both outcomes, so "they agree" cannot pass because everything was
+allowed.
+
 ## Version 0.15.0
 
 v0.11 made Shadowfax a **consumer** of the shared findings envelope. This makes

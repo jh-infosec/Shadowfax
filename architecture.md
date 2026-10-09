@@ -86,6 +86,13 @@ Shadowfax analyses activity and produces alerts. It never blocks, modifies or
 rejects an event. It is not a security boundary and must not be positioned as
 one.
 
+This held even when v0.16 gave it something an enforcer would want: a
+declaration of what each agent may do. `GET /actors/{id}/permissions` lets an
+agent runtime ask the question ahead of time and refuse the call itself, but the
+refusal is the runtime's. A monitor that is also the gate becomes the thing an
+attacker most wants to stop, and one that fails closed takes every agent down
+with it.
+
 ### Detection is deterministic and policy-driven
 
 All detection logic is explicit rules evaluated against a policy document.
@@ -495,8 +502,9 @@ Current categories: `allowlist_violation`, `canary_triggered`,
 `brute_force_auth`, `impossible_travel`, `privilege_escalation`,
 `lateral_movement`, `off_hours_access`, `exfiltration_volume`,
 `rate_anomaly`; for AI-agent tool calls (`event_type: "tool_call"`)
-`destructive_action` and `out_of_scope_action`; and for agent integrity
-`completion_fraud` and `token_spend_anomaly`.
+`destructive_action` and `out_of_scope_action`; for agent integrity
+`completion_fraud` and `token_spend_anomaly`; and for declared intent (v0.16)
+`permission_violation` and `undeclared_agent`, evaluated by `permissions.py`.
 
 The two tool-call detectors are policy-driven like the rest:
 `destructive_action` matches `policy.destructive_action_rules` (label,
@@ -515,7 +523,39 @@ per actor in a rolling window and fires against the actor's own baseline, the
 same shape as `rate_anomaly`. Both are unmapped to ATT&CK: they are integrity
 and cost signals, not adversary techniques.
 
+The permission profile is resolved once per run -- a profile belongs to the
+actor, not to an event -- and every non-finding event is evaluated against it.
+Breaches are de-duplicated on their message within the run, so a retried denied
+tool raises one alert on its first occurrence; `undeclared_agent` is raised at
+most once per actor. Both are pure in the same sense as the rest: change the
+profile and the rescan re-judges the whole history.
+
 Severity levels are `critical`, `high`, `medium` and `low`.
+
+#### permissions.py
+
+Agent permission profiles (v0.16), as pure functions with no I/O:
+
+- `resolve(actor_id, policy)` -- exact id first, else the matching pattern with
+  the most literal characters, ties broken on the pattern text. Deterministic,
+  so a rescan cannot move an alert between profiles.
+- `evaluate(event, profile)` -- every way one event breaches one profile, as
+  `Breach(severity, reason)`. Denials (critical) match any spelling of a tool --
+  as reported, by basename, without `.exe` -- and either spelling of a target;
+  allows (high when missed) match the tool as written and the target *resolved*
+  (`posixpath`/`ntpath.normpath`, URLs untouched), so `/repo/../etc/shadow` is
+  judged at `/etc/shadow`. Windows paths compare case-insensitively. An unnamed
+  tool or empty target fails an allow-list rather than passing it.
+- `validate(policy)` -- the problems with the section, as sentences. `PUT
+  /policy` refuses a policy with any, before storing or rescanning: a string
+  where a list belongs, an unknown or misspelt key (with a suggestion), a
+  non-boolean switch.
+- `describe()` and `check()` -- the governing profile, and the detector's
+  verdict on a hypothetical action, for `GET /actors/{id}/permissions`. A test
+  holds `check()` and the detector to the same answer.
+
+A missing grant means unrestricted and an empty one means nothing; deny wins;
+the section is on unless it says `"enabled": false`.
 
 #### seed_data.py
 
@@ -592,12 +632,22 @@ filtering is not. Clicking a row selects that actor.
 #### src/components/ActorDrawer.jsx
 
 The full event timeline for one actor, with alerts attached to the events
-that produced them, plus a risk composition bar.
+that produced them, plus a risk composition bar and the actor's declared
+permissions.
+
+#### src/components/PermissionsPanel.jsx
+
+The permission profile governing an actor (v0.16), from the `permissions` field
+of `GET /actors/{id}`: the profile, how it matched, its description, and each
+grant -- allows and denials styled apart, with "not restricted" (grant absent)
+and "none granted" (grant empty) kept visibly different. An unprofiled AI agent
+is told it is flagged for it.
 
 #### src/components/PolicyEditor.jsx
 
 Raw JSON editing of the live policy. Saving calls `PUT /policy`, which
-rebuilds every alert in the database.
+rebuilds every alert in the database. A refused policy (v0.16) shows each
+problem the server listed, one per line.
 
 #### src/components/IncidentsDrawer.jsx
 
@@ -681,8 +731,10 @@ does.
 ### On policy change
 
 1. New policy received at `PUT /policy`
-2. Policy row updated
-3. Every known actor is rescanned via steps 3 to 5 above
+2. Validated (`permissions.validate`, v0.16); a policy with problems is refused
+   with a 400 listing them, and nothing below happens
+3. Policy row updated
+4. Every known actor is rescanned via steps 3 to 5 above
 
 A policy change therefore rebuilds the entire alert table. Alerts that no
 longer fire under the new policy disappear.
@@ -825,7 +877,7 @@ auth.py                 bus.py                  attack.py
 attack_registry.json    correlate.py            assistant.py
 seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
-throttle.py             envelope.py
+throttle.py             envelope.py             permissions.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml
@@ -852,4 +904,5 @@ frontend/src/components/NLSearch.jsx
 frontend/src/components/DigestDrawer.jsx
 frontend/src/components/LedgerBadge.jsx
 frontend/src/components/LockoutsDrawer.jsx
+frontend/src/components/PermissionsPanel.jsx
 ```

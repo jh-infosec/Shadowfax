@@ -116,6 +116,33 @@ DEFAULT_POLICY = {
         "allowed_ip_ranges": ["10.10.0.0/16", "192.168.56.0/24"],
         "allowed_ports": [80, 443, 22, 8080],
     },
+    # Agent permissions (v0.16): what each agent was given, declared up front.
+    # Acting outside a profile fires permission_violation -- critical for
+    # anything explicitly denied, high for anything merely not granted. A key
+    # left out means "not restricted"; an empty list means "nothing". With
+    # unprofiled_agents set to "alert", an AI agent nobody declared raises one
+    # undeclared_agent alert. Profiles are keyed by actor id or by a pattern;
+    # the most specific match wins. See permissions.py.
+    "agent_permissions": {
+        "enabled": True,
+        "unprofiled_agents": "alert",
+        "profiles": {
+            "recon-agent-*": {
+                "description": "Authorised reconnaissance for engagement alpha: "
+                               "scan and fetch, never a shell.",
+                "allowed_tools": ["nmap", "curl", "dig", "nikto"],
+                "denied_tools": ["nc", "ncat", "netcat", "bash", "sh", "powershell"],
+                "denied_targets": ["~/.ssh/*", "/etc/*", "*.pem"],
+            },
+            "demo-agent-*": {
+                "description": "Churn analysis: read the churn dataset on the "
+                               "analysis workstation, and nothing else.",
+                "allowed_tools": ["python", "sql_query"],
+                "allowed_targets": ["customer_churn_dataset", "analysis_workstation"],
+                "denied_targets": ["~/.ssh/*", "~/.aws/*", "/etc/*"],
+            },
+        },
+    },
     # Completion fraud (v0.5): a completion_claim fires when the trace delivered
     # less than this fraction of what the agent claimed.
     "completion_claim_tolerance": 0.9,

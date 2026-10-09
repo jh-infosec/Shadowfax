@@ -48,6 +48,10 @@ CATEGORY_TO_TECHNIQUES: dict[str, list[str]] = {
     "out_of_scope_action": ["T1041"],
     # destructive_action: technique comes from the matched policy rule, not here.
     # allowlist_violation, blocked_target_access, rate_anomaly: no mapping.
+    # permission_violation, undeclared_agent (v0.16): no mapping either. They
+    # say an agent broke what it was *declared* to do, which is a policy fact,
+    # not an adversary technique -- the same action may be both, and when it is,
+    # the detector that recognises the technique raises it separately.
 }
 
 

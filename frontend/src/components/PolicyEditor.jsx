@@ -18,7 +18,11 @@ export default function PolicyEditor({ policy, onSave, onClose }) {
     try {
       await onSave(parsed);
     } catch (err) {
-      setError(err.message);
+      // A refused policy (v0.16) names each problem; show them one per line.
+      const problems = err.detail?.problems;
+      setError(Array.isArray(problems) && problems.length
+        ? { title: err.detail.message || "policy refused", problems }
+        : err.message);
     } finally {
       setSaving(false);
     }
@@ -37,7 +41,15 @@ export default function PolicyEditor({ policy, onSave, onClose }) {
           onChange={(e) => setText(e.target.value)}
           spellCheck={false}
         />
-        {error && <div className="policy-error">{error}</div>}
+        {error && typeof error === "string" && <div className="policy-error">{error}</div>}
+        {error && typeof error === "object" && (
+          <div className="policy-error">
+            <div>{error.title}:</div>
+            <ul className="policy-problems">
+              {error.problems.map((p) => <li key={p}>{p}</li>)}
+            </ul>
+          </div>
+        )}
         <div className="policy-modal-foot">
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn primary" onClick={handleSave} disabled={saving}>

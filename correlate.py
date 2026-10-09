@@ -39,6 +39,8 @@ _CATEGORY_PHRASE = {
     "dormant_reappearance": "reappearance after dormancy",
     "off_hours_access": "off-hours access to sensitive targets",
     "rate_anomaly": "anomalous activity rate",
+    "permission_violation": "actions outside declared permissions",
+    "undeclared_agent": "an agent with no declared permissions",
 }
 
 

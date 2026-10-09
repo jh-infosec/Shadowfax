@@ -194,7 +194,7 @@ deterministic id rule for its own alerts earlier, in `v0.3`.
 Notes for an emitter, from building the consumer:
 
 - A finding's `key` becomes Shadowfax's alert category, so it may not collide
-  with one of Shadowfax's sixteen native detector categories. The rejection
+  with one of Shadowfax's eighteen native detector categories. The rejection
   names the collision.
 - The whole envelope is rejected on any structural error, with the field path at
   fault, rather than the valid findings being kept.

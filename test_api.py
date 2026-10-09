@@ -1171,6 +1171,264 @@ code, sout, _ = run_cli(["export"])
 check("CLI export without --actor emits every envelope",
       isinstance(json.loads(sout), list))
 
+print("\n== agent permissions (v0.16) ==")
+import copy as _copy
+import permissions as perm
+from seed_data import DEFAULT_POLICY as _SEED_POLICY
+
+# Every detector before this one infers wrongness from unusualness. A permission
+# profile states what an agent is *for*, so the first step outside it is
+# reportable on its own. Most of what follows is about the ways that statement
+# could quietly fail open: a spelling that dodges a deny, a traversal that rides
+# an allow, a typo that switches a profile off.
+
+def _tc(tool=None, target="x", event_type="tool_call"):
+    meta = {} if tool is None else {"tool": tool}
+    return {"event_type": event_type, "target": target, "metadata": meta}
+
+def _sev(breaches):
+    return [b.severity for b in breaches]
+
+# -- which profile governs an actor --------------------------------------------
+_pol = {"agent_permissions": {"profiles": {
+    "*": {"allowed_tools": []},
+    "build-*": {"allowed_tools": ["make"]},
+    "build-prod-*": {"allowed_tools": ["make", "deploy"]},
+    "build-prod-7": {"allowed_tools": ["make", "deploy", "rollback"]},
+    "aa-?": {}, "a?-1": {},
+}}}
+check("an exact actor id beats every pattern",
+      perm.resolve("build-prod-7", _pol).name == "build-prod-7"
+      and perm.resolve("build-prod-7", _pol).matched_by == "exact")
+check("otherwise the most specific pattern wins, not the first one listed",
+      perm.resolve("build-prod-3", _pol).name == "build-prod-*"
+      and perm.resolve("build-dev-3", _pol).name == "build-*")
+check("a catch-all pattern governs anything nothing else claims",
+      perm.resolve("someone-else", _pol).name == "*")
+check("equally specific patterns resolve the same way every time",
+      perm.resolve("aa-1", _pol).name == "a?-1" == perm.resolve("aa-1", _pol).name)
+check("no section means no profile",
+      perm.resolve("build-prod-7", {}).profile is None)
+_off = _copy.deepcopy(_pol); _off["agent_permissions"]["enabled"] = False
+check('"enabled": false switches every profile off',
+      perm.resolve("build-prod-7", _off).profile is None)
+check("a section with no switch is on — profiles are not silently inert",
+      perm.enabled(_pol))
+
+# -- tools ----------------------------------------------------------------------
+_p = {"allowed_tools": ["nmap", "curl", "python"], "denied_tools": ["nc", "curl"]}
+check("a granted tool is within the profile", perm.evaluate(_tc("nmap"), _p) == [])
+check("an ungranted tool is reported high",
+      _sev(perm.evaluate(_tc("wget"), _p)) == ["high"])
+check("a denied tool is reported critical", _sev(perm.evaluate(_tc("nc"), _p)) == ["critical"])
+check("deny wins when a tool is on both lists",
+      _sev(perm.evaluate(_tc("curl"), _p)) == ["critical"])
+check("a deny matches the tool by path, case and .exe",
+      all(_sev(perm.evaluate(_tc(t), _p)) == ["critical"]
+          for t in ("/usr/bin/nc", "NC", r"C:\tools\nc.exe")))
+check("an allow does not: a 'python' somewhere else is not the granted python",
+      _sev(perm.evaluate(_tc("/tmp/dropped/python"), _p)) == ["high"])
+check("a tool call that does not name its tool is not assumed to be allowed",
+      "did not name its tool" in perm.evaluate(_tc(None), _p)[0].reason)
+check("a profile without allowed_tools does not restrict tools",
+      perm.evaluate(_tc("anything"), {"denied_tools": ["nc"]}) == [])
+check("an empty allowed_tools grants no tools at all",
+      _sev(perm.evaluate(_tc("python"), {"allowed_tools": []})) == ["high"])
+check("tool grants only judge tool calls",
+      perm.evaluate(_tc("nc", event_type="file_access"), _p) == [])
+
+# -- targets --------------------------------------------------------------------
+_t = {"allowed_targets": ["/repo/*", "https://api.example.com/*", "finance_db"],
+      "denied_targets": ["/etc/*", "~/.ssh/*", r"C:\Secrets\*"]}
+check("a granted target is within the profile",
+      perm.evaluate(_tc(target="/repo/src/app.py", event_type="file_access"), _t) == [])
+check("a URL is matched as written",
+      perm.evaluate(_tc(target="https://api.example.com/v1/x", event_type="network_request"), _t) == [])
+_trav = perm.evaluate(_tc(target="/repo/../etc/shadow", event_type="file_access"), _t)
+check("a traversal cannot ride an allow-list: /repo/../etc/shadow is not under /repo",
+      _sev(_trav) == ["critical"])
+check("and the analyst sees where it really pointed",
+      "resolves to '/etc/shadow'" in _trav[0].reason)
+_trav2 = perm.evaluate(_tc(target="/repo/../var/secret", event_type="file_access"),
+                       {"allowed_targets": ["/repo/*"]})
+check("with no deny to catch it, the allow-list alone still refuses it",
+      _sev(_trav2) == ["high"] and "resolves to '/var/secret'" in _trav2[0].reason)
+check("Windows paths are matched case-insensitively, as Windows does",
+      _sev(perm.evaluate(_tc(target=r"c:\secrets\keys.txt", event_type="file_access"), _t))
+      == ["critical"])
+check("an event with no target cannot be shown to be within an allow-list",
+      "named no target" in perm.evaluate(_tc(target="", event_type="file_access"), _t)[0].reason)
+check("a completion claim is a report, not an access, so it has no target to judge",
+      perm.evaluate(_tc(target="anything", event_type="completion_claim"), _t) == [])
+_both = perm.evaluate(_tc("nc", "~/.ssh/authorized_keys"), {**_p, **_t})
+check("a tool breach and a target breach on one event are both reported",
+      len(_both) == 2)
+
+# -- malformed policy is refused --------------------------------------------------
+def _with(section):
+    return {**_copy.deepcopy(_SEED_POLICY), "agent_permissions": section}
+
+check("the shipped sample policy validates", perm.validate(_SEED_POLICY) == [])
+check("a policy with no permissions section is valid", perm.validate({}) == [])
+_e = perm.validate(_with({"profiles": {"a": {"allowed_tools": "nmap"}}}))
+check("a string where a list belongs is refused — it would grant 'n', 'm', 'a', 'p'",
+      _e and "must be a list" in _e[0] and "['nmap']" in _e[0])
+_e = perm.validate(_with({"profiles": {"a": {"alowed_tools": ["nmap"]}}}))
+check("a misspelt grant is refused, and the right spelling suggested",
+      _e and "did you mean 'allowed_tools'" in _e[0])
+check("an unknown unprofiled_agents mode is refused",
+      perm.validate(_with({"unprofiled_agents": "block"})) != [])
+check('"enabled" must be a real boolean, not the string "false"',
+      perm.validate(_with({"enabled": "false"})) != [])
+check("an unknown key in the section is refused",
+      perm.validate(_with({"profile": {}})) != [])
+check("an empty pattern in a grant is refused",
+      perm.validate(_with({"profiles": {"a": {"denied_targets": [""]}}})) != [])
+
+_before = client.get("/policy").json()
+_r = client.put("/policy", json=_with({"profiles": {"recon-agent-*": {"allowed_tools": "nmap"}}}))
+check("PUT /policy refuses a malformed profile with a 400", _r.status_code == 400)
+check("and lists each problem", isinstance(_r.json()["detail"]["problems"], list)
+      and _r.json()["detail"]["problems"])
+check("a refused policy is not stored", client.get("/policy").json() == _before)
+
+# -- the detector, on the bundled sample data -----------------------------------
+_recon = client.get("/alerts", params={"actor_id": "recon-agent-3",
+                                       "category": ["permission_violation"]}).json()
+check("the sample recon agent breaches its profile", len(_recon) == 3)
+check("using a tool its profile denies is critical",
+      all(a["severity"] == "critical" for a in _recon))
+check("the alert names the profile and the breach",
+      any("profile 'recon-agent-*'" in a["message"] and "tool 'nc'" in a["message"]
+          for a in _recon))
+check("a policy breach is not dressed up as an ATT&CK technique",
+      all(a["attack"] == [] for a in _recon))
+_und = client.get("/alerts", params={"category": ["undeclared_agent"]}).json()
+check("AI agents nobody declared are flagged",
+      {a["actor_id"] for a in _und} >= {"apt-agent-9", "eval-agent-7"})
+check("once per agent, not once per action",
+      sum(a["actor_id"] == "apt-agent-9" for a in _und) == 1)
+check("a person is never flagged for lacking an agent profile",
+      all(a["actor_type"] == "ai_agent" for a in _und))
+check("both categories are Shadowfax's own, so another tool cannot claim them",
+      {"permission_violation", "undeclared_agent"} <= _detectors.NATIVE_CATEGORIES)
+
+# No baseline: a profiled agent's very first action can breach.
+_r = client.post("/events", json=[{
+    "timestamp": "2026-09-01T09:00:00", "actor_id": "recon-agent-77",
+    "actor_type": "ai_agent", "event_type": "tool_call", "target": "10.10.5.9",
+    "metadata": {"tool": "ncat", "host": "10.10.5.9", "port": 443}}])
+check("an agent's first event can breach its profile — no baseline needed",
+      any(a["actor_id"] == "recon-agent-77" and a["category"] == "permission_violation"
+          for a in _r.json()["alerts"]))
+
+# Repeats of one breach are one alert.
+_rep = [{"timestamp": f"2026-09-01T10:0{i}:00", "actor_id": "recon-agent-78",
+         "actor_type": "ai_agent", "event_type": "tool_call", "target": "10.10.5.9",
+         "metadata": {"tool": "nc"}} for i in range(4)]
+_rep.append({"timestamp": "2026-09-01T10:05:00", "actor_id": "recon-agent-78",
+             "actor_type": "ai_agent", "event_type": "tool_call", "target": "/etc/hosts",
+             "metadata": {"tool": "nc"}})
+client.post("/events", json=_rep)
+_pv = client.get("/alerts", params={"actor_id": "recon-agent-78",
+                                    "category": ["permission_violation"]}).json()
+check("the repeated breach did raise an alert, so the next check is not vacuous",
+      len(_pv) >= 1)
+check("the same breach four times is one alert, on its first occurrence; a new "
+      "breach is a new alert", len(_pv) == 2)
+
+# -- profiles are policy, so changing one rescans history --------------------------
+_new = _copy.deepcopy(_SEED_POLICY)
+_new["agent_permissions"]["profiles"]["apt-agent-9"] = {
+    "description": "declared after the fact",
+    "allowed_targets": ["apt_workstation", "corp_vpn"]}
+check("a valid policy change is accepted", client.put("/policy", json=_new).status_code == 200)
+_apt = client.get("/alerts", params={"actor_id": "apt-agent-9"}).json()
+check("declaring a profile clears the undeclared_agent alert",
+      not any(a["category"] == "undeclared_agent" for a in _apt))
+check("and judges events recorded before the profile existed",
+      sum(a["category"] == "permission_violation" for a in _apt) >= 5)
+_detail = client.get("/actors/apt-agent-9").json()
+check("the actor detail carries the profile that governs it",
+      _detail["permissions"]["profile"] == "apt-agent-9"
+      and _detail["permissions"]["matched_by"] == "exact")
+_new["agent_permissions"]["enabled"] = False
+client.put("/policy", json=_new)
+check("switching profiles off removes every alert they raised",
+      not client.get("/alerts", params={"category": ["permission_violation",
+                                                     "undeclared_agent"]}).json())
+client.put("/policy", json=_SEED_POLICY)
+check("restoring the policy restores them",
+      len(client.get("/alerts", params={"actor_id": "recon-agent-3",
+                                        "category": ["permission_violation"]}).json()) == 3)
+
+# -- asking ahead ---------------------------------------------------------------
+_d = client.get("/actors/recon-agent-3").json()["permissions"]
+check("a pattern-matched profile says so",
+      _d["profile"] == "recon-agent-*" and _d["matched_by"] == "pattern")
+check("grants are returned as declared, absent ones as null",
+      _d["grants"]["allowed_tools"] == ["nmap", "curl", "dig", "nikto"]
+      and _d["grants"]["allowed_targets"] is None)
+_q = client.get("/actors/recon-agent-5/permissions").json()
+check("permissions can be asked about an agent with no events yet",
+      _q["profile"] == "recon-agent-*")
+_ok = client.get("/actors/recon-agent-5/permissions", params={"tool": "nmap"}).json()["check"]
+_no = client.get("/actors/recon-agent-5/permissions", params={"tool": "nc"}).json()["check"]
+check("a granted tool is within permissions", _ok["within_permissions"] is True)
+check("a denied tool is not, at the detector's own severity",
+      _no["within_permissions"] is False and _no["severity"] == "critical"
+      and _no["category"] == "permission_violation")
+_tgt = client.get("/actors/recon-agent-5/permissions",
+                  params={"target": "~/.ssh/id_rsa"}).json()["check"]
+check("a target can be asked about without a tool", _tgt["within_permissions"] is False)
+_ghost = client.get("/actors/ghost-agent/permissions", params={"tool": "ls"}).json()["check"]
+check("an undeclared agent is told it is undeclared",
+      _ghost["category"] == "undeclared_agent")
+check("a person with no profile is not",
+      client.get("/actors/someone/permissions",
+                 params={"tool": "ls", "actor_type": "human"}).json()["check"]["within_permissions"])
+
+# The check endpoint and the detector must never disagree, or a runtime that
+# asks first will be told yes and then reported anyway.
+_agree, _outcomes = True, set()
+for _i, (_tool, _target) in enumerate([("nmap", "10.10.1.1"), ("nc", "10.10.1.1"),
+                                       ("curl", "~/.ssh/known_hosts"), ("wget", "x"),
+                                       ("dig", "/etc/resolv.conf"), ("nikto", "a.example")]):
+    _actor = f"recon-agent-agree-{_i}"
+    _asked = client.get(f"/actors/{_actor}/permissions",
+                        params={"tool": _tool, "target": _target}).json()["check"]
+    _fired = client.post("/events", json=[{
+        "timestamp": "2026-09-02T09:00:00", "actor_id": _actor, "actor_type": "ai_agent",
+        "event_type": "tool_call", "target": _target, "metadata": {"tool": _tool}}]).json()
+    _raised = any(a["actor_id"] == _actor and a["category"] == "permission_violation"
+                  for a in _fired["alerts"])
+    _agree = _agree and (_asked["within_permissions"] == (not _raised))
+    _outcomes.add(_raised)
+check("the cases include both allowed and reported actions, so agreement means something",
+      _outcomes == {True, False})
+check("asking ahead and detecting afterwards give the same answer", _agree)
+
+check("viewers may read permissions",
+      as_user("viewer1", "pw").get("/actors/recon-agent-3/permissions").status_code == 200)
+check("reading them needs a credential",
+      anon.get("/actors/recon-agent-3/permissions").status_code == 401)
+
+code, sout, _ = run_cli(["permissions", "recon-agent-3", "--tool", "nmap"])
+check("CLI `permissions --tool nmap` exits 0 for a granted tool", code == 0)
+code, sout, _ = run_cli(["permissions", "recon-agent-3", "--tool", "nc"])
+check("CLI `permissions --tool nc` exits 1, so a harness can refuse the call",
+      code == 1 and "OUTSIDE PERMISSIONS" in sout)
+code, sout, _ = run_cli(["permissions", "recon-agent-3"])
+check("CLI `permissions` alone shows the profile and exits 0",
+      code == 0 and "recon-agent-*" in sout and "not restricted" in sout)
+import tempfile as _tf
+with _tf.NamedTemporaryFile("w", suffix=".json", delete=False) as _fh:
+    json.dump(_with({"profiles": {"x": {"alowed_tools": ["a"]}}}), _fh)
+code, _, serr = run_cli(["policy", "set", _fh.name])
+os.unlink(_fh.name)
+check("CLI `policy set` reports each problem on its own line",
+      code != 0 and "  - agent_permissions.profiles['x']: unknown key" in serr)
+
 print("\n== login throttling and self-monitoring (v0.10) ==")
 import throttle as throttle_mod
 from datetime import datetime as _dt, timedelta as _td

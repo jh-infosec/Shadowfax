@@ -1,9 +1,10 @@
 import React from "react";
 import { SEVERITY_COLOUR, SEVERITY_ORDER } from "../constants.js";
+import PermissionsPanel from "./PermissionsPanel.jsx";
 
 export default function ActorDrawer({ detail, onClose }) {
   if (!detail) return null;
-  const { actor_id, events, alerts, risk } = detail;
+  const { actor_id, events, alerts, risk, permissions } = detail;
 
   const flaggedByEvent = {};
   alerts.forEach((a) => {
@@ -37,6 +38,8 @@ export default function ActorDrawer({ detail, onClose }) {
         <div className="risk-note">
           {risk.critical || 0} critical &middot; {risk.high || 0} high &middot; {risk.medium || 0} medium &middot; {risk.low || 0} low &middot; {risk.info || 0} info
         </div>
+
+        <PermissionsPanel permissions={permissions} actorType={events[0]?.actor_type} />
 
         <div className="timeline-title">Full activity timeline</div>
         {events.map((e) => {

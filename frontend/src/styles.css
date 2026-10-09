@@ -534,3 +534,22 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   font-family: var(--mono); font-size: 10.5px; color: var(--muted-2);
   line-height: 1.5; word-break: break-word;
 }
+
+/* Declared permissions (v0.16) */
+.perm-panel { margin-bottom: 22px; padding: 12px 14px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; }
+.perm-profile { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.perm-profile code { font-family: var(--mono); font-size: 12.5px; color: var(--accent); }
+.perm-match { font-size: 11px; color: var(--muted-2); }
+.perm-desc { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.perm-row { display: flex; gap: 10px; padding: 4px 0; border-top: 1px solid var(--border-soft); align-items: baseline; }
+.perm-key { width: 110px; flex-shrink: 0; font-size: 11px; color: var(--muted-2); }
+.perm-values { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.perm-chip { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: 3px; border: 1px solid var(--border); overflow-wrap: anywhere; }
+.perm-chip.allow { color: var(--low); border-color: var(--accent-dim); }
+.perm-chip.deny { color: var(--crit); border-color: var(--crit-dim); }
+.perm-open { font-size: 11px; color: var(--muted-2); font-style: italic; }
+.perm-none { font-size: 11px; color: var(--high); }
+.perm-note { font-size: 12px; color: var(--muted); }
+.perm-note.perm-undeclared { color: var(--med); }
+.policy-problems { margin: 4px 0 8px; padding-left: 18px; }
+.policy-problems li { margin: 2px 0; }

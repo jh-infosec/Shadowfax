@@ -491,6 +491,12 @@ _CATEGORY_SYNONYMS = {
     "fraud": "completion_fraud",
     "token": "token_spend_anomaly",
     "spend": "token_spend_anomaly",
+    "permission": "permission_violation",
+    "not permitted": "permission_violation",
+    "undeclared": "undeclared_agent",
+    "unprofiled": "undeclared_agent",
+    "unregistered": "undeclared_agent",
+    "shadow agent": "undeclared_agent",
 }
 
 

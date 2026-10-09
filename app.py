@@ -44,11 +44,12 @@ import detectors
 import digest as digest_mod
 import envelope
 import ledger
+import permissions
 import throttle
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -617,7 +618,34 @@ def actor_detail(actor_id: str, identity: dict = Depends(require_role("viewer"))
             raise HTTPException(404, f"no events for actor '{actor_id}'")
         alerts = db.query_alerts(conn, actor_id=actor_id, limit=1000)
         risk = db.actor_risk_scores(conn).get(actor_id, EMPTY_RISK)
-        return {"actor_id": actor_id, "events": events, "alerts": alerts, "risk": risk}
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        return {"actor_id": actor_id, "events": events, "alerts": alerts, "risk": risk,
+                "permissions": permissions.describe(actor_id, policy)}
+
+
+@app.get("/actors/{actor_id}/permissions")
+def actor_permissions(
+    actor_id: str,
+    tool: str | None = Query(None, description="a tool the actor might call"),
+    target: str | None = Query(None, description="a target the actor might touch"),
+    actor_type: str = Query(permissions.GOVERNED_ACTOR_TYPE),
+    identity: dict = Depends(require_role("viewer")),
+):
+    """The permission profile that governs an actor, and -- given a tool, a
+    target, or both -- whether that action would be reported (v0.16).
+
+    This is the detector's own judgement asked in advance, for writing a profile
+    or for an agent runtime that wants to refuse before it acts. It deliberately
+    does not 404 for an actor with no events: the most useful time to ask what a
+    new agent may do is before it has done anything.
+    """
+    with db.get_conn() as conn:
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+    out = {"actor_id": actor_id, **permissions.describe(actor_id, policy)}
+    if tool is not None or target is not None:
+        out["check"] = {"tool": tool, "target": target,
+                        **permissions.check(actor_id, policy, tool, target, actor_type)}
+    return out
 
 
 # Incident endpoints (correlation)
@@ -780,6 +808,11 @@ def get_policy(identity: dict = Depends(require_role("viewer"))):
 
 @app.put("/policy")
 def update_policy(policy: dict[str, Any], identity: dict = Depends(require_role("analyst"))):
+    # Refused before it is stored, not after: a malformed permission profile
+    # does not fail loudly when it runs, it quietly grants more than it says.
+    problems = permissions.validate(policy)
+    if problems:
+        raise HTTPException(400, {"message": "policy refused", "problems": problems})
     with db.get_conn() as conn:
         db.set_policy(conn, policy)
         _rescan_all(conn)

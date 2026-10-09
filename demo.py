@@ -19,8 +19,9 @@ visible rather than quietly absent.
 The scenario is deliberately one story told three ways, covering the three
 things Shadowfax claims to do that a static screenshot cannot show:
 
-  Act 1  An AI agent exceeds its brief, and the separate alerts turn out to be
-         one kill chain running Reconnaissance -> Exfiltration.
+  Act 1  An AI agent exceeds its brief: its declared permissions catch the
+         first step outside them, and the separate alerts turn out to be one
+         kill chain running Reconnaissance -> Exfiltration.
   Act 2  Another tool's findings arrive over the shared envelope and attach to
          the same actor, from a tool Shadowfax knows nothing about.
   Act 3  The attacker turns on Shadowfax itself, and Shadowfax's own front door
@@ -187,12 +188,21 @@ class Demo:
         self.pause(1)
 
         self.act(1, "An agent exceeds its brief",
-                 "A churn-analysis agent is scoped to one dataset. Watch what "
-                 "it actually does.")
+                 "A churn-analysis agent is declared to use python and SQL on "
+                 "one dataset. Watch what it actually does.")
 
         self.narrate("Agent reads the dataset it was actually given.",
                      "nothing — this is the agent doing its job")
         self.observed(self.send(0, "file_access", "customer_churn_dataset"))
+
+        # v0.16: the profile in the sample policy says what this agent is for,
+        # so the first step outside it is caught on its own -- no baseline, no
+        # threshold, no pattern of behaviour needed.
+        self.narrate("It opens a shell it was never given and reads /etc/passwd.",
+                     "permission_violation (critical) — denied target, ungranted tool",
+                     f"{ACTOR}:permission_violation")
+        self.observed(self.send(1, "tool_call", "/etc/passwd",
+                                tool="bash", arguments="cat /etc/passwd"))
 
         self.narrate("It grants itself root, with no approval marker.",
                      "privilege_escalation (T1548)", "privilege_escalation")
@@ -208,7 +218,9 @@ class Demo:
         self.observed(alerts)
 
         self.narrate("It touches six databases in eleven minutes.",
-                     "lateral_movement (T1021) past the distinct-target threshold",
+                     "permission_violation for each database it was never "
+                     "granted; lateral_movement (T1021) past the distinct-target "
+                     "threshold",
                      "lateral_movement")
         for n, target in enumerate(["finance_db", "hr_records_db", "billing_db",
                                     "crm_db", "payroll_db", "audit_db"]):
@@ -315,7 +327,7 @@ class Demo:
 
         Without --assert this is a demo and returns 0 whatever happened: a
         person watching can see for themselves. With it, the replay becomes an
-        end-to-end check of the whole stack -- ingest, sixteen detectors,
+        end-to-end check of the whole stack -- ingest, eighteen detectors,
         correlation, kill-chain ordering, envelope ingest, the front door and
         the ledger -- against a real server over real HTTP. That is a different
         kind of evidence from the unit suite, which never leaves the process.

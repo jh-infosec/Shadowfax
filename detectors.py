@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import attack
 import envelope
+import permissions
 
 TOOL_NAME = "shadowfax"
 
@@ -28,8 +29,8 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "canary_triggered", "capability_resurrection", "completion_fraud",
     "destructive_action", "dormant_reappearance", "exfiltration_volume",
     "impossible_travel", "lateral_movement", "off_hours_access",
-    "out_of_scope_action", "privilege_escalation", "rate_anomaly",
-    "token_spend_anomaly",
+    "out_of_scope_action", "permission_violation", "privilege_escalation",
+    "rate_anomaly", "token_spend_anomaly", "undeclared_agent",
 })
 
 
@@ -246,6 +247,17 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
     token_window: deque[tuple[datetime, int]] = deque()
     token_history: list[int] = []
 
+    # Agent permissions (v0.16). Resolved once: every event here is one actor's,
+    # and a profile belongs to the actor, not to the event.
+    grant = (permissions.resolve(events[0]["actor_id"], policy) if events
+             else permissions.Resolution(None, None, None))
+    undeclared_reported = False
+    # One alert per distinct breach, on its first occurrence. An agent that
+    # retries a denied tool forty times has committed one breach forty times;
+    # forty identical alerts would bury the next, different one. The repeats
+    # stay on the actor's timeline -- only the queue is spared them.
+    breaches_reported: set[str] = set()
+
     for e in events:
         ts = datetime.fromisoformat(e["timestamp"])
         meta = e.get("metadata") or {}
@@ -265,6 +277,25 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
             if found:
                 alerts.append(found)
             continue
+
+        # agent permissions: what this agent was declared to be allowed to do,
+        # against what it did. The only detector that needs no baseline -- an
+        # agent's very first action can breach its profile.
+        if grant.profile is not None:
+            breaches = permissions.evaluate(e, grant.profile)
+            message = permissions.violation_message(grant, breaches) if breaches else ""
+            if breaches and message not in breaches_reported:
+                breaches_reported.add(message)
+                alerts.append(_mk_alert(e, permissions.worst(breaches),
+                    "permission_violation", message))
+        elif (not undeclared_reported
+              and e["actor_type"] == permissions.GOVERNED_ACTOR_TYPE
+              and permissions.alerts_on_unprofiled(policy)):
+            # Once per actor, on its first action: the finding is that nobody
+            # declared this agent, which is true of the agent, not of each event.
+            undeclared_reported = True
+            alerts.append(_mk_alert(e, permissions.SEVERITY_UNDECLARED,
+                "undeclared_agent", permissions.undeclared_message(e["actor_id"])))
 
         # allowlist
         task = e.get("task")
