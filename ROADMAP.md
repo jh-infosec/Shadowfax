@@ -280,8 +280,8 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       underlying error rather than a bare selector timeout, and console errors
       fail the run. Runs in CI straight after the replay, which is what puts the
       data there. Shipped in `v0.14.0`.
-- [ ] Publish the image on a tag, so `docker run ghcr.io/jh-infosec/shadowfax`
-      needs no clone. The CI that builds it already exists; this is the push.
+- [x] Publish the image on a release, so `docker run ghcr.io/jh-infosec/shadowfax`
+      needs no clone. Shipped in `v0.17.0` -- see below.
 
 ---
 
@@ -306,11 +306,28 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 
 ---
 
+## Version 0.17
+
+- [x] Published image. A `publish` job runs on a GitHub release only, after
+      both test jobs pass on that commit; checks the tag against the version in
+      the code; pushes to ghcr.io with provenance and an SBOM; pulls back the
+      published digest and checks it starts, reports its version, runs as
+      non-root and generated its admin password. Shipped in `v0.17.0`.
+- [x] No known password in the published image: the first start generates the
+      admin password and prints it once. Every CI run proves `admin/admin` is
+      refused on a fresh container.
+- [ ] Sign the image (cosign, keyless via GitHub's OIDC), so "this came from
+      that repository's CI" can be verified, not just stated in a label.
+- [ ] A way to reset a lost admin password that does not mean discarding the
+      volume -- a one-off `docker exec` command, recorded in the ledger.
+
+---
+
 ## Version 1.0
 
 - [ ] Electron desktop application
 - [ ] PostgreSQL support
 - [ ] Multi-user support
-- [x] Docker images -- shipped in `v0.12.0` (building locally; publishing one is still open above).
+- [x] Docker images -- built since `v0.12.0`, published to ghcr.io since `v0.17.0`.
 - [ ] SIEM integrations
 - [ ] Production deployment

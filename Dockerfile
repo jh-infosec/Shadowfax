@@ -1,4 +1,4 @@
-# Shadowfax, as one image (v0.12).
+# Shadowfax, as one image (v0.12; published from v0.17).
 #
 # Two stages. The first builds the dashboard with Node; the second runs the API
 # with Python and serves the built dashboard from its own origin. Node does not
@@ -34,7 +34,21 @@ FROM python:3.11-slim AS runtime
 # chunks when a buffer happens to fill.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    SHADOWFAX_DB=/data/shadowfax.db
+    SHADOWFAX_DB=/data/shadowfax.db \
+    SHADOWFAX_GENERATE_ADMIN_PASSWORD=1
+
+# v0.17: this image is published, so anyone can `docker run` it. Without a
+# SHADOWFAX_ADMIN_PASSWORD, the first start generates a random admin password
+# and prints it to the log once, instead of falling back to the admin/admin that
+# running from source uses. A published security tool with a default password
+# everyone knows is the finding it exists to raise.
+
+# Where the image came from, in the standard OCI labels. GitHub uses `source` to
+# link a published package to its repository; anyone holding the image can use
+# it to find the code that built it. CI adds the version and commit on release.
+LABEL org.opencontainers.image.title="Shadowfax" \
+      org.opencontainers.image.description="Security operations for autonomous AI agents: deterministic detection, ATT&CK-mapped, tamper-evident." \
+      org.opencontainers.image.source="https://github.com/jh-infosec/Shadowfax"
 
 WORKDIR /app
 

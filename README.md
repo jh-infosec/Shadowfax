@@ -71,6 +71,7 @@ investigation and explainability.
 - Findings-envelope export — Shadowfax speaks the format as well as reads it, so the portfolio's other tools can consume it in turn
 - One-command packaging — `docker compose up`, plus a scripted attack replay that makes the engine demonstrate itself
 - CI that builds the image and replays the attack against it, so every commit proves the detections still happen
+- Published image — every GitHub release ships `ghcr.io/jh-infosec/shadowfax`, only after the tests and the replay pass, with provenance and an SBOM, and never with a known password
 - Dashboard checked in a real browser — building a bundle proves it compiles, not that anything reaches the screen
 - Automated API testing
 
@@ -215,6 +216,10 @@ Planned
 
 - Agent permission profiles — shipped (v0.16.0)
 
+### v0.17
+
+- Published image on ghcr.io, released from CI — shipped (v0.17.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -226,11 +231,29 @@ Planned
 
 ## Running Shadowfax
 
+The quickest way, with nothing to clone or build — the published image:
+
+```bash
+docker run -d --name shadowfax -p 8000:8000 -v shadowfax-data:/data \
+  ghcr.io/jh-infosec/shadowfax
+docker logs shadowfax        # the admin password, generated on first start
+```
+
+Open `http://localhost:8000` and sign in as `admin` with the password from the
+log. The published image never starts with a password everyone knows: without
+`SHADOWFAX_ADMIN_PASSWORD` it generates one, prints it once, and keeps only its
+hash. To choose your own, add `-e SHADOWFAX_ADMIN_PASSWORD=...` to the first
+`docker run`. Each release is also tagged by version (`:0.17.0`, `:0.17`), and
+carries build provenance and an SBOM.
+
+From the source in front of you instead:
+
 ```bash
 docker compose up --build
 ```
 
-Open `http://localhost:8000` and sign in as `admin` / `admin`. One process, one
+Open `http://localhost:8000` and sign in as `admin` / `admin` — compose sets
+these for local use, and Shadowfax warns about them on startup. One process, one
 port: the API serves the dashboard from its own origin, so there is no second
 server to start and no CORS allowlist to reconcile with whichever port the
 dashboard ended up on.
@@ -242,6 +265,8 @@ Leave the dashboard open and run:
 
 ```bash
 docker compose exec shadowfax python demo.py
+# or, with the published image:
+docker exec shadowfax python demo.py --password <the password from the log>
 ```
 
 A scripted attack unfolds against the running instance, in three acts. Because
@@ -378,7 +403,25 @@ shadow an API route, raises the detections the README claims, and that
 `shadowfax check` still exits non-zero when alerts match.
 
 A README that says `docker compose up` and a Dockerfile nobody builds is a
-promise with nothing behind it.
+promise with nothing behind it. Since v0.17 it also checks a fresh container
+started without credentials: `admin/admin` must be refused, and the generated
+password from its log must work.
+
+### Releasing
+
+Publishing a release on github.com (**Releases → Draft a new release**, tag
+`v0.17.0`) runs a third job, **publish**, after the other two have passed on
+that commit. It refuses a tag that disagrees with the version in `app.py`,
+`frontend/package.json` and the changelog; pushes the image to
+`ghcr.io/jh-infosec/shadowfax` as `:0.17.0`, `:0.17` and `:latest` (a release
+marked as a pre-release never becomes `:latest`); then pulls back what it
+published, by digest, and checks that it starts, reports the right version,
+runs as non-root and generated its admin password. Pushing to `main` never
+publishes anything.
+
+The first time, GitHub makes the package private. The job says so in a warning;
+make it public once under **your profile → Packages → shadowfax → Package
+settings → Change visibility**.
 
 ---
 

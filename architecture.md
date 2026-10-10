@@ -843,7 +843,8 @@ reach the port.
 
 ## Continuous integration (v0.13)
 
-Two jobs, because they answer different questions. **checks** runs the test
+Two jobs on every push, because they answer different questions (a third,
+publish, runs only on a release -- see below). **checks** runs the test
 suite and builds the dashboard. **container** builds the image, starts it, and
 replays the scripted attack against it over HTTP.
 
@@ -866,6 +867,33 @@ least four stages, that it begins at Reconnaissance (true only if the ingested
 finding attached), and that the ledger verifies.
 
 Without `--assert` the replay returns 0 whatever happens. It is a demo first.
+
+## Publishing (v0.17)
+
+A third job, **publish**, runs on a GitHub release and nothing else, with
+`needs: [checks, container]` -- so an image reaches the registry only after the
+suite and the end-to-end replay have passed on that exact commit. It is the only
+job granted `packages: write`; the workflow's default stays `contents: read`.
+
+In order, it: checks the release tag against `VERSION`, `frontend/package.json`
+and the changelog's top heading, and stops if any disagree; builds and pushes
+`ghcr.io/<owner>/shadowfax` with explicit tags (`:X.Y.Z`, `:X.Y`, and `:latest`
+unless the release is a pre-release) plus build provenance and an SBOM; pulls
+the pushed **digest** back and checks it starts, reports the tag's version on
+`/healthz`, runs as non-root and generated its admin password; and finally tries
+an anonymous pull, warning (not failing) if the package is still private.
+
+Verifying the pulled digest rather than the local build is the point: the
+artifact people run is the one in the registry.
+
+**No known password in a published image.** From source, a fresh database gets
+`admin/admin` with a warning. The Dockerfile sets
+`SHADOWFAX_GENERATE_ADMIN_PASSWORD=1`, so the image instead generates a random
+password on first start, prints it once and stores only its hash.
+`SHADOWFAX_ADMIN_PASSWORD` overrides both; an empty value counts as unset. The
+warning fires whenever the password *is* `admin`, wherever it came from. The
+container job proves the image's behaviour on every push, on a fresh container
+started without credentials.
 
 ## Required Files
 

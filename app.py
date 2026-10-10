@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import sqlite3
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -49,7 +50,7 @@ import throttle
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.16.0"
+VERSION = "0.17.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -116,27 +117,63 @@ def _bootstrap_admin(conn: sqlite3.Connection) -> None:
     """Create the first admin account on a fresh database.
 
     Username and password come from SHADOWFAX_ADMIN_USERNAME /
-    SHADOWFAX_ADMIN_PASSWORD. If the password is unset, a default admin/admin is
-    created and a loud warning is printed -- convenient for local development and
-    tests, unsafe anywhere else.
+    SHADOWFAX_ADMIN_PASSWORD. What happens when no password is given depends on
+    where Shadowfax is running:
+
+    * **From source** (`uvicorn app:app`): admin/admin, with a loud warning.
+      Convenient for development and tests, and it looks like what it is.
+    * **From the published image** (v0.17): the Dockerfile sets
+      SHADOWFAX_GENERATE_ADMIN_PASSWORD, and a random password is generated and
+      printed to the log once. An image anyone can `docker run` must not carry a
+      credential everyone already knows -- a security tool shipping admin/admin
+      is the finding it exists to raise.
+
+    An empty SHADOWFAX_ADMIN_PASSWORD counts as unset. `SHADOWFAX_ADMIN_PASSWORD=`
+    with nothing after it is a mistake, and honouring it literally would create
+    an admin whose password is the empty string.
     """
     if db.count_users(conn) > 0:
         return
-    username = os.environ.get("SHADOWFAX_ADMIN_USERNAME", "admin")
-    password = os.environ.get("SHADOWFAX_ADMIN_PASSWORD")
-    using_default = password is None
-    if using_default:
-        password = "admin"
+    username = os.environ.get("SHADOWFAX_ADMIN_USERNAME") or "admin"
+    password = os.environ.get("SHADOWFAX_ADMIN_PASSWORD") or None
+    generate = os.environ.get("SHADOWFAX_GENERATE_ADMIN_PASSWORD", "") not in ("", "0", "false")
+
+    source = "environment"
+    if password is None:
+        if generate:
+            password = secrets.token_urlsafe(18)
+            source = "generated"
+        else:
+            password = "admin"
+            source = "default"
+
     pw_hash, salt = auth.hash_password(password)
     db.create_user(conn, username, pw_hash, salt, "admin")
     conn.commit()
-    if using_default:
+
+    # The warning follows the password, not where it came from: docker-compose
+    # sets admin/admin explicitly for local use, and that deserves the same
+    # warning as falling back to it.
+    if source == "default" or password == "admin":
         print(
             "\n" + "=" * 72 + "\n"
-            "  SHADOWFAX: created a default admin account  ->  admin / admin\n"
+            f"  SHADOWFAX: created an admin account with a known password  ->  {username} / admin\n"
             "  FOR LOCAL DEVELOPMENT ONLY. Set SHADOWFAX_ADMIN_USERNAME and\n"
             "  SHADOWFAX_ADMIN_PASSWORD, and change this password, before exposing\n"
             "  the API beyond your machine.\n"
+            + "=" * 72 + "\n"
+        )
+    elif source == "generated":
+        # Printed once, on the start that created the account, and never stored
+        # anywhere but as a PBKDF2 hash. Lose it and the fix is a fresh volume,
+        # or SHADOWFAX_ADMIN_PASSWORD on the first start.
+        print(
+            "\n" + "=" * 72 + "\n"
+            "  SHADOWFAX: created the first admin account with a generated password\n"
+            f"    username: {username}\n"
+            f"    password: {password}\n"
+            "  It is shown once, here. Set SHADOWFAX_ADMIN_PASSWORD on first start\n"
+            "  to choose your own instead.\n"
             + "=" * 72 + "\n"
         )
     else:

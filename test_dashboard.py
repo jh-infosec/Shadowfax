@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -51,6 +52,12 @@ def check(label: str, condition: bool, detail: str = "") -> None:
         print(f"[FAIL] {label}{(' — ' + detail) if detail else ''}")
 
 
+# Credentials for the instance under test. The published image generates its
+# admin password (v0.17), so they cannot be assumed; from source it is admin/admin.
+USERNAME = os.environ.get("SHADOWFAX_ADMIN_USERNAME") or "admin"
+PASSWORD = os.environ.get("SHADOWFAX_ADMIN_PASSWORD") or "admin"
+
+
 def seed_if_empty(url: str) -> bool:
     """Make sure there is something to look at.
 
@@ -61,7 +68,7 @@ def seed_if_empty(url: str) -> bool:
     try:
         req = urllib.request.Request(
             f"{url}/auth/login",
-            data=json.dumps({"username": "admin", "password": "admin"}).encode(),
+            data=json.dumps({"username": USERNAME, "password": PASSWORD}).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=10) as resp:
             token = json.loads(resp.read())["token"]
@@ -140,8 +147,8 @@ def _run_checks(page, url: str) -> None:
 
     # -- sign-in ------------------------------------------------------------
     check("the sign-in form is served", page.locator('input[type="password"]').count() == 1)
-    page.fill('input[type="text"]', "admin")
-    page.fill('input[type="password"]', "admin")
+    page.fill('input[type="text"]', USERNAME)
+    page.fill('input[type="password"]', PASSWORD)
     page.click('button[type="submit"]')
 
     # Waiting for the ledger badge means waiting for the app shell *and* a
@@ -278,9 +285,16 @@ def main(argv: list[str] | None = None) -> int:
         description="Check the Shadowfax dashboard in a real browser.")
     parser.add_argument("--url", default=DEFAULT_URL,
                         help=f"a running Shadowfax (default {DEFAULT_URL})")
+    parser.add_argument("--username", help="admin username (default "
+                        "$SHADOWFAX_ADMIN_USERNAME, else admin)")
+    parser.add_argument("--password", help="admin password (default "
+                        "$SHADOWFAX_ADMIN_PASSWORD, else admin)")
     parser.add_argument("--headed", action="store_true",
                         help="show the browser, for watching or debugging")
     args = parser.parse_args(argv)
+    global USERNAME, PASSWORD
+    USERNAME = args.username or USERNAME
+    PASSWORD = args.password or PASSWORD
     return run(args.url, args.headed)
 
 

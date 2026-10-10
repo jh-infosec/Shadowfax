@@ -1429,6 +1429,119 @@ os.unlink(_fh.name)
 check("CLI `policy set` reports each problem on its own line",
       code != 0 and "  - agent_permissions.profiles['x']: unknown key" in serr)
 
+print("\n== publishing the image (v0.17) ==")
+import contextlib as _ctx
+import io as _io2
+import re as _re
+import tempfile as _tf2
+from pathlib import Path as _P
+import auth as _auth
+
+# A published image is one anyone can run. The first-admin bootstrap is what
+# decides whether it starts with a password everyone already knows.
+
+def _bootstrap_with(**env):
+    """Run the first-admin bootstrap on a fresh database under `env`, returning
+    (stdout, user row). Nothing touches the suite's own database."""
+    keys = ("SHADOWFAX_ADMIN_USERNAME", "SHADOWFAX_ADMIN_PASSWORD",
+            "SHADOWFAX_GENERATE_ADMIN_PASSWORD")
+    saved = {k: os.environ.pop(k, None) for k in keys}
+    os.environ.update({k: v for k, v in env.items() if v is not None})
+    path = _P(_tf2.mkdtemp()) / "bootstrap.db"
+    try:
+        db_module.init_db(path)
+        out = _io2.StringIO()
+        with db_module.get_conn(path) as c, _ctx.redirect_stdout(out):
+            app_module._bootstrap_admin(c)
+        with db_module.get_conn(path) as c:
+            users = db_module.list_users(c)
+            row = db_module.get_user_by_username(c, users[0]["username"]) if users else None
+        return out.getvalue(), row
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+            if saved[k] is not None:
+                os.environ[k] = saved[k]
+
+def _accepts(row, password):
+    return _auth.verify_password(password, row["salt"], row["password_hash"])
+
+_out, _row = _bootstrap_with()
+check("from source with nothing set, the first admin is admin/admin, for development",
+      _row["username"] == "admin" and _accepts(_row, "admin"))
+check("and it says so loudly", "known password" in _out and "LOCAL DEVELOPMENT" in _out)
+
+_out, _row = _bootstrap_with(SHADOWFAX_GENERATE_ADMIN_PASSWORD="1")
+_m = _re.search(r"password: (\S+)", _out)
+check("the image's mode generates a password and prints it once", _m is not None)
+check("the printed password is the one that works", _m and _accepts(_row, _m.group(1)))
+check("and admin/admin does not", not _accepts(_row, "admin"))
+check("the generated password is long enough to mean something",
+      _m and len(_m.group(1)) >= 20)
+_, _row2 = _bootstrap_with(SHADOWFAX_GENERATE_ADMIN_PASSWORD="1")
+check("two fresh images do not share a password",
+      not _accepts(_row2, _m.group(1)))
+
+_out, _row = _bootstrap_with(SHADOWFAX_GENERATE_ADMIN_PASSWORD="1",
+                             SHADOWFAX_ADMIN_USERNAME="soc", SHADOWFAX_ADMIN_PASSWORD="correct horse")
+check("a password from the environment wins over generating one",
+      _row["username"] == "soc" and _accepts(_row, "correct horse"))
+check("and is never printed", "correct horse" not in _out)
+
+_out, _row = _bootstrap_with(SHADOWFAX_ADMIN_PASSWORD="")
+check("an empty SHADOWFAX_ADMIN_PASSWORD does not create an admin with no password",
+      not _accepts(_row, ""))
+_out, _row = _bootstrap_with(SHADOWFAX_ADMIN_PASSWORD="admin")
+check("choosing admin/admin explicitly still gets the warning",
+      "known password" in _out)
+
+# -- the image is built to use it ----------------------------------------------
+_dockerfile = _P("Dockerfile").read_text(encoding="utf-8")
+check("the image turns password generation on",
+      "SHADOWFAX_GENERATE_ADMIN_PASSWORD=1" in _dockerfile)
+check("the image says where its source is, so the package links to the repository",
+      'org.opencontainers.image.source="https://github.com/jh-infosec/Shadowfax"' in _dockerfile)
+check("docker compose, for local use, still chooses its credentials explicitly",
+      "SHADOWFAX_ADMIN_PASSWORD: admin" in _P("docker-compose.yml").read_text(encoding="utf-8"))
+
+# -- one version, stated everywhere ----------------------------------------------
+# The publish job refuses a release whose tag disagrees with the code. This is
+# the same check on every push, so the disagreement is caught before release day.
+_pkg_version = json.loads(_P("frontend/package.json").read_text(encoding="utf-8"))["version"]
+_cl_version = _re.search(r"^## Version (\S+)", _P("CHANGELOG.md").read_text(encoding="utf-8"),
+                         _re.M).group(1)
+check("the API, the dashboard and the changelog state the same version",
+      app_module.VERSION == _pkg_version == _cl_version)
+
+# -- how publishing is wired -------------------------------------------------------
+_ci_path = _P(".github/workflows/ci.yml")
+if not _ci_path.exists():
+    # The device bridge cannot write .github/, so a disk snapshot lacks it. CI
+    # always has it, which is where these checks have to hold.
+    print("[SKIP] .github/workflows/ci.yml not present in this copy")
+else:
+    import yaml as _yaml
+    _ci = _yaml.safe_load(_ci_path.read_text(encoding="utf-8"))
+    _on = _ci.get("on", _ci.get(True))
+    _pub = _ci["jobs"].get("publish", {})
+    check("a release triggers the workflow", _on.get("release", {}).get("types") == ["published"])
+    check("publishing runs only for a release, never for a push",
+          _pub.get("if") == "github.event_name == 'release'")
+    check("publishing waits for the test suite and the end-to-end replay",
+          set(_pub.get("needs", [])) == {"checks", "container"})
+    check("only the publish job may write packages",
+          _ci.get("permissions") == {"contents": "read"}
+          and _pub.get("permissions", {}).get("packages") == "write"
+          and all("permissions" not in j for n, j in _ci["jobs"].items() if n != "publish"))
+    _steps = " ".join(str(st) for st in _pub.get("steps", []))
+    check("the release tag is checked against the version in the code before pushing",
+          _steps.index("does not match the version") < _steps.index("build-push-action"))
+    check("what was pushed is pulled back by digest and checked",
+          "${IMAGE}@${DIGEST}" in _steps and "healthz" in _steps)
+    _cont = " ".join(str(st) for st in _ci["jobs"]["container"]["steps"])
+    check("every build checks a fresh image refuses admin/admin",
+          "admin/admin on a fresh image" in _cont)
+
 print("\n== login throttling and self-monitoring (v0.10) ==")
 import throttle as throttle_mod
 from datetime import datetime as _dt, timedelta as _td

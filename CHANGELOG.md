@@ -1,5 +1,104 @@
 # Changelog
 
+## Version 0.17.0
+
+Shadowfax could be built and run, but only by someone willing to clone the
+repository and build it. The first thing a reviewer tries is to run the thing,
+and every step before that is a reason not to. This publishes the image: from
+v0.17.0, every GitHub release becomes
+
+```bash
+docker run -d -p 8000:8000 -v shadowfax-data:/data ghcr.io/jh-infosec/shadowfax
+```
+
+Publishing something anyone can run changes what it is allowed to ship with, so
+most of this version is about that rather than about the push.
+
+### Added
+
+- **A `publish` job in CI.** Runs only when a release is published on
+  github.com, and only after the test suite and the end-to-end replay have
+  passed on that exact commit (`needs: [checks, container]`). A push to `main`
+  never publishes. Tags `v0.17.0` as `:0.17.0`, `:0.17` and `:latest`; a
+  release ticked "Set as a pre-release" gets its own tag and never `:latest`.
+  The tag rules are spelled out in the workflow rather than left to defaults.
+- **The release must agree with the code.** Before anything is pushed, the job
+  checks that the release tag, `VERSION` in `app.py`, `frontend/package.json`
+  and the top of this changelog all say the same number. Otherwise
+  `docker pull :0.17.0` would hand someone a different version wearing that
+  number. The suite runs the same comparison (minus the tag) on every push, so
+  the disagreement surfaces long before release day.
+- **What was published is pulled back and checked.** By digest, so it is
+  exactly the artifact just pushed: it starts, reports the release's version on
+  `/healthz`, runs as a non-root user, and generated its admin password. The
+  image that matters is the one in the registry, not the one a runner happened
+  to build.
+- **Provenance and an SBOM** are attached to the image (`provenance: mode=max`,
+  `sbom: true`), so "how was this built, and what is in it?" has an answer that
+  does not depend on trusting whoever is asking.
+- **OCI labels.** `org.opencontainers.image.source` links the package to the
+  repository on GitHub, and lets anyone holding the image find the code that
+  built it. CI adds the version and commit.
+- **A stranger's pull, tested.** After publishing, the job logs out and tries
+  to pull anonymously. The first publish of a package is private until the
+  owner makes it public, so this is a warning with the exact clicks, not a
+  failure — but a README that tells people to pull an image they cannot see is
+  a broken README, and this says so the first time.
+- **`--username` / `--password` on `demo.py` and `test_dashboard.py`**, also
+  read from `SHADOWFAX_ADMIN_USERNAME` / `SHADOWFAX_ADMIN_PASSWORD`.
+
+### The published image does not ship a known password
+
+Run from source, Shadowfax still creates `admin/admin` when no password is set,
+with a loud warning — that is the right trade for development and tests. The
+image is different: anyone can run it, and many will run it exactly as the
+README says. A security tool that comes up with a password everybody knows is
+the finding it exists to raise.
+
+So the Dockerfile sets `SHADOWFAX_GENERATE_ADMIN_PASSWORD=1`, and an image
+started without `SHADOWFAX_ADMIN_PASSWORD` generates a random password on its
+first start, prints it to the log once, and stores only its PBKDF2 hash:
+
+```
+  SHADOWFAX: created the first admin account with a generated password
+    username: admin
+    password: 3vX…
+```
+
+Every CI run now proves it on a fresh container: `admin/admin` is refused with
+a 401, and the password from the log signs in. `docker compose up`, which is
+for local use, still sets its credentials explicitly and is unaffected.
+
+### Fixed
+
+- **An empty `SHADOWFAX_ADMIN_PASSWORD` created an admin whose password was the
+  empty string.** `SHADOWFAX_ADMIN_PASSWORD=` with nothing after it is a
+  mistake, and honouring it literally was the worst possible reading. It now
+  counts as unset.
+- **The known-password warning followed where the password came from, not what
+  it was.** `docker-compose.yml` sets `admin/admin` explicitly, so it counted as
+  "from the environment" and printed nothing — while the comment beside it
+  promised a warning. The warning now fires whenever the password *is* `admin`.
+- **`demo.py` told people to "pass --password"**, and had no such flag. Since
+  v0.12. It has one now, which the generated password makes necessary.
+
+### Tests
+
+**446** API checks (from 424). New: the four bootstrap modes (from source,
+generated, from the environment, empty), that two fresh images never share a
+password, that the environment's password is never printed, that the three
+version strings agree, and the shape of the workflow itself — a release
+triggers it, a push cannot publish, publishing needs both test jobs, only the
+publish job can write packages, the version check runs before the push, and
+the pulled-back image is checked by digest. The workflow checks read
+`ci.yml` with a YAML parser (`pyyaml`, added to `requirements-dev.txt`); in a
+copy without `.github/` they print `SKIP` rather than passing silently.
+
+The workflow was linted with `actionlint` and `shellcheck` (clean). The publish
+job cannot run anywhere but GitHub, so its shell was exercised locally against a
+running Shadowfax with `docker` swapped out, and its first real run is the
+v0.17.0 release itself.
+
 ## Version 0.16.0
 
 Every detector before this one is an inference. Lateral movement is "more

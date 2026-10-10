@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -63,8 +64,11 @@ CYAN = "\033[36m"
 
 class Demo:
     def __init__(self, url: str, speed: float, colour: bool,
-                 assert_expectations: bool = False):
+                 assert_expectations: bool = False,
+                 username: str = "admin", password: str = "admin"):
         self.url = url.rstrip("/")
+        self.username = username
+        self.password = password
         self.speed = speed
         self.colour = colour
         self.token: str | None = None
@@ -174,11 +178,12 @@ class Demo:
                       DIM))
 
         status, body = self.call("POST", "/auth/login", {
-            "username": "admin", "password": "admin"}, token=None)
+            "username": self.username, "password": self.password}, token=None)
         if status != 200:
             print(f"\ncould not sign in ({status}): {body.get('detail')}")
-            print("Is Shadowfax running, and is the admin password still the "
-                  "default? Set SHADOWFAX_ADMIN_PASSWORD and pass --password.")
+            print("Is Shadowfax running, and are these its admin credentials? "
+                  "The published image generates a password on first start and "
+                  "prints it in `docker logs`; pass it with --password.")
             return 1
         self.token = body["token"]
 
@@ -484,6 +489,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fast", action="store_true",
                         help="no pauses at all — for a terminal-only check")
     parser.add_argument("--no-colour", action="store_true", help="plain output")
+    # The message on a failed sign-in had told people to "pass --password" since
+    # v0.12, and there was no such flag. With the published image generating
+    # its admin password (v0.17), there now has to be.
+    parser.add_argument("--username",
+                        default=os.environ.get("SHADOWFAX_ADMIN_USERNAME") or "admin",
+                        help="admin username (default $SHADOWFAX_ADMIN_USERNAME, else admin)")
+    parser.add_argument("--password",
+                        default=os.environ.get("SHADOWFAX_ADMIN_PASSWORD") or "admin",
+                        help="admin password (default $SHADOWFAX_ADMIN_PASSWORD, else admin)")
     parser.add_argument("--assert", dest="assert_expectations", action="store_true",
                         help="fail with a non-zero exit when a step does not "
                              "raise what it said it would — turns the replay "
@@ -492,7 +506,8 @@ def main(argv: list[str] | None = None) -> int:
 
     demo = Demo(args.url, 0.0 if args.fast else args.speed,
                 not args.no_colour and sys.stdout.isatty(),
-                assert_expectations=args.assert_expectations)
+                assert_expectations=args.assert_expectations,
+                username=args.username, password=args.password)
     try:
         return demo.run()
     except KeyboardInterrupt:

@@ -2,6 +2,12 @@
 #
 #   docker compose up --build
 #
+# This builds from the source in front of you. To run the published image
+# instead, with nothing to build (v0.17):
+#
+#   docker run -d -p 8000:8000 -v shadowfax-data:/data ghcr.io/jh-infosec/shadowfax
+#   docker logs <container>        # the generated admin password, shown once
+#
 # Then open http://localhost:8000 and sign in. To watch the engine work rather
 # than read about it:
 #
