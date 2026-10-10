@@ -1,6 +1,6 @@
-# Shadowfax CI (v0.13).
+# Shadowfax CI (v0.13; publishing from v0.17).
 #
-# Two jobs, answering two different questions.
+# Three jobs, answering three different questions.
 #
 #   checks     Does the engine behave? 300+ assertions in-process, plus a
 #              dashboard build, because a broken component is a broken product
@@ -12,8 +12,13 @@
 #              actually happen. A README that says `docker compose up` and a
 #              Dockerfile nobody builds is a promise with nothing behind it.
 #
+#   publish    Only when a GitHub release is published. Only after both jobs
+#              above have passed on that exact commit. Pushes the image to
+#              ghcr.io, then pulls back what was published and checks it -- the
+#              thing people will run, not the thing that was built.
+#
 # The second job is the one that earns its keep. The unit suite never leaves the
-# process; this exercises ingest, sixteen detectors, correlation, kill-chain
+# process; this exercises ingest, eighteen detectors, correlation, kill-chain
 # ordering, findings-envelope ingest, the sign-in throttle and the hash-chained
 # ledger, against a real server, in the image that ships.
 
@@ -24,6 +29,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Publishing a release on github.com (Releases -> Draft a new release) is what
+  # ships an image. Pushing to main never does.
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -46,7 +55,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install backend dependencies
+      - name: Install backend and test dependencies
+        # requirements-dev.txt pulls in requirements.txt and adds what only the
+        # suite needs. The container job deliberately installs neither: it tests
+        # the shipped image, whose dependencies are requirements.txt alone.
         run: pip install -r requirements-dev.txt
 
       - name: Run the test suite
@@ -133,11 +145,17 @@ jobs:
         run: python demo.py --fast --assert --no-colour
 
       - name: Check the dashboard in a real browser
+        # Building the dashboard proves it compiles, not that it works: Vite
+        # exits 0 on a page that renders nothing. These assertions are what a
+        # person checks at a glance -- that the alerts the engine found are on
+        # screen, that an ingested finding names its emitter, that the kill
+        # chain is drawn and the ledger badge reads verified. The replay above
+        # is what put the data there.
         run: |
           pip install playwright
           python -m playwright install --with-deps chromium
           python test_dashboard.py --url http://127.0.0.1:8000
-          
+
       - name: The CLI can gate on what it found
         # `check` exits non-zero WHEN ALERTS MATCH -- the inversion that lets an
         # agent harness fail its own build. The replay leaves criticals behind,
@@ -154,6 +172,168 @@ jobs:
           fi
           echo "check correctly exited non-zero on matching alerts"
 
+      - name: The image does not ship a known password
+        # v0.17: the image is published, so anyone can run it. Started without
+        # SHADOWFAX_ADMIN_PASSWORD it must refuse admin/admin and instead print
+        # a generated password that works. Checked on a second, fresh container
+        # -- the one above was given credentials on purpose.
+        run: |
+          docker run -d --name fresh -p 8001:8000 shadowfax:ci
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8001/healthz > /dev/null && break
+            sleep 2
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"admin","password":"admin"}' \
+            http://127.0.0.1:8001/auth/login)
+          echo "admin/admin on a fresh image -> ${code}"
+          test "${code}" = "401"
+          # Read from a file rather than a pipe: the runner uses pipefail, and a
+          # reader that stops early would fail the step on SIGPIPE.
+          docker logs fresh > fresh.log 2>&1
+          generated=$(awk '/^ *password: /{print $2; exit}' fresh.log)
+          test -n "${generated}" || { echo "no generated password in the log"; cat fresh.log; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"${generated}\"}" \
+            http://127.0.0.1:8001/auth/login)
+          echo "the generated password -> ${code}"
+          test "${code}" = "200"
+          docker rm -f fresh
+
       - name: Container log
         if: always()
         run: docker logs shadowfax
+
+  publish:
+    name: Publish the image to ghcr.io
+    # Releases only, and only what passed. `needs` means a red test suite or a
+    # failed replay on this commit stops the image here rather than on someone
+    # else's machine.
+    if: github.event_name == 'release'
+    needs: [checks, container]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The release tag matches the version the code reports
+        # A release called v0.17.0 must contain a Shadowfax that says 0.17.0 in
+        # every place it says anything: the API, the dashboard package and the
+        # changelog. Otherwise `docker pull :0.17.0` hands someone a different
+        # version wearing that number, and nothing downstream would notice.
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          want="${TAG#v}"
+          api=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' app.py)
+          dashboard=$(python3 -c "import json; print(json.load(open('frontend/package.json'))['version'])")
+          changelog=$(sed -n 's/^## Version //p' CHANGELOG.md | head -n1)
+          echo "tag ${TAG} | app.py ${api} | package.json ${dashboard} | CHANGELOG ${changelog}"
+          if [ "${api}" != "${want}" ] || [ "${dashboard}" != "${want}" ] || [ "${changelog}" != "${want}" ]; then
+            echo "::error::release ${TAG} does not match the version in the code"
+            exit 1
+          fi
+
+      - name: Name the image
+        # Image names must be lowercase, and the repository is "Shadowfax".
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/shadowfax" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out the tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # v0.17.0 -> :0.17.0, :0.17 and :latest. A release ticked "Set as a
+          # pre-release" on github.com gets its own tag and never :latest. All
+          # spelled out rather than left to defaults, so the tags a release
+          # produces can be read here instead of looked up.
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # A record of how the image was built and what is inside it, attached
+          # to the image itself, so "what is in this?" has an answer that does
+          # not depend on trusting whoever is asking.
+          provenance: mode=max
+          sbom: true
+
+      - name: Pull back what was published, and check it
+        # The image that matters is the one in the registry, not the one this
+        # runner happened to build. Pulled by digest, so it is exactly the
+        # artifact just pushed.
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          docker pull "${IMAGE}@${DIGEST}"
+          docker run -d --name published -p 8000:8000 "${IMAGE}@${DIGEST}"
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/healthz > /dev/null && break
+            sleep 2
+          done
+          reported=$(curl -fsS http://127.0.0.1:8000/healthz | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
+          echo "published image reports ${reported}"
+          test "${reported}" = "${TAG#v}"
+          test "$(docker exec published whoami)" != "root"
+          docker logs published > published.log 2>&1
+          grep -q "generated password" published.log
+          docker rm -f published
+
+      - name: Can a stranger pull it?
+        # Not a failure: the very first publish of a package is private until
+        # someone makes it public, and only the repository owner can. This says
+        # so plainly instead of leaving a README that tells people to pull an
+        # image they are not allowed to see.
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          docker logout ghcr.io
+          if docker pull "${IMAGE}:${TAG#v}" > /dev/null 2>&1; then
+            echo "public: anyone can pull ${IMAGE}:${TAG#v}"
+          else
+            echo "::warning::${IMAGE} is not publicly pullable yet. On github.com go to your profile -> Packages -> shadowfax -> Package settings -> Change visibility -> Public. This only needs doing once."
+          fi
+
+      - name: Summary
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Published ${IMAGE}:${TAG#v}"
+            echo
+            echo '```bash'
+            echo "docker run -d -p 8000:8000 -v shadowfax-data:/data ${IMAGE}:${TAG#v}"
+            echo '```'
+            echo
+            echo "Digest: \`${DIGEST}\`"
+            echo
+            echo "Tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
