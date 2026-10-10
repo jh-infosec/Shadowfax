@@ -111,8 +111,12 @@ def run(url: str, headed: bool) -> int:
         page.on("pageerror",
                 lambda e: console_errors.append(str(e).strip().splitlines()[0]))
 
+        # Every URL the page asks for, to check what it puts in them (v0.17.1).
+        requested: list[str] = []
+        page.on("request", lambda r: requested.append(r.url))
+
         try:
-            _run_checks(page, url)
+            _run_checks(page, url, requested)
         except Exception as exc:
             # A component that throws on mount takes the whole page with it, and
             # the first thing to notice is a selector that never appears. Report
@@ -142,7 +146,7 @@ def run(url: str, headed: bool) -> int:
     return 0
 
 
-def _run_checks(page, url: str) -> None:
+def _run_checks(page, url: str, requested: list[str]) -> None:
     page.goto(url, wait_until="networkidle")
 
     # -- sign-in ------------------------------------------------------------
@@ -157,6 +161,20 @@ def _run_checks(page, url: str) -> None:
     page.wait_for_selector(".ledger-badge", timeout=20000)
     page.wait_for_timeout(1500)
     check("signing in reaches the dashboard", page.locator(".topbar").count() == 1)
+
+    # -- the live stream, without the session token in a URL (v0.17.1) ------
+    # URLs are what access logs record, so the token must never be in one.
+    # Checked against everything the page requested, not just the stream:
+    # the claim is about the dashboard, not about one call site.
+    token = page.evaluate("() => localStorage.getItem('shadowfax_token')")
+    page.wait_for_selector(".conn-dot.live", timeout=10000)
+    streams = [u for u in requested if "/stream?" in u]
+    check("the live stream connects, using a single-use ticket",
+          bool(streams) and all("ticket=" in u for u in streams),
+          "; ".join(streams[:2]) or "no stream request seen")
+    check("no URL the dashboard requested carries the session token",
+          bool(token) and not any(token in u for u in requested),
+          "no token in storage to compare against" if not token else "")
 
     # -- the alert table actually has alerts in it --------------------------
     # The assertion that matters. A table element exists on an empty dashboard

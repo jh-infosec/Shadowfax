@@ -1,5 +1,104 @@
 # Changelog
 
+## Version 0.17.1
+
+Two findings from an outside review of v0.17.0, both confirmed and both fixed.
+Each mattered most once Shadowfax is reachable by other people or systems —
+which publishing an image in v0.17.0 made much more likely.
+
+### Fixed: the session token rode in the live stream's URL
+
+The dashboard's live updates use Server-Sent Events, and the browser's
+`EventSource` cannot set an `Authorization` header. So the dashboard opened
+`GET /stream?token=<session token>` — and a URL is exactly what every web
+server, reverse proxy and load balancer writes to its access log. Shadowfax's
+own server log showed it:
+
+```
+"GET /stream?token=aYW3_Fvz…(the whole session token)… HTTP/1.1" 200 OK
+```
+
+That token is a twelve-hour session. Anyone who could read the logs could act
+as that analyst.
+
+Now the dashboard asks for a **stream ticket** first — `POST /stream/ticket`,
+with the session token in a header where it belongs — and opens the stream with
+`?ticket=` instead. A ticket (`tickets.py`):
+
+- is **single-use**: redeeming it removes it, so a ticket copied out of a log
+  has already been spent by the connection that put it there;
+- **expires after 30 seconds** if unused;
+- is **bound to the session that asked for it**;
+- is held only as a SHA-256 fingerprint, like sessions and API keys;
+- is capped at five outstanding per session (oldest evicted), so minting them
+  in a loop costs bounded memory.
+
+**`?token=` is refused**, with a 401 that says what to do instead, rather than
+kept working for compatibility: every request that still used it would be one
+more session token in a log. Non-browser clients may still send
+`Authorization: Bearer`. A client still sending `?token=` will, of course, have
+that URL logged by whatever it passes through — the refusal stops Shadowfax
+honouring it, and the dashboard no longer sends it.
+
+**Signing out now ends the stream.** Previously a stream, once open, lived on
+after its session was revoked. It now re-checks the session at every keepalive
+and closes with a `goodbye` event when the session is gone.
+
+The dashboard reconnects by itself rather than leaving it to `EventSource`,
+whose built-in retry would reuse the same — already spent — ticket. Each attempt
+asks for a fresh one, backing off to 30 seconds, and re-queries on reconnect
+because changes made while it was disconnected were never signalled.
+
+### Fixed: nothing bounded what one client could make Shadowfax parse
+
+Every ingest request is parsed, written to SQLite, chained into the ledger and
+followed by a rescan of each actor it touched. Nothing limited any of it: one
+authenticated client — a misconfigured harness, a compromised API key — could
+post a million events, or one event with a hundred megabytes of metadata.
+Three layers now (`limits.py`), each catching what the one before cannot:
+
+| Layer | Default | Setting | Refusal |
+|---|---|---|---|
+| Whole request body | 2 MiB | `SHADOWFAX_MAX_BODY_BYTES` | 413 |
+| Events per request, findings per envelope | 1,000 | `SHADOWFAX_MAX_EVENTS_PER_REQUEST` | 413 |
+| Metadata per event | 16 KiB | `SHADOWFAX_MAX_METADATA_BYTES` | 422 |
+| Identifiers (`actor_id` 256, `target` 2,048, …) | fixed | — | 422 |
+
+The body limit is the one that protects memory, because the others can only run
+after the JSON has been parsed — and parsing a gigabyte is the attack. It is
+enforced by ASGI middleware *before* anything reads the body: a declared
+`Content-Length` over the limit is refused without reading a byte, and a
+chunked body with no declared length is counted as it arrives and cut off the
+moment it goes over. The middleware sits inside CORS, so a browser can read the
+413 rather than seeing a mysterious network error.
+
+Every refusal names the limit and the setting, so a well-behaved client can
+split its batch and resend. A nonsensical setting (`0`, `-5`, `lots`) stops
+Shadowfax at startup rather than being quietly ignored. Empty actor ids, which
+were accepted before, are refused.
+
+**What this does not do is rate-limit.** A client can still send many small,
+valid requests, and the event store grows with each — by design, since an
+append-only evidence log that dropped events under load would be a worse
+problem. Bounding volume over time belongs at whatever proxy exposes Shadowfax
+to other systems.
+
+### Tests
+
+**484** API checks (from 446) and **21** dashboard checks (from 19). New:
+tickets as a pure object (single use, expiry, fingerprint-only storage, the
+per-session cap and that it leaves other sessions alone); the endpoints (who may
+ask, `?token=` refused with directions, a fresh ticket admitting and a spent one
+not); signing out ending an open stream; every limit at its boundary (1,000
+events in, 1,001 out; 256-character id in, 257 out); the body limit with and
+without a declared length; CORS headers on the 413; and nonsensical settings
+refused. The new browser check opens the dashboard and confirms the live stream
+connects while no URL the page requests contains the session token.
+
+Verified against a running server as well: the access log now records only
+spent tickets, a reused ticket gets a 401, and signing out closed an open
+stream with `goodbye` at its next keepalive.
+
 ## Version 0.17.0
 
 Shadowfax could be built and run, but only by someone willing to clone the

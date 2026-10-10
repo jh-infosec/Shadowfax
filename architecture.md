@@ -128,6 +128,16 @@ and `/stats` with its own filters. The stream carries only the signal, never
 alert payloads, so per-client filtering stays server-side and one broadcast
 serves every viewer.
 
+The stream is opened with a single-use ticket, never the session token
+(v0.17.1). `EventSource` cannot send an `Authorization` header, so whatever
+authorises the stream has to be in its URL, and URLs are what access logs keep.
+`POST /stream/ticket` (bearer token in the header) returns a ticket that is
+redeemed -- and removed -- by `GET /stream?ticket=`, expires after 30 seconds,
+and is bound to the session that asked for it. The stream re-checks that session
+at every keepalive and closes with a `goodbye` event once it is gone. The
+dashboard reconnects itself, with a fresh ticket each time, because
+`EventSource`'s own retry would replay a spent one. `?token=` is refused.
+
 This replaced the v0.2 five-second poll. It was a deliberate sequence: polling
 first (no backend, no connection lifecycle) until per-alert state and multiple
 analysts made sub-second, shared updates worth the stream.
@@ -353,6 +363,23 @@ than by a rule somebody has to remember.
 under the `external` actor type, so a file called `admin` cannot become the user
 `admin`; a `kind: actor` subject lands on that actor's real timeline and
 inherits its existing actor type, passed in as data to keep the function pure.
+
+#### tickets.py
+
+Single-use stream tickets (v0.17.1): `TicketBook.issue(user_id, session_fp)`
+and `redeem(ticket)`, which returns the `Grant` exactly once. 30-second expiry,
+fingerprint-only storage, at most five outstanding per session (oldest evicted).
+In memory, in the process that serves the stream -- single-process, like
+`bus.py`. The clock is injectable, so expiry is tested without sleeping.
+
+#### limits.py
+
+Request size limits (v0.17.1): `Limits.from_env()` (refusing nonsensical
+values at startup), `BodySizeLimit` ASGI middleware, `FIELD_MAX_LENGTH` for the
+event model, and `metadata_size()`. `BodyTooLarge` subclasses `HTTPException`
+because FastAPI turns any other exception raised while reading a body into a
+generic 400. The middleware is added before CORS so that CORS wraps it and a
+browser can read the 413.
 
 #### throttle.py
 
@@ -804,6 +831,15 @@ PBKDF2 rather than bcrypt/argon2, there is no rate limiting or account
 lockout, tokens are bearer tokens without rotation, and the store is
 single-writer SQLite. Harden these before running it anywhere shared.
 
+### Request limits, but no rate limit
+
+`limits.py` bounds each request (v0.17.1): the whole body by ASGI middleware
+before it is parsed -- a declared `Content-Length` refused unread, a chunked
+body counted and cut off -- then events or findings per request, metadata per
+event, and identifier lengths. Nothing bounds how *many* requests a client
+sends, and the event store grows with each; an append-only evidence log should
+not shed events under load. Volume over time belongs at the proxy in front.
+
 ### Single-writer database
 
 SQLite with the default configuration. Concurrent writers are not supported.
@@ -906,6 +942,7 @@ attack_registry.json    correlate.py            assistant.py
 seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
 throttle.py             envelope.py             permissions.py
+tickets.py              limits.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml

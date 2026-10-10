@@ -93,11 +93,14 @@ export function getMe() {
   return request("/auth/me");
 }
 
-// URL for the Server-Sent Events stream. The browser EventSource can't set
-// headers, so the token rides as a query parameter.
-export function streamUrl() {
-  const qs = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
-  return `${API_BASE}/stream${qs}`;
+// URL for the Server-Sent Events stream (v0.17.1). The browser EventSource
+// can't set headers, so something has to go in the URL -- and URLs are what
+// access logs record. Not the session token, then: a single-use ticket that
+// expires in 30 seconds, asked for with the token in a header. Each connection
+// needs a fresh one, so this is called on every (re)connect.
+export async function streamUrl() {
+  const { ticket } = await request("/stream/ticket", { method: "POST" });
+  return `${API_BASE}/stream?ticket=${encodeURIComponent(ticket)}`;
 }
 
 export function getStats() {

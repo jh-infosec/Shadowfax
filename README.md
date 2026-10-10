@@ -219,6 +219,7 @@ Planned
 ### v0.17
 
 - Published image on ghcr.io, released from CI — shipped (v0.17.0)
+- No session tokens in URLs; request size limits — shipped (v0.17.1)
 
 ### v1.0
 
@@ -353,13 +354,14 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Nineteen checks, each one an assertion a person makes when they glance at the
+Twenty-one checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
 correlated kill chain is *drawn* with its tactics and its escalation, that
-filtering actually filters, and that an agent's declared permissions are shown
-beside the breaches of them.
+filtering actually filters, that an agent's declared permissions are shown
+beside the breaches of them, and that the live stream connects without the
+session token appearing in any URL the page requests.
 
 They refuse to run against an empty instance, because a test that passes on a
 dashboard rendering nothing is worse than no test. `--headed` shows the browser.
@@ -858,9 +860,19 @@ is throttled and locks out, and costs the same whether or not the username
 exists — see The front door above.
 
 On a fresh database the first admin comes from `SHADOWFAX_ADMIN_USERNAME` and
-`SHADOWFAX_ADMIN_PASSWORD`. If those are unset, a default `admin` / `admin` is
-created and a warning is printed — fine for local development, but set real
-credentials and change the password before exposing the API. Hashing is
+`SHADOWFAX_ADMIN_PASSWORD`. If those are unset, running from source creates
+`admin` / `admin` with a warning, and the published image generates a random
+password and prints it once — set real credentials before exposing the API.
+
+The session token never appears in a URL. The dashboard's live stream is opened
+with a single-use ticket that expires in 30 seconds (`POST /stream/ticket`),
+because a URL is what access logs record; signing out ends any stream the
+session opened. Requests are bounded before they are parsed — 2 MiB per body,
+1,000 events or findings per request, 16 KiB of metadata per event, with fixed
+limits on identifiers — and each refusal names the setting that controls it
+(`SHADOWFAX_MAX_BODY_BYTES`, `SHADOWFAX_MAX_EVENTS_PER_REQUEST`,
+`SHADOWFAX_MAX_METADATA_BYTES`). Shadowfax does not rate-limit ingest; put that
+in the proxy that exposes it. Hashing is
 stdlib PBKDF2 rather than bcrypt/argon2; that, and the still-single-writer
 SQLite backend, are the reasons Shadowfax remains a local-development tool.
 

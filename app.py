@@ -33,7 +33,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 import assistant
 import attack
@@ -45,18 +45,31 @@ import detectors
 import digest as digest_mod
 import envelope
 import ledger
+import limits
 import permissions
 import throttle
+import tickets
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.17.0"
+VERSION = "0.17.1"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
 # than the detection policy: this is enforcement of Shadowfax's own front door,
 # and the policy governs detection. See throttle.py for the reasoning.
 LOGIN_THROTTLE = throttle.Settings.from_env()
+
+# Request size limits (v0.17.1): the whole body, the batch, and each field. Read
+# from the environment like the throttle; see limits.py.
+LIMITS = limits.Limits.from_env()
+
+# Single-use tickets for the live stream (v0.17.1), so a session token never
+# has to appear in a URL. See tickets.py.
+STREAM_TICKETS = tickets.TicketBook()
+# How often an idle stream sends a keepalive -- and re-checks that the session
+# which opened it is still signed in.
+STREAM_KEEPALIVE_SECONDS = 15.0
 
 # Recorded sign-in attempts are operational state for the throttle, not
 # evidence, so they are pruned. The ledger keeps what matters.
@@ -195,6 +208,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Added before CORS so that CORS wraps it: a 413 the browser cannot read, for
+# want of an Access-Control-Allow-Origin header, would look like a network error.
+app.add_middleware(limits.BodySizeLimit, limit=lambda: LIMITS.max_body_bytes)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
@@ -205,14 +222,28 @@ app.add_middleware(
 
 # Request models
 
+_MAX = limits.FIELD_MAX_LENGTH
+
+
 class EventRequest(BaseModel):
-    timestamp: str
-    actor_id: str
-    actor_type: str
-    task: str | None = None
-    event_type: str
-    target: str
+    # Bounded (v0.17.1): an identifier long enough to be storage is not an
+    # identifier. The whole body is capped before this ever parses.
+    timestamp: str = Field(max_length=_MAX["timestamp"])
+    actor_id: str = Field(min_length=1, max_length=_MAX["actor_id"])
+    actor_type: str = Field(min_length=1, max_length=_MAX["actor_type"])
+    task: str | None = Field(None, max_length=_MAX["task"])
+    event_type: str = Field(min_length=1, max_length=_MAX["event_type"])
+    target: str = Field(max_length=_MAX["target"])
     metadata: dict[str, Any] = {}
+
+    @field_validator("metadata")
+    @classmethod
+    def _metadata_is_bounded(cls, value: dict[str, Any]) -> dict[str, Any]:
+        size = limits.metadata_size(value)
+        if size > LIMITS.max_metadata_bytes:
+            raise ValueError(f"metadata is {size:,} bytes; the limit is "
+                             f"{LIMITS.max_metadata_bytes:,} (SHADOWFAX_MAX_METADATA_BYTES)")
+        return value
 
 
 class AlertStateUpdate(BaseModel):
@@ -293,18 +324,6 @@ def allow_ingest(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any
     if auth.role_at_least(identity.get("role"), "analyst"):
         return identity
     raise HTTPException(403, "ingest requires a service API key or an analyst (or higher) user")
-
-
-def _user_from_token(token: str | None) -> dict[str, Any] | None:
-    """Resolve a session token to a user, for the SSE stream where the browser
-    EventSource cannot send an Authorization header."""
-    if not token:
-        return None
-    with db.get_conn() as conn:
-        user = db.get_session_user(conn, auth.token_fingerprint(token))
-    if user is None:
-        return None
-    return {"kind": "user", "id": user["id"], "username": user["username"], "role": user["role"]}
 
 
 # Internal helpers
@@ -391,6 +410,12 @@ def ingest_events(events: list[EventRequest], identity: dict = Depends(allow_ing
     """Ingest one or more events and refresh alerts for the affected actors."""
     if not events:
         raise HTTPException(400, "no events provided")
+    if len(events) > LIMITS.max_events_per_request:
+        # Each affected actor is rescanned, so the batch bounds the work one
+        # request can cause. 413 with the number, so a client can split.
+        raise HTTPException(413, f"{len(events):,} events in one request; the limit is "
+                                 f"{LIMITS.max_events_per_request:,} "
+                                 f"(SHADOWFAX_MAX_EVENTS_PER_REQUEST) -- split the batch")
     with db.get_conn() as conn:
         affected_actors: set[str] = set()
         for ev in events:
@@ -458,6 +483,11 @@ def ingest_findings(doc: dict[str, Any], identity: dict = Depends(allow_ingest))
     Writing alert rows directly would have been fewer lines and would have left
     rows that quietly disappeared at the next rescan of that actor.
     """
+    findings = doc.get("findings")
+    if isinstance(findings, list) and len(findings) > LIMITS.max_events_per_request:
+        raise HTTPException(413, f"{len(findings):,} findings in one envelope; the limit is "
+                                 f"{LIMITS.max_events_per_request:,} "
+                                 f"(SHADOWFAX_MAX_EVENTS_PER_REQUEST) -- split the envelope")
     try:
         envelope.validate(doc, detectors.NATIVE_CATEGORIES)
     except envelope.EnvelopeError as err:
@@ -589,19 +619,53 @@ def stats(identity: dict = Depends(require_role("viewer"))):
 
 # Live stream
 
+@app.post("/stream/ticket")
+def stream_ticket(authorization: str | None = Header(None),
+                  identity: dict = Depends(require_user)):
+    """A single-use, 30-second ticket for opening the live stream (v0.17.1).
+
+    Asked for with the bearer token in a header, where it belongs. The ticket is
+    what then goes in the stream's URL -- because the browser's EventSource
+    cannot set headers -- and a URL is what access logs record. A logged ticket
+    has already been spent by the connection that logged it. See tickets.py.
+    """
+    token = authorization[7:].strip()  # require_user guarantees a bearer session
+    ticket = STREAM_TICKETS.issue(identity["id"], auth.token_fingerprint(token))
+    return {"ticket": ticket, "expires_in": int(tickets.TTL_SECONDS)}
+
+
+def _session_alive(session_fp: str) -> bool:
+    with db.get_conn() as conn:
+        return db.get_session_user(conn, session_fp) is not None
+
+
 @app.get("/stream")
-async def stream(token: str | None = None, authorization: str | None = Header(None)):
+async def stream(ticket: str | None = None, token: str | None = None,
+                 authorization: str | None = Header(None)):
     """Server-Sent Events: a `change` event is pushed whenever alerts change,
     replacing the dashboard's poll loop.
 
-    Auth is by `?token=<bearer>` because the browser EventSource API cannot set
-    an Authorization header; a Bearer header is accepted too, for non-browser
-    clients. Any signed-in user may stream; service API keys may not.
+    A browser opens it with `?ticket=` from `POST /stream/ticket`. Other clients
+    may send `Authorization: Bearer` instead. Any signed-in user may stream;
+    service API keys may not.
+
+    `?token=` -- the session token itself in the URL -- was how the dashboard
+    connected until v0.17.1. It is refused outright, with a message saying
+    what to do instead, rather than kept working "for compatibility": every
+    request that still used it would be another session token in a log.
     """
-    tok = token
-    if not tok and authorization and authorization.lower().startswith("bearer "):
-        tok = authorization[7:].strip()
-    if _user_from_token(tok) is None:
+    if token is not None:
+        raise HTTPException(401, "session tokens are not accepted in URLs, where "
+                                 "access logs record them; get a single-use ticket "
+                                 "from POST /stream/ticket and pass ?ticket=")
+    session_fp = None
+    if ticket is not None:
+        grant = STREAM_TICKETS.redeem(ticket)
+        if grant is not None:
+            session_fp = grant.session_fp
+    elif authorization and authorization.lower().startswith("bearer "):
+        session_fp = auth.token_fingerprint(authorization[7:].strip())
+    if session_fp is None or not await asyncio.to_thread(_session_alive, session_fp):
         raise HTTPException(status_code=401, detail="authentication required")
 
     queue = bus.subscribe()
@@ -612,9 +676,16 @@ async def stream(token: str | None = None, authorization: str | None = Header(No
             yield "event: hello\ndata: {}\n\n"
             while True:
                 try:
-                    message = await asyncio.wait_for(queue.get(), timeout=15)
+                    message = await asyncio.wait_for(queue.get(),
+                                                     timeout=STREAM_KEEPALIVE_SECONDS)
                     yield f"event: change\ndata: {json.dumps(message)}\n\n"
                 except asyncio.TimeoutError:
+                    # The stream outlives the moment it was authorised, so it
+                    # re-checks: sign out (or let the session expire) and every
+                    # stream that session opened ends at its next keepalive.
+                    if not await asyncio.to_thread(_session_alive, session_fp):
+                        yield "event: goodbye\ndata: {\"reason\": \"session ended\"}\n\n"
+                        return
                     # A comment line keeps proxies and the browser from timing
                     # the idle connection out.
                     yield ": keepalive\n\n"

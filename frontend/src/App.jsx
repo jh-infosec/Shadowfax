@@ -138,20 +138,61 @@ export default function App() {
   // Live updates over Server-Sent Events, replacing the old poll loop. The
   // stream carries a lightweight "change" signal; the dashboard re-queries with
   // its own filters, so per-client filtering stays server-side.
+  //
+  // Reconnection is done here rather than left to EventSource (v0.17.1): its
+  // built-in retry would reuse the same URL, and the ticket in that URL is
+  // single-use. Each attempt asks for a fresh ticket, backing off to 30s.
   useEffect(() => {
     if (!user) return;
     let debounce;
+    let retry;
+    let es = null;
+    let stopped = false;
+    let delay = 1000;
+    let opened = false;
     const onChange = () => {
       clearTimeout(debounce);
       debounce = setTimeout(() => refreshRef.current(), STREAM_REFRESH_DEBOUNCE_MS);
     };
-    const es = new EventSource(api.streamUrl());
-    es.onopen = () => setConnected(true);
-    es.addEventListener("change", onChange);
-    es.onerror = () => setConnected(false); // EventSource auto-reconnects
+    const schedule = () => {
+      if (stopped) return;
+      retry = setTimeout(connect, delay);
+      delay = Math.min(delay * 2, 30000);
+    };
+    const connect = async () => {
+      let url;
+      try {
+        url = await api.streamUrl();
+      } catch (err) {
+        setConnected(false);
+        // A 401 means the session is gone; request() has already signed out.
+        if (err.status !== 401) schedule();
+        return;
+      }
+      if (stopped) return;
+      es = new EventSource(url);
+      es.onopen = () => {
+        setConnected(true);
+        delay = 1000;
+        // Anything that changed while disconnected was never signalled.
+        if (opened) refreshRef.current();
+        opened = true;
+      };
+      es.addEventListener("change", onChange);
+      const drop = () => {
+        setConnected(false);
+        es.close();
+        schedule();
+      };
+      es.onerror = drop;
+      es.addEventListener("goodbye", drop); // the session ended server-side
+    };
+    connect();
     return () => {
+      stopped = true;
       clearTimeout(debounce);
-      es.close();
+      clearTimeout(retry);
+      if (es) es.close();
     };
   }, [user]);
 

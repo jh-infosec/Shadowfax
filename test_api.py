@@ -1746,6 +1746,180 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== stream tickets and request limits (v0.17.1) ==")
+import asyncio as _aio
+import tickets as tickets_mod
+import limits as limits_mod
+
+# Two findings from an outside review of v0.17.0. The session token rode in the
+# live stream's URL, which access logs record; and nothing bounded what one
+# authenticated client could ask Shadowfax to parse, store and rescan.
+
+# -- tickets, as a pure object ---------------------------------------------------
+_now = [1000.0]
+_book = tickets_mod.TicketBook(ttl=30, per_session=5, clock=lambda: _now[0])
+_t = _book.issue(1, "session-a")
+_g = _book.redeem(_t)
+check("a ticket redeems to the user and session that asked for it",
+      _g is not None and _g.user_id == 1 and _g.session_fp == "session-a")
+check("a ticket works exactly once", _book.redeem(_t) is None)
+_t = _book.issue(1, "session-a")
+_now[0] += 31
+check("an unredeemed ticket expires after 30 seconds", _book.redeem(_t) is None)
+check("unknown and empty tickets redeem to nothing",
+      _book.redeem("not-a-ticket") is None and _book.redeem("") is None and _book.redeem(None) is None)
+_t = _book.issue(1, "session-a")
+check("only a fingerprint is held, never the ticket itself",
+      all(_t not in k for k in _book._tickets))
+_book.redeem(_t)
+_many = [_book.issue(1, "session-a") for _ in range(8)]
+_other = _book.issue(2, "session-b")
+check("one session cannot hoard tickets: the oldest are evicted past five",
+      _book.outstanding() == 6 and _book.redeem(_many[0]) is None)
+check("the newest ticket is always the one that survives", _book.redeem(_many[-1]) is not None)
+check("another session's ticket is untouched by that eviction", _book.redeem(_other) is not None)
+
+# -- the endpoints ----------------------------------------------------------------
+_tok = client.post("/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+_r = client.post("/stream/ticket", headers={"Authorization": f"Bearer {_tok}"})
+check("a signed-in user can ask for a stream ticket",
+      _r.status_code == 200 and _r.json()["ticket"] and _r.json()["expires_in"] == 30)
+check("asking needs a credential", anon.post("/stream/ticket").status_code == 401)
+_svc = client.post("/api-keys", json={"label": "ticket-probe"}).json()["api_key"]
+check("an ingest API key cannot open the dashboard's stream",
+      TestClient(app).post("/stream/ticket", headers={"X-API-Key": _svc}).status_code == 403)
+
+_r = TestClient(app).get(f"/stream?token={_tok}")
+check("a real session token in the URL is refused", _r.status_code == 401)
+check("and the refusal says what to do instead", "POST /stream/ticket" in _r.json()["detail"])
+check("a made-up ticket is refused", TestClient(app).get("/stream?ticket=nope").status_code == 401)
+
+def _open_stream(**kw):
+    """Call the stream endpoint directly: the sync TestClient cannot hold an
+    open-ended SSE response, but the handler's admission decision is what
+    matters here."""
+    async def go():
+        try:
+            return await app_module.stream(ticket=kw.get("ticket"), token=None,
+                                           authorization=kw.get("authorization"))
+        except app_module.HTTPException as exc:
+            return exc
+    return _aio.run(go())
+
+_ticket = client.post("/stream/ticket", headers={"Authorization": f"Bearer {_tok}"}).json()["ticket"]
+_first = _open_stream(ticket=_ticket)
+check("a fresh ticket opens the stream", hasattr(_first, "body_iterator"))
+_second = _open_stream(ticket=_ticket)
+check("the same ticket a second time does not",
+      getattr(_second, "status_code", None) == 401)
+check("a non-browser client may still use an Authorization header",
+      hasattr(_open_stream(authorization=f"Bearer {_tok}"), "body_iterator"))
+
+# A stream outlives the moment it was authorised, so it must notice when the
+# session behind it ends.
+_saved_keepalive = app_module.STREAM_KEEPALIVE_SECONDS
+app_module.STREAM_KEEPALIVE_SECONDS = 0.05
+_doomed = client.post("/auth/login", json={"username": "admin", "password": "admin"}).json()["token"]
+_dt = client.post("/stream/ticket", headers={"Authorization": f"Bearer {_doomed}"}).json()["ticket"]
+
+async def _watch_logout():
+    resp = await app_module.stream(ticket=_dt, token=None, authorization=None)
+    it = resp.body_iterator
+    seen = [await it.__anext__(), await it.__anext__()]       # hello, keepalive
+    with db_module.get_conn() as c:                          # sign out
+        db_module.delete_session(c, auth.token_fingerprint(_doomed))
+        c.commit()
+    seen.append(await _aio.wait_for(it.__anext__(), timeout=2))
+    try:
+        await _aio.wait_for(it.__anext__(), timeout=2)
+        ended = False
+    except StopAsyncIteration:
+        ended = True
+    return seen, ended
+
+import auth
+_seen, _ended = _aio.run(_watch_logout())
+app_module.STREAM_KEEPALIVE_SECONDS = _saved_keepalive
+check("while the session lives, an idle stream just keeps alive",
+      _seen[0].startswith("event: hello") and _seen[1].startswith(": keepalive"))
+check("signing out ends every stream that session opened",
+      _seen[2].startswith("event: goodbye") and _ended)
+
+_api_js = open("frontend/src/api.js", encoding="utf-8").read()
+check("the dashboard no longer writes the session token into the stream URL",
+      "?token=" not in _api_js and "/stream/ticket" in _api_js)
+
+# -- request limits -----------------------------------------------------------------
+_saved_limits = app_module.LIMITS
+
+def _ev(i=0, **over):
+    e = {"timestamp": f"2026-10-10T10:{i // 60 % 60:02d}:{i % 60:02d}", "actor_id": "limit-probe",
+         "actor_type": "service_account", "event_type": "file_access", "target": "x",
+         "metadata": {}}
+    e.update(over)
+    return e
+
+_r = client.post("/events", json=[_ev(i) for i in range(1000)])
+check("a batch of exactly the limit (1,000 events) is accepted", _r.status_code == 200)
+_r = client.post("/events", json=[_ev(i) for i in range(1001)])
+check("one more is refused with a 413", _r.status_code == 413)
+check("which names the limit and the setting", "1,000" in _r.json()["detail"]
+      and "SHADOWFAX_MAX_EVENTS_PER_REQUEST" in _r.json()["detail"])
+
+check("an actor id of 256 characters is fine",
+      client.post("/events", json=[_ev(actor_id="a" * 256)]).status_code == 200)
+check("257 is not", client.post("/events", json=[_ev(actor_id="a" * 257)]).status_code == 422)
+check("nor is an empty one", client.post("/events", json=[_ev(actor_id="")]).status_code == 422)
+check("a 2 KB target is fine, a 3 KB one is not",
+      client.post("/events", json=[_ev(target="t" * 2048)]).status_code == 200
+      and client.post("/events", json=[_ev(target="t" * 3000)]).status_code == 422)
+_r = client.post("/events", json=[_ev(metadata={"blob": "x" * 20000})])
+check("metadata over 16 KB is refused, and says so",
+      _r.status_code == 422 and "SHADOWFAX_MAX_METADATA_BYTES" in json.dumps(_r.json()))
+check("metadata under it is fine",
+      client.post("/events", json=[_ev(metadata={"blob": "x" * 10000})]).status_code == 200)
+
+app_module.LIMITS = limits_mod.Limits(max_body_bytes=4000, max_events_per_request=3,
+                                      max_metadata_bytes=16 * 1024)
+_big = json.dumps([_ev(metadata={"blob": "x" * 5000})]).encode()
+_r = client.post("/events", content=_big, headers={"Content-Type": "application/json"})
+check("a body over the limit is refused before it is parsed (Content-Length)",
+      _r.status_code == 413 and "SHADOWFAX_MAX_BODY_BYTES" in _r.json()["detail"])
+
+def _chunks():
+    for i in range(0, len(_big), 1000):
+        yield _big[i:i + 1000]
+_r = client.post("/events", content=_chunks(), headers={"Content-Type": "application/json"})
+check("and so is one sent in chunks, with no length declared",
+      _r.status_code == 413)
+_r = client.post("/events", content=_big, headers={"Content-Type": "application/json",
+                                                   "Origin": "http://localhost:5173"})
+check("the 413 carries CORS headers, so the dashboard can read why",
+      _r.status_code == 413 and _r.headers.get("access-control-allow-origin") == "http://localhost:5173")
+_env = {"schema": "findings-envelope/1", "source": {"tool": "probe", "version": "1"},
+        "subject": {"kind": "host", "id": "10.0.0.9"},
+        "findings": [{"id": f"f{i}"} for i in range(4)]}
+_r = client.post("/findings", json=_env)
+check("an envelope with more findings than the batch limit is refused before validation",
+      _r.status_code == 413 and "split the envelope" in _r.json()["detail"])
+app_module.LIMITS = _saved_limits
+check("normal-sized requests still go through afterwards",
+      client.post("/events", json=[_ev()]).status_code == 200)
+
+for _bad in ("0", "-5", "lots"):
+    os.environ["SHADOWFAX_MAX_BODY_BYTES"] = _bad
+    try:
+        limits_mod.Limits.from_env()
+        _ok = False
+    except ValueError:
+        _ok = True
+    check(f"a nonsensical limit ({_bad!r}) is refused at startup, not silently ignored", _ok)
+del os.environ["SHADOWFAX_MAX_BODY_BYTES"]
+os.environ["SHADOWFAX_MAX_EVENTS_PER_REQUEST"] = "250"
+check("limits come from the environment",
+      limits_mod.Limits.from_env().max_events_per_request == 250)
+del os.environ["SHADOWFAX_MAX_EVENTS_PER_REQUEST"]
+
 print("\n== server-sent events ==")
 import bus
 
@@ -1753,7 +1927,7 @@ import bus
 # (The live hello/push path is exercised end-to-end in the browser, since the
 # sync TestClient cannot cleanly consume an open-ended SSE stream.)
 check("unauthenticated /stream is 401", anon.get("/stream").status_code == 401)
-check("/stream with a bad token is 401", TestClient(app).get("/stream?token=nope").status_code == 401)
+check("/stream with a bad ticket is 401", TestClient(app).get("/stream?ticket=nope").status_code == 401)
 
 # The bus fans a published change out to every subscriber.
 q = bus.subscribe()

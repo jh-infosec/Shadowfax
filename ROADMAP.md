@@ -316,6 +316,12 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 - [x] No known password in the published image: the first start generates the
       admin password and prints it once. Every CI run proves `admin/admin` is
       refused on a fresh container.
+- [x] From an outside review of v0.17.0: the live stream no longer carries the
+      session token in its URL (single-use, 30-second, session-bound tickets;
+      signing out ends the stream), and request bodies, batches, metadata and
+      identifiers are bounded before anything is parsed. Shipped in `v0.17.1`.
+- [ ] Rate-limit ingest per API key. Size limits bound one request; nothing yet
+      bounds how many a client sends.
 - [ ] Sign the image (cosign, keyless via GitHub's OIDC), so "this came from
       that repository's CI" can be verified, not just stated in a label.
 - [ ] A way to reset a lost admin password that does not mean discarding the
