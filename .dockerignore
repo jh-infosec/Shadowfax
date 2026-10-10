@@ -1,0 +1,31 @@
+# Keep the build context small and the image clean. Everything here is either
+# rebuilt inside the image, irrelevant to it, or must never be in it.
+
+# Rebuilt in the dashboard stage.
+frontend/node_modules
+frontend/dist
+
+# Local state. A database copied into an image would ship someone's events --
+# and, worse, would look like seed data to whoever ran it.
+*.db
+*.db-journal
+*.db-wal
+.env
+.env.*
+
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+
+.git
+.gitignore
+.github
+
+# Documentation is useful in the repository, not in a runtime image.
+*.md
+!README.md
+
+Dockerfile
+docker-compose.yml
+.dockerignore
