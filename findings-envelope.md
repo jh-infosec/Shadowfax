@@ -194,8 +194,13 @@ deterministic id rule for its own alerts earlier, in `v0.3`.
 Notes for an emitter, from building the consumer:
 
 - A finding's `key` becomes Shadowfax's alert category, so it may not collide
-  with one of Shadowfax's eighteen native detector categories. The rejection
+  with one of Shadowfax's twenty-one native detector categories. The rejection
   names the collision.
+- `source.tool` may not be `shadowfax`, in any capitalisation (v0.18). An alert
+  reading "reported by shadowfax" must not be something another tool can write.
+  Shadowfax's own export uses the name; its ingest refuses it.
+- Findings arrive only through `POST /findings`. Until v0.18 a raw event of type
+  `finding` posted to `POST /events` skipped every rule above; it is now refused.
 - The whole envelope is rejected on any structural error, with the field path at
   fault, rather than the valid findings being kept.
 - `id` is not re-derivable by the consumer: the formula includes a

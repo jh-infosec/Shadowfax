@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import attack
 import envelope
+import manifest
 import permissions
 
 TOOL_NAME = "shadowfax"
@@ -31,6 +32,8 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "impossible_travel", "lateral_movement", "off_hours_access",
     "out_of_scope_action", "permission_violation", "privilege_escalation",
     "rate_anomaly", "token_spend_anomaly", "undeclared_agent",
+    # v0.18: an agent's declared capabilities, against its profile and its calls.
+    "capability_drift", "excess_capability", "unlisted_tool_call",
 })
 
 
@@ -88,6 +91,15 @@ def _external_alert(event: dict, meta: dict) -> dict | None:
     source = meta.get("source") or {}
     if not isinstance(finding, dict) or not finding.get("key"):
         # A finding event without a finding is a storage anomaly, not an alert.
+        return None
+    # Defence in depth (v0.18). Ingest already refuses both of these, but until
+    # v0.18 POST /events accepted a raw event of type "finding" and skipped that
+    # validation entirely -- so a row claiming a native category, or claiming to
+    # come from Shadowfax, may already be in a database. The detector refuses to
+    # turn one into an alert, which also means a rescan retires any that exist.
+    if finding["key"] in NATIVE_CATEGORIES:
+        return None
+    if str(source.get("tool", "")).strip().lower() == TOOL_NAME:
         return None
 
     tool = source.get("tool", "unknown")
@@ -257,6 +269,23 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
     # forty identical alerts would bury the next, different one. The repeats
     # stay on the actor's timeline -- only the queue is spared them.
     breaches_reported: set[str] = set()
+    # Capability manifests (v0.18): the agent's latest declared tool set, the
+    # tools already reported as excess (once each), and the unlisted tools
+    # already reported against the current manifest.
+    current_manifest: tuple[str, ...] | None = None
+    excess_reported: set[str] = set()
+    unlisted_reported: set[str] = set()
+
+    def report_undeclared(e: dict) -> None:
+        nonlocal undeclared_reported
+        # Once per actor, on its first action: the finding is that nobody
+        # declared this agent, which is true of the agent, not of each event.
+        if (not undeclared_reported and grant.profile is None
+                and e["actor_type"] == permissions.GOVERNED_ACTOR_TYPE
+                and permissions.alerts_on_unprofiled(policy)):
+            undeclared_reported = True
+            alerts.append(_mk_alert(e, permissions.SEVERITY_UNDECLARED,
+                "undeclared_agent", permissions.undeclared_message(e["actor_id"])))
 
     for e in events:
         ts = datetime.fromisoformat(e["timestamp"])
@@ -278,6 +307,38 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 alerts.append(found)
             continue
 
+        # Capability manifests (v0.18). A manifest is a declaration, not an
+        # action, so like a finding it skips the behavioural heuristics below --
+        # an agent restarting forty times would otherwise trip rate_anomaly on
+        # its own paperwork.
+        if e["event_type"] == manifest.EVENT_TYPE:
+            tools = manifest.tools_of(e)
+            if tools is None:
+                continue
+            report_undeclared(e)
+            if grant.profile is not None:
+                excess = []
+                for tool in tools:
+                    status, severity = manifest.tool_status(tool, grant.profile)
+                    if severity and tool not in excess_reported:
+                        excess_reported.add(tool)
+                        excess.append((tool, status, severity))
+                if excess:
+                    worst = "high" if any(sev == "high" for _, _, sev in excess) else "medium"
+                    names = [f"{t} (denied)" if st == "denied" else t for t, st, _ in excess]
+                    alerts.append(_mk_alert(e, worst, "excess_capability",
+                        f"configured with {len(excess)} tool(s) its profile "
+                        f"'{grant.name}' does not grant: {manifest.listing(names)}"))
+            if current_manifest is not None:
+                added = sorted(set(tools) - set(current_manifest))
+                if added:
+                    alerts.append(_mk_alert(e, "low", "capability_drift",
+                        f"manifest added {len(added)} tool(s) since the previous one: "
+                        f"{manifest.listing(added)}"))
+            current_manifest = tools
+            unlisted_reported.clear()
+            continue
+
         # agent permissions: what this agent was declared to be allowed to do,
         # against what it did. The only detector that needs no baseline -- an
         # agent's very first action can breach its profile.
@@ -288,14 +349,8 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 breaches_reported.add(message)
                 alerts.append(_mk_alert(e, permissions.worst(breaches),
                     "permission_violation", message))
-        elif (not undeclared_reported
-              and e["actor_type"] == permissions.GOVERNED_ACTOR_TYPE
-              and permissions.alerts_on_unprofiled(policy)):
-            # Once per actor, on its first action: the finding is that nobody
-            # declared this agent, which is true of the agent, not of each event.
-            undeclared_reported = True
-            alerts.append(_mk_alert(e, permissions.SEVERITY_UNDECLARED,
-                "undeclared_agent", permissions.undeclared_message(e["actor_id"])))
+        else:
+            report_undeclared(e)
 
         # allowlist
         task = e.get("task")
@@ -406,6 +461,19 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
 
         # agent tool calls: destructive actions and engagement-scope breaches
         if e["event_type"] == "tool_call":
+            # A call to a tool the agent's latest manifest does not list (v0.18):
+            # either the manifest is wrong, or the tool came from somewhere the
+            # agent's configuration does not account for. Once per tool per
+            # manifest.
+            called = str(meta.get("tool") or "").strip()
+            if (current_manifest is not None and called
+                    and called.lower() not in unlisted_reported
+                    and not manifest.is_listed(called, current_manifest)):
+                unlisted_reported.add(called.lower())
+                alerts.append(_mk_alert(e, "medium", "unlisted_tool_call",
+                    f"called '{called}', which is not in the agent's latest manifest "
+                    f"of {len(current_manifest)} tool(s)"))
+
             haystack = _tool_call_text(e, meta)
             for rule in policy.get("destructive_action_rules", []):
                 match = _first_match(haystack, rule.get("patterns", []))

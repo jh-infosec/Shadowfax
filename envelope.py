@@ -85,12 +85,18 @@ class EnvelopeError(ValueError):
         return f"{self.path}: {self.message}" if self.path else self.message
 
 
-def validate(doc: Any, native_categories: frozenset[str] = frozenset()) -> dict[str, Any]:
+def validate(doc: Any, native_categories: frozenset[str] = frozenset(),
+             reserved_tools: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Check an envelope and return it, or raise `EnvelopeError`.
 
     `native_categories` are Shadowfax's own detector categories, passed in rather
     than imported so this module stays a pure function of its arguments and the
     test can drive the collision rule directly.
+
+    `reserved_tools` are emitter names an incoming envelope may not use (v0.18):
+    on ingest, Shadowfax's own name. An alert reading "reported by shadowfax"
+    must not be something any other tool can write. Empty by default, so the
+    round-trip test can still check Shadowfax's *own* export against the format.
     """
     if not isinstance(doc, dict):
         raise EnvelopeError("envelope must be a JSON object")
@@ -119,6 +125,9 @@ def validate(doc: Any, native_categories: frozenset[str] = frozenset()) -> dict[
         if not isinstance(value, str) or not value.strip():
             raise EnvelopeError("required, and must be a non-empty string",
                                 f"source.{field}")
+    if source["tool"].strip().lower() in reserved_tools:
+        raise EnvelopeError(f"{source['tool']!r} is reserved -- an envelope may not "
+                            f"claim to come from Shadowfax itself", "source.tool")
 
     subject = doc.get("subject")
     if not isinstance(subject, dict):

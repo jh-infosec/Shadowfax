@@ -34,6 +34,7 @@ Usage:
     python cli.py search "critical destructive actions by ai agents"
     python cli.py check --severity critical      # exit 1 if any match
     python cli.py permissions recon-agent-3 --tool nc   # exit 1 if outside
+    python cli.py manifest build-agent-2 tools.json     # exit 1 if excess tools
 
 Exit codes:
     0  success (and, for `check`, nothing matched)
@@ -557,6 +558,39 @@ def human_permissions(out, report) -> None:
                 print(f"  - {reason}", file=out)
 
 
+def cmd_manifest(client: Client, args, out) -> int:
+    """Post an agent's capability manifest -- the tools it is configured with
+    (v0.18). Exits 1 if any of them fall outside its permission profile, so a
+    harness can refuse to start an over-provisioned agent:
+
+        shadowfax manifest build-agent-2 tools.json || exit 1
+    """
+    raw = sys.stdin.read() if args.source == "-" else Path(args.source).read_text(encoding="utf-8")
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        raise ApiError(f"manifest is not valid JSON: {exc}", EXIT_USAGE)
+    if isinstance(doc, list):
+        # A bare tools array -- what most frameworks hand you -- is a manifest
+        # with only "tools".
+        doc = {"tools": doc}
+    path = "/agents/" + urllib.parse.quote(args.agent, safe="") + "/manifest"
+    result = client.call("POST", path, body=doc)
+    emit(out, result, args.json, human_manifest)
+    return EXIT_FAIL if result["excess"] else EXIT_OK
+
+
+def human_manifest(out, r) -> None:
+    state = "recorded" if r["changed"] else "unchanged since the last manifest"
+    profile = f"profile '{r['profile']}'" if r["profile"] else "no permission profile"
+    print(f"{r['agent_id']}: {r['tools']} tool(s), {state}; {profile}", file=out)
+    for t in r["excess"]:
+        why = "denied by its profile" if t["status"] == "denied" else "not granted"
+        print(f"  EXCESS ({t['severity']}) {t['tool']} -- {why}", file=out)
+    if not r["excess"] and r["profile"]:
+        print("  every configured tool is within the profile", file=out)
+
+
 def cmd_actors(client: Client, args, out) -> int:
     actors = client.call("GET", "/actors")
     emit(out, actors, args.json, human_actors)
@@ -680,6 +714,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--actor-type", dest="actor_type", default="ai_agent",
                     choices=["human", "ai_agent", "service_account"],
                     help="judged as this kind of actor (default ai_agent)")
+    sp = sub.add_parser("manifest",
+                        help="post an agent's tool list (non-zero if any exceed its profile)")
+    sp.add_argument("agent", metavar="AGENT_ID")
+    sp.add_argument("source", help="manifest JSON file, or '-' for stdin")
     sub.add_parser("actors", help="list actors with risk scores")
     sub.add_parser("stats", help="alert and event counts")
 
@@ -697,6 +735,7 @@ COMMANDS = {
     "explain": cmd_explain, "search": cmd_search, "actors": cmd_actors,
     "digest": cmd_digest, "verify": cmd_verify, "lockouts": cmd_lockouts,
     "export": cmd_export, "permissions": cmd_permissions,
+    "manifest": cmd_manifest,
     "stats": cmd_stats, "policy": cmd_policy,
 }
 

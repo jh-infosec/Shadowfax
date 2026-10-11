@@ -41,6 +41,9 @@ _CATEGORY_PHRASE = {
     "rate_anomaly": "anomalous activity rate",
     "permission_violation": "actions outside declared permissions",
     "undeclared_agent": "an agent with no declared permissions",
+    "excess_capability": "tools configured beyond what was granted",
+    "capability_drift": "tools added between manifests",
+    "unlisted_tool_call": "calls to tools missing from the manifest",
 }
 
 

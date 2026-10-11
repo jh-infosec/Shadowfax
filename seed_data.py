@@ -1,5 +1,11 @@
 """Sample data used during development and testing."""
 
+import manifest as _manifest
+
+# The recon agent's declared tool set, built through the same type the API uses
+# so its digest matches what a re-post of the same manifest would compute.
+_RECON_MANIFEST = _manifest.Manifest(("bash", "curl", "dig", "nmap"), (), None)
+
 SAMPLE_EVENTS = [
     {"timestamp": "2026-08-01T02:14:00", "actor_id": "user-jsmith", "actor_type": "human", "event_type": "auth_failure", "target": "vpn_gateway", "metadata": {}},
     {"timestamp": "2026-08-01T02:15:00", "actor_id": "user-jsmith", "actor_type": "human", "event_type": "auth_failure", "target": "vpn_gateway", "metadata": {}},
@@ -24,6 +30,10 @@ SAMPLE_EVENTS = [
     {"timestamp": "2026-08-02T10:00:00", "actor_id": "svc-backup-bot", "actor_type": "service_account", "event_type": "auth_success", "target": "backup_archive_1", "metadata": {"geo": "US"}},
     {"timestamp": "2026-08-02T10:05:00", "actor_id": "svc-backup-bot", "actor_type": "service_account", "event_type": "data_transfer", "target": "internal_backup_store", "metadata": {"bytes_transferred": 20000000}},
 
+    # Capability manifest (v0.18): what the recon agent's harness says it was
+    # started with. bash is in it although its profile denies bash -- reported
+    # before it is ever used -- and nc, which it calls at 10:05, is not in it.
+    {"timestamp": "2026-08-10T09:55:00", "actor_id": "recon-agent-3", "actor_type": "ai_agent", "task": None, "event_type": "capability_manifest", "target": "4 configured tools", "metadata": {"tools": list(_RECON_MANIFEST.tools), "mcp_servers": [], "digest": _RECON_MANIFEST.digest}},
     # Agent traces (v0.4.5): an offensive-security agent's tool calls. One is
     # in scope and benign; the rest breach engagement scope or run destructive
     # commands.

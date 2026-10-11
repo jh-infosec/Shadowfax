@@ -299,10 +299,15 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 - [ ] Close drawers with Escape. The dashboard test that assumed it could was
       quietly leaving the incidents drawer open; the test is fixed, the
       keyboard handling is still missing.
-- [ ] Permission profiles from the agent's own manifest. An agent framework that
-      already declares its tools (an MCP server list, a tool schema) could post
-      that declaration as the profile, so what the agent was *configured* with
-      and what it is *permitted* are compared rather than written twice.
+- [x] Capability manifests (shipped in `v0.18.0`, as a comparison rather than as
+      a source of profiles -- a profile written *from* the configuration would
+      grant whatever the agent was given, which is the thing to check).
+      `POST /agents/{id}/manifest` accepts bare names, Anthropic/MCP, OpenAI and
+      MCP `tools/list` shapes; `excess_capability` (configured, not permitted),
+      `capability_drift` (tools added between manifests) and
+      `unlisted_tool_call` (called, not configured). Also closed a v0.11 hole:
+      `POST /events` accepted raw `finding` events and skipped every check, so
+      a native-category alert "reported by shadowfax" could be forged.
 
 ---
 

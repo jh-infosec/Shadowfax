@@ -200,6 +200,20 @@ class Demo:
                      "nothing — this is the agent doing its job")
         self.observed(self.send(0, "file_access", "customer_churn_dataset"))
 
+        # v0.18: the harness says what it started the agent with. bash is in
+        # the list and the profile never granted it -- reported now, before the
+        # agent has used it, which is the point of comparing the two.
+        self.narrate("Its harness registers the tools it was started with: "
+                     "python, sql_query -- and bash.",
+                     "excess_capability (medium) — bash configured, never granted",
+                     f"{ACTOR}:excess_capability")
+        at = (START + timedelta(seconds=30)).isoformat() + "Z"
+        status, body = self.call("POST", f"/agents/{ACTOR}/manifest", {
+            "tools": ["python", "sql_query", "bash"], "observed_at": at})
+        if status != 200:
+            raise SystemExit(f"manifest failed ({status}): {body}")
+        self.observed([a for a in body.get("alerts", []) if a["actor_id"] == ACTOR])
+
         # v0.16: the profile in the sample policy says what this agent is for,
         # so the first step outside it is caught on its own -- no baseline, no
         # threshold, no pattern of behaviour needed.
@@ -332,7 +346,7 @@ class Demo:
 
         Without --assert this is a demo and returns 0 whatever happened: a
         person watching can see for themselves. With it, the replay becomes an
-        end-to-end check of the whole stack -- ingest, eighteen detectors,
+        end-to-end check of the whole stack -- ingest, twenty-one detectors,
         correlation, kill-chain ordering, envelope ingest, the front door and
         the ledger -- against a real server over real HTTP. That is a different
         kind of evidence from the unit suite, which never leaves the process.

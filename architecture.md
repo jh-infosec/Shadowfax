@@ -364,6 +364,21 @@ under the `external` actor type, so a file called `admin` cannot become the user
 `admin`; a `kind: actor` subject lands on that actor's real timeline and
 inherits its existing actor type, passed in as data to keep the function pure.
 
+#### manifest.py
+
+Capability manifests (v0.18), pure: `parse()` normalises bare names,
+Anthropic/MCP tool objects, OpenAI function tools and per-server MCP
+`tools/list` results into a sorted, unique tuple of names (MCP tools as
+`mcp__<server>__<tool>`), rejecting anything else with the path at fault;
+`to_event()` stores names only; `tool_status()` judges one tool with the
+permission profile's own `evaluate()`, so "denied" here means exactly what a
+critical permission_violation would; `is_listed()` lets a call by an MCP tool's
+bare name match its namespaced entry; `describe()` gives the dashboard the
+latest manifest assessed, plus what was added and removed. In the detector a
+manifest event, like a finding, skips the behavioural heuristics and the
+permission target check -- it is a declaration, not an action. Excess tools are
+reported once each across manifests; unlisted calls once per tool per manifest.
+
 #### tickets.py
 
 Single-use stream tickets (v0.17.1): `TicketBook.issue(user_id, session_fp)`
@@ -531,7 +546,15 @@ Current categories: `allowlist_violation`, `canary_triggered`,
 `rate_anomaly`; for AI-agent tool calls (`event_type: "tool_call"`)
 `destructive_action` and `out_of_scope_action`; for agent integrity
 `completion_fraud` and `token_spend_anomaly`; and for declared intent (v0.16)
-`permission_violation` and `undeclared_agent`, evaluated by `permissions.py`.
+`permission_violation` and `undeclared_agent`, evaluated by `permissions.py`;
+and for declared capabilities (v0.18) `excess_capability`, `capability_drift`
+and `unlisted_tool_call`, from `capability_manifest` events (`manifest.py`).
+
+Two event types are *claims* that a dedicated endpoint validates: `finding`
+(`POST /findings`) and `capability_manifest` (`POST /agents/{id}/manifest`).
+`POST /events` refuses both (v0.18). The detector also refuses a stored finding
+whose key is a native category or whose emitter is `shadowfax`, so rows forged
+through the raw path before v0.18 are retired by the next rescan.
 
 The two tool-call detectors are policy-driven like the rest:
 `destructive_action` matches `policy.destructive_action_rules` (label,
@@ -661,6 +684,13 @@ filtering is not. Clicking a row selects that actor.
 The full event timeline for one actor, with alerts attached to the events
 that produced them, plus a risk composition bar and the actor's declared
 permissions.
+
+#### src/components/CapabilitiesPanel.jsx
+
+The actor's latest capability manifest (v0.18), from the `manifest` field of
+`GET /actors/{id}`: each configured tool marked granted, not granted or denied
+against the profile, excess ones first, and what changed since the previous
+manifest.
 
 #### src/components/PermissionsPanel.jsx
 
@@ -942,7 +972,7 @@ attack_registry.json    correlate.py            assistant.py
 seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
 throttle.py             envelope.py             permissions.py
-tickets.py              limits.py
+tickets.py              limits.py               manifest.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml
@@ -970,4 +1000,5 @@ frontend/src/components/DigestDrawer.jsx
 frontend/src/components/LedgerBadge.jsx
 frontend/src/components/LockoutsDrawer.jsx
 frontend/src/components/PermissionsPanel.jsx
+frontend/src/components/CapabilitiesPanel.jsx
 ```

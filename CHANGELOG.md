@@ -1,5 +1,125 @@
 # Changelog
 
+## Version 0.18.0
+
+v0.16 gave each agent a permission profile: what it is **allowed** to do. The
+framework running the agent already knows something else about it: what it is
+**able** to do — its tool list, the MCP servers it is connected to. Nobody
+compared the two. An agent started with `bash` whose profile never granted
+`bash` is a permission violation waiting for its first call, and until now the
+only way to find out was to wait for that call.
+
+This version also fixes a hole in the findings ingest that building it exposed.
+
+### Fixed first: a raw event could forge a native alert
+
+`POST /findings` validates an envelope carefully: an emitter may not use one of
+Shadowfax's own categories, and the whole document is rejected on any error.
+But `POST /events` also accepted events of type `finding`, and the detector
+turned them into alerts **without any of those checks**. One request from
+anyone with ingest access did this:
+
+```
+POST /events  [{"actor_id": "user-alice", "event_type": "finding",
+                "metadata": {"finding": {"key": "canary_triggered", "severity": "critical",
+                             "title": "touched the honeytoken", ...},
+                             "source": {"tool": "shadowfax"}}}]
+
+→ critical  canary_triggered  "touched the honeytoken — reported by shadowfax"
+```
+
+That is a forged critical alert, in a category that should only ever mean
+Shadowfax's own honeytoken detector fired, attributed to Shadowfax, against a
+named person. It came in with v0.11 and nothing caught it until now — found
+while adding a second event type that, like findings, must arrive only through
+a validating endpoint.
+
+Three layers now:
+
+- **`POST /events` refuses reserved event types** (`finding`,
+  `capability_manifest`) with a 400 naming the endpoint to use instead. One
+  reserved event refuses the whole batch, and nothing in it is stored.
+- **The detector refuses a stored finding** whose key is a native category or
+  whose emitter is `shadowfax`. Rows forged before v0.18 may already be in a
+  database; this means the next rescan retires them rather than keeping them.
+- **An envelope may not name `shadowfax` as its `source.tool`**, in any
+  capitalisation. Shadowfax's own export still uses the name; its ingest
+  refuses it.
+
+### Added: capability manifests
+
+`POST /agents/{agent_id}/manifest` takes the agent's tool list, posted by
+whatever starts the agent (an ingest API key is enough — a harness reports its
+own agent). Shadowfax reports three things from it:
+
+| Category | Severity | When |
+|---|---|---|
+| `excess_capability` | high if the profile denies a tool, else medium | the agent is configured with tools its profile does not grant — reported when the manifest arrives, before any of them is used |
+| `capability_drift` | low | a later manifest adds tools the previous one did not have |
+| `unlisted_tool_call` | medium | the agent calls a tool that is not in its latest manifest |
+
+The third is the one that only a comparison can find. An agent calling a tool
+its own configuration does not list either has a wrong manifest, or got that
+tool from somewhere its configuration does not account for — an injected MCP
+server, a tool smuggled in at runtime. Neither is visible from the calls alone
+or from the configuration alone.
+
+**Accepted shapes**, because there is no single standard: bare tool names,
+Anthropic and MCP tool objects (`{"name": ...}`), OpenAI function tools
+(`{"type": "function", "function": {"name": ...}}`), and MCP `tools/list`
+results per server. MCP tools are namespaced `mcp__<server>__<tool>`, the
+convention Claude Code uses, so a profile pattern `mcp__github__*` lines up —
+and an agent calling plain `create_issue` still counts as calling the listed
+`mcp__github__create_issue`.
+
+**Only names are kept.** Descriptions and schemas are dropped on arrival: the
+comparison needs nothing else, and a tool description is exactly where a long
+injected instruction would sit.
+
+**Strict, like the envelope.** A tool in a shape Shadowfax does not recognise
+rejects the whole manifest, naming the path. Keeping the tools it could read
+and dropping the rest would turn "we could not parse this" into "the agent does
+not have this", which is the one mistake a capability inventory cannot make.
+
+**Once each.** A tool reported as excess is not reported again by every later
+manifest that still has it; an unlisted tool is reported on its first call, not
+on every call. An identical manifest posted again is acknowledged and not
+stored — agents restart, and a harness may send the same list every time.
+
+**Stored as an event**, like a finding, so alerts stay a pure function of
+(events, policy): grant the tool in the profile and the excess alert goes; a
+manifest is never judged as though the agent had touched something, and it
+does not count towards rate or dormancy.
+
+Also:
+
+- **`shadowfax manifest <agent> <file|->`** — accepts a bare tools array too,
+  and exits 1 if any tool exceeds the profile, so a harness can refuse to start
+  an over-provisioned agent: `shadowfax manifest build-agent-2 tools.json || exit 1`.
+- **Declared capabilities in the actor drawer**, under declared permissions:
+  every configured tool marked granted, not granted, or denied, with what
+  changed since the previous manifest.
+- **The sample recon agent** now has a manifest: started with `bash` (which its
+  profile denies — `excess_capability`, high) and without `nc` (which it calls —
+  `unlisted_tool_call`). The demo's Act 1 registers the churn agent's tools,
+  `bash` among them, one step before it uses `bash`.
+- Twenty-one native categories, from eighteen.
+
+### Tests
+
+**530** API checks (from 484) and **23** dashboard checks (from 21).
+
+Each new guard was broken on purpose and the right check failed: raw reserved
+events accepted; the detector honouring a native key; the detector honouring a
+`shadowfax` emitter; an envelope claiming to be Shadowfax; excess re-reported;
+unlisted calls reported per call; bare MCP names not matched; a manifest judged
+as an action. Two checks were vacuous on the first attempt and were fixed
+before shipping: the forged rows each tripped *both* detector guards, so
+removing either guard alone failed nothing (each row now trips exactly one);
+and "a manifest is not judged as an access to a target" used an agent with no
+target allow-list, so it could not fail (it now uses one that has one, and
+asserts that first).
+
 ## Version 0.17.1
 
 Two findings from an outside review of v0.17.0, both confirmed and both fixed.

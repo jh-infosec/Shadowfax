@@ -46,13 +46,14 @@ import digest as digest_mod
 import envelope
 import ledger
 import limits
+import manifest
 import permissions
 import throttle
 import tickets
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.17.1"
+VERSION = "0.18.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -70,6 +71,13 @@ STREAM_TICKETS = tickets.TicketBook()
 # How often an idle stream sends a keepalive -- and re-checks that the session
 # which opened it is still signed in.
 STREAM_KEEPALIVE_SECONDS = 15.0
+
+# Event types that may only arrive through the endpoint that validates them
+# (v0.18), mapped to that endpoint for the refusal message.
+RESERVED_EVENT_TYPES = {
+    envelope.EVENT_TYPE: "POST /findings",
+    manifest.EVENT_TYPE: "POST /agents/{agent_id}/manifest",
+}
 
 # Recorded sign-in attempts are operational state for the throttle, not
 # evidence, so they are pruned. The ledger keeps what matters.
@@ -410,6 +418,15 @@ def ingest_events(events: list[EventRequest], identity: dict = Depends(allow_ing
     """Ingest one or more events and refresh alerts for the affected actors."""
     if not events:
         raise HTTPException(400, "no events provided")
+    reserved = sorted({ev.event_type for ev in events} & set(RESERVED_EVENT_TYPES))
+    if reserved:
+        # These event types carry a claim that a dedicated endpoint validates --
+        # a finding's category and emitter, a manifest's tool list. Accepting
+        # them raw skipped that validation: until v0.18 a raw "finding" event
+        # could raise a critical canary_triggered alert "reported by shadowfax"
+        # against anyone. Each now has exactly one way in.
+        raise HTTPException(400, f"event_type {reserved[0]!r} cannot be posted as a raw "
+                                 f"event; use {RESERVED_EVENT_TYPES[reserved[0]]}")
     if len(events) > LIMITS.max_events_per_request:
         # Each affected actor is rescanned, so the batch bounds the work one
         # request can cause. 413 with the number, so a client can split.
@@ -489,7 +506,8 @@ def ingest_findings(doc: dict[str, Any], identity: dict = Depends(allow_ingest))
                                  f"{LIMITS.max_events_per_request:,} "
                                  f"(SHADOWFAX_MAX_EVENTS_PER_REQUEST) -- split the envelope")
     try:
-        envelope.validate(doc, detectors.NATIVE_CATEGORIES)
+        envelope.validate(doc, detectors.NATIVE_CATEGORIES,
+                          reserved_tools=frozenset({detectors.TOOL_NAME}))
     except envelope.EnvelopeError as err:
         # Reject the whole document rather than keeping the findings we happen
         # to like. A partially-accepted envelope hides an emitter's bug, and
@@ -728,7 +746,57 @@ def actor_detail(actor_id: str, identity: dict = Depends(require_role("viewer"))
         risk = db.actor_risk_scores(conn).get(actor_id, EMPTY_RISK)
         policy = db.get_policy(conn) or DEFAULT_POLICY
         return {"actor_id": actor_id, "events": events, "alerts": alerts, "risk": risk,
-                "permissions": permissions.describe(actor_id, policy)}
+                "permissions": permissions.describe(actor_id, policy),
+                "manifest": manifest.describe(events, policy)}
+
+
+@app.post("/agents/{agent_id}/manifest")
+def post_manifest(agent_id: str, doc: dict[str, Any],
+                  identity: dict = Depends(allow_ingest)):
+    """Record what an agent is configured with -- its tools and MCP servers --
+    so Shadowfax can compare it with what the agent is allowed (v0.18).
+
+    Posted by whatever starts the agent, ideally every time it does. Several
+    shapes are accepted (see manifest.py); anything unrecognised rejects the
+    whole manifest, because silently dropping a tool would report it absent.
+    An unchanged manifest is acknowledged and not stored again.
+    """
+    if not agent_id.strip() or len(agent_id) > limits.FIELD_MAX_LENGTH["actor_id"]:
+        raise HTTPException(422, "agent id must be 1-256 characters")
+    try:
+        parsed = manifest.parse(doc)
+    except manifest.ManifestError as err:
+        raise HTTPException(400, f"invalid manifest — {err.describe()}")
+
+    with db.get_conn() as conn:
+        actor_type = dict(db.distinct_actors(conn)).get(agent_id, permissions.GOVERNED_ACTOR_TYPE)
+        history = db.get_events_for_actor(conn, agent_id)
+        previous = [e for e in history if e["event_type"] == manifest.EVENT_TYPE]
+        latest_digest = ((previous[-1].get("metadata") or {}).get("digest")
+                         if previous else None)
+        changed = latest_digest != parsed.digest
+        alerts: list[dict[str, Any]] = []
+        if changed:
+            db.insert_event(conn, manifest.to_event(parsed, agent_id, actor_type))
+            alerts = _rescan_actor(conn, agent_id)
+        conn.commit()
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        resolution = permissions.resolve(agent_id, policy)
+
+    if changed:
+        bus.publish({"type": "change", "reason": "manifest", "actors": [agent_id]})
+    assessed = manifest.assess(parsed.tools, resolution.profile)
+    return {
+        "agent_id": agent_id,
+        "changed": changed,
+        "digest": parsed.digest,
+        "tools": len(parsed.tools),
+        "mcp_servers": list(parsed.servers),
+        "profile": resolution.name,
+        "excess": [t for t in assessed if t["severity"]],
+        "alerts": [a for a in alerts if a["category"] in
+                   ("excess_capability", "capability_drift", "undeclared_agent")],
+    }
 
 
 @app.get("/actors/{actor_id}/permissions")

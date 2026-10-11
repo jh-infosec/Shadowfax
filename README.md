@@ -41,7 +41,7 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across eighteen alert categories, including AI-agent tool-call analysis
+- Rule-based detection engine across twenty-one alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
@@ -51,6 +51,7 @@ investigation and explainability.
 - Live push over Server-Sent Events — the dashboard updates the instant data changes
 - Agent-trace ingest — flags destructive tool calls and out-of-scope actions by AI agents
 - Agent permissions — declare which tools and targets each agent was given; the first step outside its profile is reported, with no baseline needed, and undeclared agents are flagged
+- Capability manifests — the tools an agent is configured with, compared with what it is allowed (excess tools flagged before they are used) and with what it calls (tools its own configuration does not list)
 - MITRE ATT&CK mapping — every alert tagged with technique IDs from a shared registry
 - Alert correlation — related alerts grouped into incidents, each with a generated report
 - Attack-chain detection — incidents whose alerts advance through the ATT&CK kill chain in order are flagged, and completed chains escalate to critical
@@ -221,6 +222,10 @@ Planned
 - Published image on ghcr.io, released from CI — shipped (v0.17.0)
 - No session tokens in URLs; request size limits — shipped (v0.17.1)
 
+### v0.18
+
+- Capability manifests: configured tools vs. permitted vs. used — shipped (v0.18.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -354,14 +359,15 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Twenty-one checks, each one an assertion a person makes when they glance at the
+Twenty-three checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
 correlated kill chain is *drawn* with its tactics and its escalation, that
 filtering actually filters, that an agent's declared permissions are shown
-beside the breaches of them, and that the live stream connects without the
-session token appearing in any URL the page requests.
+beside the breaches of them along with the tools it was configured with, and
+that the live stream connects without the session token appearing in any URL
+the page requests.
 
 They refuse to run against an empty instance, because a test that passes on a
 dashboard rendering nothing is worse than no test. `--headed` shows the browser.
@@ -385,7 +391,7 @@ python demo.py --fast --assert
 ```
 
 That turns the demo into an end-to-end check of the whole stack — ingest,
-eighteen detectors, correlation, kill-chain ordering, findings-envelope ingest,
+twenty-one detectors, correlation, kill-chain ordering, findings-envelope ingest,
 the front door and the ledger — against a real server over real HTTP. It is a
 different kind of evidence from the unit suite, which never leaves the process.
 
@@ -499,6 +505,13 @@ python cli.py permissions recon-agent-3              # the profile that governs 
 python cli.py permissions recon-agent-3 --tool nc    # exit 1: outside permissions
 ```
 
+Tell Shadowfax what an agent was started with, and refuse to start it if that
+exceeds its profile (see Capability manifests):
+
+```bash
+python cli.py manifest build-agent-2 tools.json || exit 1
+```
+
 Point it elsewhere with `--url`, `SHADOWFAX_URL`, or the stored config.
 
 ---
@@ -563,6 +576,38 @@ answer the detector gives afterwards. An agent runtime can use it to refuse a
 call before making it. Shadowfax itself still only observes: a monitor that is
 also the gate becomes the thing an attacker most wants to stop, and enforcement
 belongs in the runtime.
+
+### Capability manifests
+
+A profile says what an agent may do. The framework running it knows what it
+*can* do — its tool list, its MCP servers. A **manifest** is that list, posted
+by whatever starts the agent:
+
+```bash
+curl -X POST http://localhost:8000/agents/build-agent-2/manifest \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"tools": ["read_file", "run_tests", "bash"],
+       "mcp_servers": {"github": {"tools": [{"name": "create_issue"}]}}}'
+```
+
+Bare names, Anthropic/MCP tool objects, OpenAI function tools and MCP
+`tools/list` results are all accepted; MCP tools become `mcp__github__create_issue`,
+as Claude Code names them. Only names are kept — descriptions and schemas, where
+an injected instruction would sit, are dropped on arrival. Anything Shadowfax
+cannot read rejects the whole manifest, because quietly dropping a tool would
+report it absent.
+
+| Alert | Severity | Means |
+|---|---|---|
+| `excess_capability` | high if denied, else medium | configured with a tool the profile does not grant — caught *before* it is used |
+| `capability_drift` | low | a later manifest added tools |
+| `unlisted_tool_call` | medium | the agent called a tool its own manifest does not list |
+
+The last is what neither side shows alone: an agent calling a tool its
+configuration does not account for has either a wrong manifest or a tool from
+somewhere else — an injected server, a tool added at runtime. The actor drawer
+shows every configured tool marked against the profile, and what changed since
+the previous manifest.
 
 ---
 
@@ -757,7 +802,7 @@ critical, high, medium, low, info
 ```
 
 A finding's `key` becomes the alert category, so an emitter **may not use one of
-Shadowfax's own eighteen detector categories**. An alert reading
+Shadowfax's own twenty-one detector categories**. An alert reading
 `destructive_action` must mean Shadowfax's detector found it, not that somebody
 else said so.
 
@@ -872,7 +917,9 @@ session opened. Requests are bounded before they are parsed — 2 MiB per body,
 limits on identifiers — and each refusal names the setting that controls it
 (`SHADOWFAX_MAX_BODY_BYTES`, `SHADOWFAX_MAX_EVENTS_PER_REQUEST`,
 `SHADOWFAX_MAX_METADATA_BYTES`). Shadowfax does not rate-limit ingest; put that
-in the proxy that exposes it. Hashing is
+in the proxy that exposes it. Findings and manifests arrive only through the
+endpoints that validate them — `POST /events` refuses both event types, and an
+envelope may not claim to come from Shadowfax. Hashing is
 stdlib PBKDF2 rather than bcrypt/argon2; that, and the still-single-writer
 SQLite backend, are the reasons Shadowfax remains a local-development tool.
 

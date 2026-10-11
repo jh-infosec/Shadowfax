@@ -52,6 +52,8 @@ CATEGORY_TO_TECHNIQUES: dict[str, list[str]] = {
     # say an agent broke what it was *declared* to do, which is a policy fact,
     # not an adversary technique -- the same action may be both, and when it is,
     # the detector that recognises the technique raises it separately.
+    # excess_capability, capability_drift, unlisted_tool_call (v0.18): no
+    # mapping. They compare an agent's configuration with its declarations.
 }
 
 

@@ -497,6 +497,12 @@ _CATEGORY_SYNONYMS = {
     "unprofiled": "undeclared_agent",
     "unregistered": "undeclared_agent",
     "shadow agent": "undeclared_agent",
+    "excess": "excess_capability",
+    "over-provisioned": "excess_capability",
+    "overprovisioned": "excess_capability",
+    "drift": "capability_drift",
+    "manifest": "unlisted_tool_call",
+    "unlisted": "unlisted_tool_call",
 }
 
 

@@ -293,6 +293,13 @@ def _run_checks(page, url: str, requested: list[str]) -> None:
                   page.locator(".perm-panel .perm-chip.deny").count() > 0)
             check("a breach of the profile is on the agent's timeline",
                   "permission_violation" in page.inner_text(".drawer"))
+            # v0.18: what the agent was configured with, beside what it may do.
+            # The sample manifest includes bash, which the profile denies.
+            caps = page.locator(".caps-panel")
+            check("the drawer shows the tools the agent was configured with",
+                  caps.count() == 1 and "bash" in caps.inner_text())
+            check("a configured tool the profile denies is marked as denied",
+                  page.locator(".caps-panel .perm-chip.deny", has_text="bash").count() == 1)
         else:
             check("the sample agent's alerts could be found to open its drawer",
                   False, "no rows for recon-agent-3")
