@@ -175,15 +175,18 @@ check("acknowledged_by survived the rescan", survivor.get("acknowledged_by") == 
 check("assignment survived the rescan", survivor.get("assigned_to") == "analyst-2")
 
 print("\n== roles and access control ==")
-client.post("/users", json={"username": "analyst1", "password": "pw", "role": "analyst"})
-client.post("/users", json={"username": "viewer1", "password": "pw", "role": "viewer"})
-analyst = as_user("analyst1", "pw")
-viewer = as_user("viewer1", "pw")
+# Long enough for the password policy (v0.19); the suite's accounts are not
+# exempt from the rules everyone else follows.
+TEST_PW = "correct-horse-battery"
+client.post("/users", json={"username": "analyst1", "password": TEST_PW, "role": "analyst"})
+client.post("/users", json={"username": "viewer1", "password": TEST_PW, "role": "viewer"})
+analyst = as_user("analyst1", TEST_PW)
+viewer = as_user("viewer1", TEST_PW)
 
 check("duplicate username is rejected (409)",
-      client.post("/users", json={"username": "analyst1", "password": "x", "role": "analyst"}).status_code == 409)
+      client.post("/users", json={"username": "analyst1", "password": TEST_PW, "role": "analyst"}).status_code == 409)
 check("invalid role is rejected (400)",
-      client.post("/users", json={"username": "bad", "password": "x", "role": "superuser"}).status_code == 400)
+      client.post("/users", json={"username": "bad", "password": TEST_PW, "role": "superuser"}).status_code == 400)
 
 check("viewer can read alerts", viewer.get("/alerts").status_code == 200)
 some_alert = client.get("/alerts").json()[0]["id"]
@@ -1417,7 +1420,7 @@ check("the cases include both allowed and reported actions, so agreement means s
 check("asking ahead and detecting afterwards give the same answer", _agree)
 
 check("viewers may read permissions",
-      as_user("viewer1", "pw").get("/actors/recon-agent-3/permissions").status_code == 200)
+      as_user("viewer1", TEST_PW).get("/actors/recon-agent-3/permissions").status_code == 200)
 check("reading them needs a credential",
       anon.get("/actors/recon-agent-3/permissions").status_code == 401)
 
@@ -1754,6 +1757,150 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== changing and resetting passwords (v0.19) ==")
+import auth as _auth_mod
+import cli as _cli_mod
+
+# Until v0.19 nobody could change a password -- including an admin holding the
+# one the published image generated and printed to a log.
+
+check("a 12-character password is long enough", _auth_mod.password_problems("twelve-chars", "x") == [])
+check("an 11-character one is not", _auth_mod.password_problems("eleven-char", "x") != [])
+check("nor is the username, however it is capitalised",
+      any("username" in p for p in _auth_mod.password_problems("Long-Username-1", "long-username-1")))
+check("nor one of the passwords always tried first",
+      any("first passwords" in p for p in _auth_mod.password_problems("password1234")))
+check("nor something long enough to be a key-derivation DoS",
+      _auth_mod.password_problems("x" * 1025) != [])
+check("a generated password is long and never repeats",
+      len(_auth_mod.generate_password()) >= 24
+      and _auth_mod.generate_password() != _auth_mod.generate_password())
+
+_r = client.post("/users", json={"username": "weakling", "password": "short", "role": "viewer"})
+check("creating a user with a weak password is refused, with the reasons",
+      _r.status_code == 400 and _r.json()["detail"]["problems"])
+
+# -- changing your own -------------------------------------------------------------
+client.post("/users", json={"username": "pwuser", "password": TEST_PW, "role": "analyst"})
+_a = as_user("pwuser", TEST_PW)
+_b = as_user("pwuser", TEST_PW)
+app_module.SELF_MONITOR = True
+_n_auth = len(client.get("/actors/shadowfax-auth").json()["events"]) if \
+    client.get("/actors/shadowfax-auth").status_code == 200 else 0
+_r = _a.post("/auth/password", json={"current_password": "wrong-wrong-wrong",
+                                     "new_password": "a-brand-new-passphrase"})
+check("the current password is required, even when signed in", _r.status_code == 401)
+_evs = client.get("/actors/shadowfax-auth").json()["events"]
+check("a wrong current password is recorded like any failed sign-in",
+      len(_evs) == _n_auth + 1 and _evs[-1]["event_type"] == "auth_failure"
+      and _evs[-1]["metadata"].get("context") == "password_change")
+_r = _a.post("/auth/password", json={"current_password": TEST_PW, "new_password": "short"})
+check("a weak new password is refused with the reasons",
+      _r.status_code == 400 and _r.json()["detail"]["problems"])
+_r = _a.post("/auth/password", json={"current_password": TEST_PW, "new_password": TEST_PW})
+check("so is the same password again",
+      _r.status_code == 400 and "must differ" in json.dumps(_r.json()))
+
+_new = "a-brand-new-passphrase"
+_r = _a.post("/auth/password", json={"current_password": TEST_PW, "new_password": _new})
+check("a good change succeeds", _r.status_code == 200)
+check("and ends the user's other sessions", _r.json()["other_sessions_ended"] == 1)
+check("the session that made the change stays signed in", _a.get("/auth/me").status_code == 200)
+check("the other one is signed out", _b.get("/auth/me").status_code == 401)
+check("the old password no longer signs in",
+      TestClient(app).post("/auth/login", json={"username": "pwuser", "password": TEST_PW}).status_code == 401)
+check("the new one does",
+      TestClient(app).post("/auth/login", json={"username": "pwuser", "password": _new}).status_code == 200)
+_evs = client.get("/actors/shadowfax-auth").json()["events"]
+check("the change is written into the ledger",
+      any(e["event_type"] == "password_changed" and e["metadata"].get("attempted_username") == "pwuser"
+          and e["metadata"].get("other_sessions_ended") == 1 for e in _evs))
+
+# A stolen session must not become an unthrottled password oracle.
+_codes = [_a.post("/auth/password", json={"current_password": f"guess-{i}-guess",
+                                          "new_password": "whatever-whatever"}).status_code
+          for i in range(5)]
+check("guessing the current password hits the sign-in throttle",
+      _codes[:3] == [401, 401, 401] and 429 in _codes[3:])
+with db_module.get_conn() as _c:
+    _c.execute("DELETE FROM login_attempts")
+    _c.commit()
+
+# -- an admin resets someone else's ----------------------------------------------------
+_r = client.post("/users/pwuser/password", json={"generate": True})
+check("an admin can reset a password, and have Shadowfax choose it",
+      _r.status_code == 200 and len(_r.json()["password"]) >= 24)
+_gen = _r.json()["password"]
+check("every session the user had is ended at once",
+      _r.json()["sessions_ended"] >= 1 and _a.get("/auth/me").status_code == 401)
+_evs = client.get("/actors/shadowfax-auth").json()["events"]
+check("the reset is in the ledger, naming the admin who did it",
+      any(e["event_type"] == "password_reset" and e["metadata"].get("reset_by") == "admin"
+          for e in _evs))
+_login = TestClient(app).post("/auth/login", json={"username": "pwuser", "password": _gen})
+check("the user can sign in with it, and is told it must change",
+      _login.status_code == 200 and _login.json()["user"]["must_change_password"] is True)
+_c2 = TestClient(app)
+_c2.headers["Authorization"] = f"Bearer {_login.json()['token']}"
+check("until it changes, the session can see who it is", _c2.get("/auth/me").json()["must_change_password"])
+_r = _c2.get("/alerts")
+check("and nothing else -- enforced by the server, not the dashboard",
+      _r.status_code == 403 and "password change required" in _r.json()["detail"])
+check("including opening the live stream", _c2.post("/stream/ticket").status_code == 403)
+_r = _c2.post("/auth/password", json={"current_password": _gen, "new_password": "chosen-by-the-owner"})
+check("changing it clears the requirement",
+      _r.status_code == 200 and _c2.get("/alerts").status_code == 200
+      and _c2.get("/auth/me").json()["must_change_password"] is False)
+
+check("an admin cannot use the reset on themselves -- that skips the current password",
+      client.post("/users/admin/password", json={"generate": True}).status_code == 400)
+check("an analyst cannot reset anyone",
+      as_user("analyst1", TEST_PW).post("/users/viewer1/password",
+                                         json={"generate": True}).status_code == 403)
+check("resetting an unknown user is a 404",
+      client.post("/users/nobody-here/password", json={"generate": True}).status_code == 404)
+check("exactly one of a password or generate must be given",
+      client.post("/users/pwuser/password", json={}).status_code == 400
+      and client.post("/users/pwuser/password",
+                      json={"generate": True, "new_password": "also-a-password"}).status_code == 400)
+check("an admin-chosen password follows the same policy",
+      client.post("/users/pwuser/password", json={"new_password": "short"}).status_code == 400)
+_r = client.post("/users/pwuser/password", json={"new_password": "admin-chose-this-one"})
+check("an admin-chosen password is not echoed back", "password" not in _r.json())
+
+# -- older databases ------------------------------------------------------------------
+import sqlite3 as _sq, tempfile as _tf4
+_old = _P(_tf4.mkdtemp()) / "old.db"
+with _sq.connect(_old) as _oc:
+    _oc.execute("""CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+                   password_hash TEXT NOT NULL, salt TEXT NOT NULL, role TEXT NOT NULL,
+                   created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+    _oc.execute("INSERT INTO users (username, password_hash, salt, role) VALUES ('old', 'h', 's', 'admin')")
+db_module.init_db(_old)
+with db_module.get_conn(_old) as _oc:
+    _row = dict(_oc.execute("SELECT * FROM users WHERE username = 'old'").fetchone())
+check("a database from before v0.19 gains the new columns, keeping its users",
+      _row["must_change_password"] == 0 and "password_changed_at" in _row)
+
+# -- the CLI ----------------------------------------------------------------------------
+_answers = []
+_cli_mod._ask = lambda prompt: _answers.pop(0)
+_tok = TestClient(app).post("/auth/login", json={"username": "pwuser",
+                                                 "password": "admin-chose-this-one"}).json()["token"]
+_uc = TestClient(app)
+_uc.headers["Authorization"] = f"Bearer {_tok}"
+_answers[:] = ["admin-chose-this-one", "the-cli-picked-this", "the-cli-picked-this"]
+code, sout, _ = run_cli(["passwd"], transport=_TestClientTransport(_uc))
+check("CLI `passwd` changes your own password", code == 0 and "changed" in sout)
+_answers[:] = ["the-cli-picked-this", "one-new-password", "a-different-one!!"]
+code, _, serr = run_cli(["passwd"], transport=_TestClientTransport(_uc))
+check("and refuses when the two new entries differ, without calling the API",
+      code != 0 and "do not match" in serr)
+code, sout, _ = run_cli(["passwd", "--user", "pwuser", "--generate"])
+check("CLI `passwd --user NAME --generate` resets and prints the new password once",
+      code == 0 and "password:" in sout)
+app_module.SELF_MONITOR = False
+
 print("\n== capability manifests, and closing the raw-finding hole (v0.18) ==")
 import manifest as mf
 
@@ -1948,7 +2095,7 @@ check("an agent harness can post its own with an ingest API key",
       TestClient(app).post("/agents/harness-agent/manifest", json={"tools": []},
                            headers={"X-API-Key": _k}).status_code == 200)
 check("a viewer cannot",
-      as_user("viewer1", "pw").post("/agents/x/manifest", json={"tools": []}).status_code == 403)
+      as_user("viewer1", TEST_PW).post("/agents/x/manifest", json={"tools": []}).status_code == 403)
 check("a malformed manifest is a 400 that names the field",
       "tools[0]" in client.post("/agents/x/manifest", json={"tools": [{}]}).json()["detail"])
 

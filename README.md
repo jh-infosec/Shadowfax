@@ -47,6 +47,7 @@ investigation and explainability.
 - Stable, deterministic alert identity that survives a rescan
 - Acknowledge and assign alerts, with analyst state that persists across rescans
 - Authentication with user accounts, roles (admin / analyst / viewer) and API keys
+- Password changes and admin resets — the current password required and throttled, other sessions signed out, admin-reset passwords forced to change before anything else works
 - Dashboard sign-in, with the UI adapting to the signed-in user's role
 - Live push over Server-Sent Events — the dashboard updates the instant data changes
 - Agent-trace ingest — flags destructive tool calls and out-of-scope actions by AI agents
@@ -226,6 +227,10 @@ Planned
 
 - Capability manifests: configured tools vs. permitted vs. used — shipped (v0.18.0)
 
+### v0.19
+
+- Change and reset passwords — shipped (v0.19.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -246,7 +251,8 @@ docker logs shadowfax        # the admin password, generated on first start
 ```
 
 Open `http://localhost:8000` and sign in as `admin` with the password from the
-log. The published image never starts with a password everyone knows: without
+log, then change it with **Change password** in the top bar. The published
+image never starts with a password everyone knows: without
 `SHADOWFAX_ADMIN_PASSWORD` it generates one, prints it once, and keeps only its
 hash. To choose your own, add `-e SHADOWFAX_ADMIN_PASSWORD=...` to the first
 `docker run`. Each release is also tagged by version (`:0.17.0`, `:0.17`), and
@@ -359,7 +365,7 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Twenty-three checks, each one an assertion a person makes when they glance at the
+Twenty-six checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
@@ -367,7 +373,8 @@ correlated kill chain is *drawn* with its tactics and its escalation, that
 filtering actually filters, that an agent's declared permissions are shown
 beside the breaches of them along with the tools it was configured with, and
 that the live stream connects without the session token appearing in any URL
-the page requests.
+the page requests, and that a user whose password an admin reset must choose a
+new one before the dashboard shows anything.
 
 They refuse to run against an empty instance, because a test that passes on a
 dashboard rendering nothing is worse than no test. `--headed` shows the browser.
@@ -503,6 +510,14 @@ with an exit code a harness can act on (see Agent permissions):
 ```bash
 python cli.py permissions recon-agent-3              # the profile that governs it
 python cli.py permissions recon-agent-3 --tool nc    # exit 1: outside permissions
+```
+
+Change your password, or (admin) reset someone else's — passwords are always
+prompted for, never taken as flags, where they would land in shell history:
+
+```bash
+python cli.py passwd                          # asks for the current one first
+python cli.py passwd --user alice --generate   # prints a one-time password
 ```
 
 Tell Shadowfax what an agent was started with, and refuse to start it if that
@@ -908,6 +923,13 @@ On a fresh database the first admin comes from `SHADOWFAX_ADMIN_USERNAME` and
 `SHADOWFAX_ADMIN_PASSWORD`. If those are unset, running from source creates
 `admin` / `admin` with a warning, and the published image generates a random
 password and prints it once — set real credentials before exposing the API.
+
+Passwords must be at least 12 characters, not the username and not one of the
+handful always tried first. Changing one requires the current password — through
+the same throttle as sign-in — and signs out every other session. An admin reset
+ends all of the user's sessions and marks the new password must-change: until
+the owner replaces it, the server allows nothing else. Changes and resets are
+written into the ledger.
 
 The session token never appears in a URL. The dashboard's live stream is opened
 with a single-use ticket that expires in 30 seconds (`POST /stream/ticket`),

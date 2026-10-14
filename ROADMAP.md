@@ -325,6 +325,9 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       session token in its URL (single-use, 30-second, session-bound tickets;
       signing out ends the stream), and request bodies, batches, metadata and
       identifiers are bounded before anything is parsed. Shipped in `v0.17.1`.
+- [x] Change and reset passwords (`v0.19.0`): current password required and
+      throttled, other sessions ended, admin resets forced to change before the
+      session can do anything else, a length-based policy, ledger events.
 - [ ] Rate-limit ingest per API key. Size limits bound one request; nothing yet
       bounds how many a client sends.
 - [ ] Sign the image (cosign, keyless via GitHub's OIDC), so "this came from

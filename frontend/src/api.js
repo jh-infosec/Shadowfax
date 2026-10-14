@@ -93,6 +93,14 @@ export function getMe() {
   return request("/auth/me");
 }
 
+// v0.19. Throws with `err.detail.problems` when the new password is refused.
+export function changePassword(currentPassword, newPassword) {
+  return request("/auth/password", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+}
+
 // URL for the Server-Sent Events stream (v0.17.1). The browser EventSource
 // can't set headers, so something has to go in the URL -- and URLs are what
 // access logs record. Not the session token, then: a single-use ticket that

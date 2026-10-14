@@ -174,7 +174,22 @@ def init_db(path: Path | None = None) -> None:
         _migrate_legacy_alerts(conn)
         conn.executescript(SCHEMA)
         _migrate_ledger(conn)
+        _migrate_users(conn)
         conn.commit()
+
+
+def _migrate_users(conn: sqlite3.Connection) -> None:
+    """v0.19: password lifecycle columns, added to databases created earlier.
+
+    `must_change_password` is set when an admin resets someone's password -- a
+    password another person has seen is not a secret -- and cleared when the
+    owner chooses their own. `password_changed_at` is when that last happened.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "must_change_password" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+    if "password_changed_at" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN password_changed_at TEXT")
 
 
 def _migrate_legacy_alerts(conn: sqlite3.Connection) -> None:
@@ -638,7 +653,8 @@ def get_user_by_username(conn: sqlite3.Connection, username: str) -> dict[str, A
 
 def list_users(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT id, username, role, created_at FROM users ORDER BY username"
+        "SELECT id, username, role, created_at, must_change_password, password_changed_at "
+        "FROM users ORDER BY username"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -659,7 +675,7 @@ def get_session_user(conn: sqlite3.Connection, token_fp: str) -> dict[str, Any] 
     accumulate dead tokens over time.
     """
     row = conn.execute(
-        """SELECT s.expires_at, u.id, u.username, u.role
+        """SELECT s.expires_at, u.id, u.username, u.role, u.must_change_password
            FROM sessions s JOIN users u ON u.id = s.user_id
            WHERE s.token_fp = ?""",
         (token_fp,),
@@ -674,11 +690,33 @@ def get_session_user(conn: sqlite3.Connection, token_fp: str) -> dict[str, Any] 
         conn.execute("DELETE FROM sessions WHERE token_fp = ?", (token_fp,))
         conn.commit()
         return None
-    return {"id": row["id"], "username": row["username"], "role": row["role"]}
+    return {"id": row["id"], "username": row["username"], "role": row["role"],
+            "must_change_password": bool(row["must_change_password"])}
 
 
 def delete_session(conn: sqlite3.Connection, token_fp: str) -> None:
     conn.execute("DELETE FROM sessions WHERE token_fp = ?", (token_fp,))
+
+
+def delete_sessions_for_user(conn: sqlite3.Connection, user_id: int,
+                             keep_fp: str | None = None) -> int:
+    """End every session a user has -- except, optionally, the one asking.
+    Returns how many were ended."""
+    if keep_fp is None:
+        cur = conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    else:
+        cur = conn.execute("DELETE FROM sessions WHERE user_id = ? AND token_fp != ?",
+                           (user_id, keep_fp))
+    return cur.rowcount
+
+
+def set_password(conn: sqlite3.Connection, user_id: int, password_hash: str, salt: str,
+                 must_change: bool) -> None:
+    conn.execute(
+        """UPDATE users SET password_hash = ?, salt = ?, must_change_password = ?,
+                            password_changed_at = ? WHERE id = ?""",
+        (password_hash, salt, 1 if must_change else 0, _iso(_utc_now()), user_id),
+    )
 
 
 # Authentication: API keys

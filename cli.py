@@ -35,6 +35,8 @@ Usage:
     python cli.py check --severity critical      # exit 1 if any match
     python cli.py permissions recon-agent-3 --tool nc   # exit 1 if outside
     python cli.py manifest build-agent-2 tools.json     # exit 1 if excess tools
+    python cli.py passwd                                # change your own password
+    python cli.py passwd --user alice --generate        # admin: reset someone's
 
 Exit codes:
     0  success (and, for `check`, nothing matched)
@@ -591,6 +593,45 @@ def human_manifest(out, r) -> None:
         print("  every configured tool is within the profile", file=out)
 
 
+def _ask(prompt: str) -> str:
+    """Read a secret without echoing it. A function of its own so the tests can
+    answer it; passwords are never taken as flags, where they would land in
+    shell history and the process list."""
+    import getpass
+    return getpass.getpass(prompt)
+
+
+def cmd_passwd(client: Client, args, out) -> int:
+    """Change your own password, or (admin) reset someone else's (v0.19)."""
+    if args.user:
+        body = {"generate": True} if args.generate else {"new_password": _confirmed_new()}
+        result = client.call("POST", "/users/" + urllib.parse.quote(args.user, safe="")
+                             + "/password", body=body)
+        def human(o, v):
+            print(f"reset {v['username']}; {v['sessions_ended']} session(s) ended; "
+                  f"they must choose a new password at next sign-in", file=o)
+            if "password" in v:
+                print(f"password: {v['password']}", file=o)
+                print("(shown once -- pass it on over a channel you trust)", file=o)
+        emit(out, result, args.json, human)
+        return EXIT_OK
+    if args.generate:
+        raise ApiError("--generate is for resetting someone else's password (--user)", EXIT_USAGE)
+    current = _ask("current password: ")
+    result = client.call("POST", "/auth/password",
+                         body={"current_password": current, "new_password": _confirmed_new()})
+    emit(out, result, args.json, lambda o, v: print(
+        f"password changed; {v['other_sessions_ended']} other session(s) signed out", file=o))
+    return EXIT_OK
+
+
+def _confirmed_new() -> str:
+    new = _ask("new password: ")
+    if _ask("new password, again: ") != new:
+        raise ApiError("the two new passwords do not match", EXIT_USAGE)
+    return new
+
+
 def cmd_actors(client: Client, args, out) -> int:
     actors = client.call("GET", "/actors")
     emit(out, actors, args.json, human_actors)
@@ -714,6 +755,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--actor-type", dest="actor_type", default="ai_agent",
                     choices=["human", "ai_agent", "service_account"],
                     help="judged as this kind of actor (default ai_agent)")
+    sp = sub.add_parser("passwd", help="change your password, or reset a user's (admin)")
+    sp.add_argument("--user", metavar="USERNAME",
+                    help="reset this user's password instead of your own (admin)")
+    sp.add_argument("--generate", action="store_true",
+                    help="with --user: have Shadowfax choose the password and print it once")
+
     sp = sub.add_parser("manifest",
                         help="post an agent's tool list (non-zero if any exceed its profile)")
     sp.add_argument("agent", metavar="AGENT_ID")
@@ -735,7 +782,7 @@ COMMANDS = {
     "explain": cmd_explain, "search": cmd_search, "actors": cmd_actors,
     "digest": cmd_digest, "verify": cmd_verify, "lockouts": cmd_lockouts,
     "export": cmd_export, "permissions": cmd_permissions,
-    "manifest": cmd_manifest,
+    "manifest": cmd_manifest, "passwd": cmd_passwd,
     "stats": cmd_stats, "policy": cmd_policy,
 }
 

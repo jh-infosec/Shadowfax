@@ -117,6 +117,7 @@ def run(url: str, headed: bool) -> int:
 
         try:
             _run_checks(page, url, requested)
+            _run_reset_checks(browser, url)
         except Exception as exc:
             # A component that throws on mount takes the whole page with it, and
             # the first thing to notice is a selector that never appears. Report
@@ -303,6 +304,57 @@ def _run_checks(page, url: str, requested: list[str]) -> None:
         else:
             check("the sample agent's alerts could be found to open its drawer",
                   False, "no rows for recon-agent-3")
+
+
+def _api(url: str, method: str, path: str, body=None, token: str | None = None):
+    req = urllib.request.Request(
+        f"{url}{path}", data=json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json",
+                 **({"Authorization": f"Bearer {token}"} if token else {})},
+        method=method)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def _run_reset_checks(browser, url: str) -> None:
+    """After an admin reset, the dashboard must make the user choose a new
+    password before showing anything (v0.19). Driven end to end: a throwaway
+    user is created and reset over the API, then signs in in a fresh browser."""
+    import secrets
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    name = f"dash-reset-{secrets.token_hex(3)}"
+    _api(url, "POST", "/users", {"username": name, "password": "initial-pass-123",
+                                 "role": "analyst"}, admin)
+    given = _api(url, "POST", f"/users/{name}/password", {"generate": True}, admin)["password"]
+
+    context = browser.new_context(viewport={"width": 1300, "height": 900})
+    page = context.new_page()
+    page.goto(url, wait_until="networkidle")
+    page.fill('input[type="text"]', name)
+    page.fill('input[type="password"]', given)
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".password-screen", timeout=15000)
+    check("after an admin reset, sign-in leads to a forced password change",
+          page.locator(".topbar").count() == 0 and "administrator reset" in page.inner_text(".password-screen"))
+    inputs = page.locator(".password-screen input[type='password']")
+    inputs.nth(0).fill(given)
+    inputs.nth(1).fill("short")
+    inputs.nth(2).fill("short")
+    page.click(".password-screen button[type='submit']")
+    page.wait_for_timeout(500)
+    check("a too-short new password is refused on screen",
+          "at least 12" in page.inner_text(".password-screen"))
+    inputs.nth(1).fill("chosen-in-the-browser")
+    inputs.nth(2).fill("chosen-in-the-browser")
+    page.click(".password-screen button[type='submit']")
+    page.wait_for_selector("text=Password changed", timeout=10000)
+    page.click("text=Continue")
+    page.wait_for_selector(".topbar", timeout=15000)
+    page.wait_for_timeout(1500)
+    check("once changed, the dashboard loads with data",
+          page.locator(".table-wrap tbody tr").count() > 0
+          and page.locator("button", has_text="Change password").count() == 1)
+    context.close()
 
 
 def main(argv: list[str] | None = None) -> int:

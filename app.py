@@ -53,7 +53,7 @@ import tickets
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.18.0"
+VERSION = "0.19.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -193,8 +193,9 @@ def _bootstrap_admin(conn: sqlite3.Connection) -> None:
             "  SHADOWFAX: created the first admin account with a generated password\n"
             f"    username: {username}\n"
             f"    password: {password}\n"
-            "  It is shown once, here. Set SHADOWFAX_ADMIN_PASSWORD on first start\n"
-            "  to choose your own instead.\n"
+            "  It is shown once, here. Sign in and choose your own (Change password\n"
+            "  in the dashboard, or `shadowfax passwd`), or set\n"
+            "  SHADOWFAX_ADMIN_PASSWORD on first start instead.\n"
             + "=" * 72 + "\n"
         )
     else:
@@ -272,9 +273,21 @@ class LoginRequest(BaseModel):
 
 
 class CreateUserRequest(BaseModel):
-    username: str
+    username: str = Field(min_length=1, max_length=64)
     password: str
     role: str = "analyst"
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class ResetPasswordRequest(BaseModel):
+    # Either a password the admin chose, or none and `generate: true`, in which
+    # case Shadowfax picks one and returns it exactly once.
+    new_password: str | None = None
+    generate: bool = False
 
 
 class CreateApiKeyRequest(BaseModel):
@@ -306,14 +319,30 @@ def _identity(
             user = db.get_session_user(conn, auth.token_fingerprint(token))
             if user:
                 return {"kind": "user", "id": user["id"],
-                        "username": user["username"], "role": user["role"]}
+                        "username": user["username"], "role": user["role"],
+                        "must_change_password": user["must_change_password"],
+                        "session_fp": auth.token_fingerprint(token)}
     raise HTTPException(status_code=401, detail="authentication required",
                         headers={"WWW-Authenticate": "Bearer"})
 
 
-def require_user(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any]:
+def require_session(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any]:
+    """A signed-in user, even one who must change their password first. Only
+    the endpoints that let them do that -- and see who they are, and sign out --
+    use this directly."""
     if identity["kind"] != "user":
         raise HTTPException(403, "a signed-in user is required for this action")
+    return identity
+
+
+def require_user(identity: dict[str, Any] = Depends(require_session)) -> dict[str, Any]:
+    # v0.19: after an admin reset, the password is one someone else has seen.
+    # Until the owner replaces it, the session can change it and nothing else --
+    # enforced here, on the server, so a client that skips the prompt gains
+    # nothing.
+    if identity.get("must_change_password"):
+        raise HTTPException(403, "password change required: an administrator reset this "
+                                 "password; choose your own with POST /auth/password")
     return identity
 
 
@@ -1097,7 +1126,8 @@ def login(req: LoginRequest, request: Request):
 
     return {
         "token": token,
-        "user": {"username": user["username"], "role": user["role"]},
+        "user": {"username": user["username"], "role": user["role"],
+                 "must_change_password": bool(user.get("must_change_password"))},
         "expires_at": expires.isoformat(),
     }
 
@@ -1160,7 +1190,7 @@ def clear_lockout(username: str, identity: dict = Depends(require_role("admin"))
 
 @app.post("/auth/logout")
 def logout(authorization: str | None = Header(None),
-           identity: dict = Depends(require_user)):
+           identity: dict = Depends(require_session)):
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
         with db.get_conn() as conn:
@@ -1170,8 +1200,66 @@ def logout(authorization: str | None = Header(None),
 
 
 @app.get("/auth/me")
-def whoami(identity: dict = Depends(require_user)):
-    return {"username": identity["username"], "role": identity["role"]}
+def whoami(identity: dict = Depends(require_session)):
+    return {"username": identity["username"], "role": identity["role"],
+            "must_change_password": bool(identity.get("must_change_password"))}
+
+
+def _password_refusal(problems: list[str]) -> HTTPException:
+    return HTTPException(400, {"message": "password refused", "problems": problems})
+
+
+@app.post("/auth/password")
+def change_password(req: ChangePasswordRequest, request: Request,
+                    identity: dict = Depends(require_session)):
+    """Change your own password (v0.19).
+
+    The current password is required even though the caller is signed in: a
+    session left open on someone else's screen must not be enough to take the
+    account over. Wrong guesses go through the same throttle as sign-in, against
+    the same (username, source) scope, and are recorded as `auth_failure` events
+    -- so this endpoint cannot be used as an unthrottled password oracle by
+    anyone holding a stolen session.
+
+    Every other session the user has is ended; the one making the change stays
+    signed in. Streams those sessions opened close at their next keepalive.
+    """
+    source = _client_source(request)
+    now = _naive_utc_now()
+    window_start = now - timedelta(minutes=LOGIN_THROTTLE.window_minutes)
+    username = identity["username"]
+
+    with db.get_conn() as conn:
+        failures = db.recent_login_failures(conn, username, source, window_start)
+        decision = throttle.evaluate(failures, now, LOGIN_THROTTLE)
+        if not decision.allowed:
+            conn.commit()
+            raise HTTPException(429, decision.message(),
+                                headers={"Retry-After": str(decision.retry_after_seconds)})
+
+        user = db.get_user_by_username(conn, username)
+        if user is None or not auth.verify_password(req.current_password, user["salt"],
+                                                    user["password_hash"]):
+            db.record_login_attempt(conn, username, source, "failure", now)
+            _record_auth_event(conn, "auth_failure", username, source, now,
+                               context="password_change")
+            conn.commit()
+            raise HTTPException(401, "current password is incorrect")
+
+        problems = auth.password_problems(req.new_password, username)
+        if auth.verify_password(req.new_password, user["salt"], user["password_hash"]):
+            problems.append("must differ from the current password")
+        if problems:
+            raise _password_refusal(problems)
+
+        pw_hash, salt = auth.hash_password(req.new_password)
+        db.set_password(conn, user["id"], pw_hash, salt, must_change=False)
+        ended = db.delete_sessions_for_user(conn, user["id"], keep_fp=identity["session_fp"])
+        db.clear_login_failures(conn, username, source)
+        _record_auth_event(conn, "password_changed", username, source, now,
+                           other_sessions_ended=ended)
+        conn.commit()
+    return {"status": "password changed", "other_sessions_ended": ended}
 
 
 # User management (admin only)
@@ -1186,6 +1274,9 @@ def list_users(identity: dict = Depends(require_role("admin"))):
 def create_user(req: CreateUserRequest, identity: dict = Depends(require_role("admin"))):
     if not auth.is_valid_role(req.role):
         raise HTTPException(400, f"invalid role '{req.role}', expected one of {list(auth.ROLES)}")
+    problems = auth.password_problems(req.password, req.username)
+    if problems:
+        raise _password_refusal(problems)
     with db.get_conn() as conn:
         if db.get_user_by_username(conn, req.username):
             raise HTTPException(409, f"user '{req.username}' already exists")
@@ -1193,6 +1284,49 @@ def create_user(req: CreateUserRequest, identity: dict = Depends(require_role("a
         user = db.create_user(conn, req.username, pw_hash, salt, req.role)
         conn.commit()
     return user
+
+
+@app.post("/users/{username}/password")
+def reset_password(username: str, req: ResetPasswordRequest, request: Request,
+                   identity: dict = Depends(require_role("admin"))):
+    """An administrator sets someone else's password (v0.19).
+
+    The result is a password the admin has seen, so it is marked must-change:
+    the owner's next sign-in can do nothing but replace it. Every session the
+    user had is ended at once -- the usual reason for a reset is that the old
+    password, or a session, is no longer trusted. Recorded in the ledger as
+    `password_reset`, naming the admin who did it.
+
+    `generate: true` has Shadowfax choose the password and return it once, so
+    an admin never has to invent one (or reuse one).
+    """
+    if username == identity["username"]:
+        raise HTTPException(400, "to change your own password use POST /auth/password, "
+                                 "which asks for the current one")
+    if req.generate == (req.new_password is not None):
+        raise HTTPException(400, "give exactly one of new_password or generate: true")
+    new_password = auth.generate_password() if req.generate else req.new_password
+    problems = auth.password_problems(new_password, username)
+    if problems:
+        raise _password_refusal(problems)
+
+    now = _naive_utc_now()
+    with db.get_conn() as conn:
+        user = db.get_user_by_username(conn, username)
+        if user is None:
+            raise HTTPException(404, f"no user '{username}'")
+        pw_hash, salt = auth.hash_password(new_password)
+        db.set_password(conn, user["id"], pw_hash, salt, must_change=True)
+        ended = db.delete_sessions_for_user(conn, user["id"])
+        _record_auth_event(conn, "password_reset", username, _client_source(request), now,
+                           reset_by=identity["username"], sessions_ended=ended)
+        conn.commit()
+    out = {"status": "password reset; it must be changed at next sign-in",
+           "username": username, "sessions_ended": ended}
+    if req.generate:
+        out["password"] = new_password
+        out["note"] = "shown once; give it to the user over a channel you trust"
+    return out
 
 
 # API keys for programmatic ingest (admin only)

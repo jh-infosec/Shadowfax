@@ -4,6 +4,7 @@ import Sidebar from "./components/Sidebar.jsx";
 import AlertTable from "./components/AlertTable.jsx";
 import ActorDrawer from "./components/ActorDrawer.jsx";
 import PolicyEditor from "./components/PolicyEditor.jsx";
+import PasswordModal from "./components/PasswordModal.jsx";
 import IncidentsDrawer from "./components/IncidentsDrawer.jsx";
 import DigestDrawer from "./components/DigestDrawer.jsx";
 import LockoutsDrawer from "./components/LockoutsDrawer.jsx";
@@ -25,6 +26,10 @@ export default function App() {
   // `authChecked` guards the first render until we know whether a stored token
   // is still valid.
   const [user, setUser] = useState(null);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  // After an admin reset the server refuses everything but a password change
+  // (v0.19), so the dashboard does not try to load anything until it is done.
+  const ready = Boolean(user) && !user.must_change_password;
   const [authChecked, setAuthChecked] = useState(false);
 
   const [stats, setStats] = useState(null);
@@ -131,9 +136,9 @@ export default function App() {
 
   // Fetch on sign-in and whenever the filters change.
   useEffect(() => {
-    if (!user) return;
+    if (!ready) return;
     refresh();
-  }, [refresh, user]);
+  }, [refresh, ready]);
 
   // Live updates over Server-Sent Events, replacing the old poll loop. The
   // stream carries a lightweight "change" signal; the dashboard re-queries with
@@ -143,7 +148,7 @@ export default function App() {
   // built-in retry would reuse the same URL, and the ticket in that URL is
   // single-use. Each attempt asks for a fresh ticket, backing off to 30s.
   useEffect(() => {
-    if (!user) return;
+    if (!ready) return;
     let debounce;
     let retry;
     let es = null;
@@ -194,7 +199,7 @@ export default function App() {
       clearTimeout(retry);
       if (es) es.close();
     };
-  }, [user]);
+  }, [ready]);
 
   // Load the full timeline whenever an actor is selected from the table.
   useEffect(() => {
@@ -286,6 +291,17 @@ export default function App() {
     return <Login onAuthenticated={setUser} />;
   }
 
+  if (user.must_change_password) {
+    return (
+      <PasswordModal
+        forced
+        user={user}
+        onDone={() => setUser({ ...user, must_change_password: false })}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
   return (
     <div className="app">
       <TopBar
@@ -295,7 +311,15 @@ export default function App() {
         canReset={canAdmin}
         user={user}
         onLogout={handleLogout}
+        onChangePassword={() => setPasswordOpen(true)}
       />
+      {passwordOpen && (
+        <PasswordModal
+          user={user}
+          onDone={() => setPasswordOpen(false)}
+          onCancel={() => setPasswordOpen(false)}
+        />
+      )}
       {error && <div className="error-banner">{error}</div>}
 
       <div className="body">

@@ -44,6 +44,40 @@ def verify_password(password: str, salt: str, expected_hash: str) -> bool:
     return hmac.compare_digest(candidate, expected_hash)
 
 
+# Password policy (v0.19). Length is what makes a password hard to guess; the
+# usual composition rules (one digit, one symbol...) mostly produce "Password1!".
+# So: long enough, not absurdly long, not the username, not one of the handful
+# of passwords that are always tried first. The upper bound keeps one request
+# from asking for a key derivation over megabytes of input.
+PASSWORD_MIN_LENGTH = 12
+PASSWORD_MAX_LENGTH = 1024
+COMMON_PASSWORDS = frozenset({
+    "password", "password1", "password12", "password123", "password1234",
+    "passwordpassword", "123456789012", "1234567890123", "qwertyuiopas",
+    "administrator", "adminadminadmin", "changemechangeme", "letmeinletmein",
+    "shadowfaxshadowfax", "iloveyouiloveyou", "welcome12345", "qwerty123456",
+})
+
+
+def password_problems(password: str, username: str = "") -> list[str]:
+    """Why a new password is not acceptable, as sentences. Empty means fine."""
+    problems = []
+    if len(password) < PASSWORD_MIN_LENGTH:
+        problems.append(f"must be at least {PASSWORD_MIN_LENGTH} characters")
+    if len(password) > PASSWORD_MAX_LENGTH:
+        problems.append(f"may be at most {PASSWORD_MAX_LENGTH} characters")
+    if username and password.strip().lower() == username.strip().lower():
+        problems.append("may not be the username")
+    if password.strip().lower() in COMMON_PASSWORDS:
+        problems.append("is one of the first passwords anyone would try")
+    return problems
+
+
+def generate_password() -> str:
+    """A random password for an admin reset: 24 URL-safe characters."""
+    return secrets.token_urlsafe(18)
+
+
 # A fixed salt used only to burn the same work when no such user exists. It is
 # not a secret and protects nothing by itself -- see dummy_verify().
 _DUMMY_SALT = "00112233445566778899aabbccddeeff"

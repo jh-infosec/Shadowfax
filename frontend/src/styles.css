@@ -563,3 +563,14 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .perm-chip.plain { color: var(--muted); }
 .caps-drift { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
 .caps-drift b { color: var(--med); font-weight: 600; }
+
+/* Password change (v0.19) */
+.password-screen { position: fixed; inset: 0; background: var(--bg, #0b0e15); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 50; }
+.password-modal { max-width: 440px; width: 100%; }
+.password-body { padding: 4px 20px 8px; display: flex; flex-direction: column; gap: 12px; }
+.password-body label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+.password-body input { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 5px; font-size: 13px; }
+.password-hint { color: var(--muted-2); font-size: 11px; }
+.password-note { font-size: 12px; color: var(--muted); margin: 0; }
+.password-note.forced { color: var(--med); }
+.password-problems { color: var(--crit); font-family: var(--mono); font-size: 11px; margin: 0; }

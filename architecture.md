@@ -144,6 +144,14 @@ analysts made sub-second, shared updates worth the stream.
 
 ### Every endpoint is authenticated, and identity is server-side
 
+A user whose password an admin reset (v0.19) is marked `must_change_password`.
+`require_user` -- the dependency behind every user-facing route -- refuses such
+a session with a 403; only `require_session` routes (`/auth/me`,
+`/auth/password`, `/auth/logout`) accept it. The rule lives on the server, so a
+client that skips the change screen gains nothing. Changing a password requires
+the current one, runs through the sign-in throttle for (username, source), and
+ends every other session the user has; a reset ends all of them.
+
 No route is anonymous. A caller is either a signed-in user (a bearer token from
 `POST /auth/login`) or a service holding an API key (`X-API-Key`, ingest only).
 Access is role-ranked -- `admin` > `analyst` > `viewer` -- and checked by a
@@ -692,6 +700,14 @@ The actor's latest capability manifest (v0.18), from the `manifest` field of
 against the profile, excess ones first, and what changed since the previous
 manifest.
 
+#### src/components/PasswordModal.jsx
+
+Changing your own password (v0.19): current, new and confirmation, with the
+server's refusal reasons listed. In forced mode -- after an admin reset -- it is
+the whole screen, with no way out but changing the password or signing out;
+`App.jsx` holds back every data fetch and the live stream until then, since the
+server would refuse them anyway.
+
 #### src/components/PermissionsPanel.jsx
 
 The permission profile governing an actor (v0.16), from the `permissions` field
@@ -1001,4 +1017,5 @@ frontend/src/components/LedgerBadge.jsx
 frontend/src/components/LockoutsDrawer.jsx
 frontend/src/components/PermissionsPanel.jsx
 frontend/src/components/CapabilitiesPanel.jsx
+frontend/src/components/PasswordModal.jsx
 ```

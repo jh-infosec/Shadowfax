@@ -1,5 +1,80 @@
 # Changelog
 
+## Version 0.19.0
+
+Until now nobody could change a password. Not an analyst whose password had
+leaked, not an admin who wanted to lock someone out of an account — and not the
+admin of a published image, holding the random password that image had printed
+into its log. Every credential Shadowfax ever issued was permanent.
+
+### Added
+
+- **Change your own password** — `POST /auth/password`, a **Change password**
+  button in the dashboard, and `shadowfax passwd`.
+  - The **current password is required**, even though the caller is signed in.
+    A session left open on someone else's screen must not be enough to take the
+    account over.
+  - Wrong guesses go through **the same throttle as sign-in**, against the same
+    (username, source) scope, and are recorded as `auth_failure` events like
+    any failed sign-in. A stolen session cannot be turned into an unthrottled
+    oracle for the account's real password.
+  - **Every other session is signed out**; the one making the change stays
+    signed in. Their live streams close at the next keepalive (v0.17.1).
+- **An admin resets someone else's password** — `POST /users/{name}/password`
+  and `shadowfax passwd --user NAME [--generate]`.
+  - `generate: true` has Shadowfax choose a 24-character password and return it
+    exactly once, so an admin never invents one or reuses one. An
+    admin-chosen password is not echoed back.
+  - **Every session the user had is ended at once** — the usual reason for a
+    reset is that the old password, or a session, is no longer trusted.
+  - The new password is one the admin has seen, so it is **marked
+    must-change**. Until the owner replaces it, their session can see who it
+    is, change the password and sign out — and nothing else. That is enforced
+    by the server, so a client that skips the prompt gains nothing. The
+    dashboard shows only the change screen until it is done.
+  - An admin cannot reset **their own** password this way, because it would
+    skip the current-password check.
+- **A password policy** (`auth.password_problems`), applied to new users,
+  changes and resets: at least 12 characters, at most 1,024 (so one request
+  cannot ask for a key derivation over megabytes), not the username, not one of
+  the passwords always tried first. Length rather than composition rules —
+  "must contain a digit and a symbol" mostly produces `Password1!`. Refusals
+  list every problem, in the API, the CLI and the dashboard.
+- **In the ledger:** `password_changed` (with how many other sessions were
+  ended) and `password_reset` (naming the admin who did it), written into the
+  same hash-chained log as everything else under `shadowfax-auth`.
+- `must_change_password` and `password_changed_at` on users, added to existing
+  databases on startup.
+
+### Not changed, on purpose
+
+- **The first admin's generated password (v0.17) is not forced to change.**
+  It is random and shown once in a log — but forcing a change would break
+  `docker exec shadowfax python demo.py --password <it>`, which is the first
+  thing most people run. The startup banner now says how to change it.
+- **The bootstrap password from the environment is exempt from the policy**,
+  so `SHADOWFAX_ADMIN_PASSWORD=admin` for local use keeps working, with the
+  warning it has always printed.
+- **No self-service "forgot password".** That needs a channel Shadowfax does
+  not have (mail), and a reset link is a credential of its own. An admin
+  resets; the user changes.
+
+### Tests
+
+**567** API checks (from 530) and **26** dashboard checks (from 23). The new
+browser checks create a throwaway user, reset it over the API, sign in as it
+in a fresh browser, and confirm the dashboard shows only the forced change
+screen, refuses a short password on screen, and loads with data once the
+password is replaced.
+
+Each guard was broken on purpose and the right check failed: the must-change
+rule not enforced; the caller signed out by their own change; other sessions
+surviving; the current password not checked; the change endpoint not
+throttled; a reset not marked must-change; a reset not ending sessions; an
+admin resetting themselves. Rendering the dashboard despite a required change
+failed the browser check. The suite's own accounts now use a compliant
+password — they were `pw`.
+
 ## Version 0.18.0
 
 v0.16 gave each agent a permission profile: what it is **allowed** to do. The
