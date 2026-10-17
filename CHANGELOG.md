@@ -1,5 +1,81 @@
 # Changelog
 
+## Version 0.20.0
+
+Two things that matter once Shadowfax is running somewhere other people's
+software can reach it: how much one credential may send, and whether the image
+you pulled is the one this repository built.
+
+### Added: an ingest budget per credential
+
+v0.17.1 bounded each request. Nothing bounded how many requests a client sends:
+a runaway agent harness, or a stolen API key, could post valid events as fast as
+it liked, and every one is written, chained into the ledger and rescanned. That
+was the one item from the outside review of v0.17.0 left open.
+
+- **A budget per credential** — each API key and each signed-in user — of
+  events per minute (`SHADOWFAX_INGEST_EVENTS_PER_MINUTE`, default 6,000), as a
+  token bucket: up to a minute's worth at once, refilling continuously.
+  `POST /events` spends one per event, `POST /findings` one per finding, a
+  manifest one. **An empty request still spends one**, so a flood of tiny
+  requests is counted too.
+- **Over budget, the request is refused whole** with `429` and an exact
+  `Retry-After`, and nothing in it is stored. Half a batch would be worse than
+  none: the client could not tell which half. Accepted requests carry
+  `X-RateLimit-Limit` and `X-RateLimit-Remaining`, so a well-behaved harness
+  can pace itself rather than discover the limit.
+- **A flood is a finding.** The first refusal of an episode is written into
+  Shadowfax's own ledger under a new platform actor, `shadowfax-ingest`, and
+  raises **`ingest_flood`** (high), naming the credential. A key pushing past
+  its budget is either misconfigured or no longer in the hands it was issued
+  to, and an analyst should hear about it the way they hear about a
+  brute-force attempt on the front door. Further refusals in the same episode
+  are not recorded again — otherwise a flood would become a flood of evidence.
+- `ingest_throttled` is a **reserved event type**: `POST /events` refuses it,
+  and the detector honours it only under the platform's own actor, so nobody
+  can frame a credential (or a person) with a fake flood.
+- A budget smaller than the largest allowed batch is **refused at startup** —
+  a full batch could never fit, however long the client waited, which would be
+  a ban disguised as a limit. So are `0`, negatives and non-numbers.
+- `shadowfax-ingest` joins `shadowfax-auth` in `dormancy_exempt_actors`.
+
+### Added: signed images
+
+Since v0.17 the published image has carried build provenance and an SBOM. It
+has not carried any way to check it came from here: anyone with push access to
+the package could have put an image there.
+
+- **Keyless signing with Sigstore cosign.** The publish job asks GitHub for a
+  short-lived identity token (`id-token: write`, granted to that job alone),
+  trades it for a certificate naming this repository, this workflow and this
+  release tag, signs the image **by digest**, and records the signature in
+  Sigstore's public transparency log. No private key exists anywhere to leak.
+- **Verified as a stranger would, before anything else is checked.** The job
+  runs `cosign verify` pinned to the exact identity that should have signed:
+  this repository's `ci.yml`, at this release's tag, through GitHub's issuer. A
+  signature from another workflow, a fork or a branch fails the release.
+- The job summary and the README carry the command anyone can run:
+
+  ```bash
+  cosign verify ghcr.io/jh-infosec/shadowfax:0.20.0 \
+    --certificate-identity-regexp '^https://github.com/jh-infosec/Shadowfax/.github/workflows/ci.yml@refs/tags/v' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+
+Like the publish job itself, signing can only run on GitHub, on a release. Its
+first real run is the v0.20.0 release. The workflow passes `actionlint` and
+`shellcheck`, and the suite checks its shape: the token is granted to the
+publish job alone, the digest is signed after the push, and the verification is
+pinned to the exact identity and runs before the image is pulled back.
+
+### Tests
+
+**593** API checks (from 567). Every new guard was broken on purpose and the
+right check failed: every refusal treated as a new episode; `POST /events` not
+charged; empty requests free; `ingest_flood` honoured under any actor;
+`Retry-After` not computed; the identity token removed; the verification
+loosened to accept any signer.
+
 ## Version 0.19.0
 
 Until now nobody could change a password. Not an analyst whose password had

@@ -41,7 +41,7 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across twenty-one alert categories, including AI-agent tool-call analysis
+- Rule-based detection engine across twenty-two alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
@@ -73,7 +73,8 @@ investigation and explainability.
 - Findings-envelope export — Shadowfax speaks the format as well as reads it, so the portfolio's other tools can consume it in turn
 - One-command packaging — `docker compose up`, plus a scripted attack replay that makes the engine demonstrate itself
 - CI that builds the image and replays the attack against it, so every commit proves the detections still happen
-- Published image — every GitHub release ships `ghcr.io/jh-infosec/shadowfax`, only after the tests and the replay pass, with provenance and an SBOM, and never with a known password
+- Published image — every GitHub release ships `ghcr.io/jh-infosec/shadowfax`, only after the tests and the replay pass, with provenance and an SBOM, signed with Sigstore cosign, and never with a known password
+- Ingest budgets — each API key and user gets events per minute; a credential that floods is refused whole and raises an alert about itself
 - Dashboard checked in a real browser — building a bundle proves it compiles, not that anything reaches the screen
 - Automated API testing
 
@@ -231,6 +232,10 @@ Planned
 
 - Change and reset passwords — shipped (v0.19.0)
 
+### v0.20
+
+- Ingest budgets per credential; signed images — shipped (v0.20.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -257,6 +262,15 @@ image never starts with a password everyone knows: without
 hash. To choose your own, add `-e SHADOWFAX_ADMIN_PASSWORD=...` to the first
 `docker run`. Each release is also tagged by version (`:0.17.0`, `:0.17`), and
 carries build provenance and an SBOM.
+
+Every release is signed by this repository's CI. To check the image you pulled
+really came from it ([cosign](https://docs.sigstore.dev/cosign/system_config/installation/)):
+
+```bash
+cosign verify ghcr.io/jh-infosec/shadowfax:latest \
+  --certificate-identity-regexp '^https://github.com/jh-infosec/Shadowfax/.github/workflows/ci.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 From the source in front of you instead:
 
@@ -398,7 +412,7 @@ python demo.py --fast --assert
 ```
 
 That turns the demo into an end-to-end check of the whole stack — ingest,
-twenty-one detectors, correlation, kill-chain ordering, findings-envelope ingest,
+twenty-two detectors, correlation, kill-chain ordering, findings-envelope ingest,
 the front door and the ledger — against a real server over real HTTP. It is a
 different kind of evidence from the unit suite, which never leaves the process.
 
@@ -429,8 +443,10 @@ Publishing a release on github.com (**Releases → Draft a new release**, tag
 that commit. It refuses a tag that disagrees with the version in `app.py`,
 `frontend/package.json` and the changelog; pushes the image to
 `ghcr.io/jh-infosec/shadowfax` as `:0.17.0`, `:0.17` and `:latest` (a release
-marked as a pre-release never becomes `:latest`); then pulls back what it
-published, by digest, and checks that it starts, reports the right version,
+marked as a pre-release never becomes `:latest`); signs it with Sigstore cosign
+using the job's GitHub identity (no stored key) and verifies the signature
+against that exact identity (v0.20); then pulls back what it published, by
+digest, and checks that it starts, reports the right version,
 runs as non-root and generated its admin password. Pushing to `main` never
 publishes anything.
 
@@ -817,7 +833,7 @@ critical, high, medium, low, info
 ```
 
 A finding's `key` becomes the alert category, so an emitter **may not use one of
-Shadowfax's own twenty-one detector categories**. An alert reading
+Shadowfax's own twenty-two detector categories**. An alert reading
 `destructive_action` must mean Shadowfax's detector found it, not that somebody
 else said so.
 
@@ -938,8 +954,10 @@ session opened. Requests are bounded before they are parsed — 2 MiB per body,
 1,000 events or findings per request, 16 KiB of metadata per event, with fixed
 limits on identifiers — and each refusal names the setting that controls it
 (`SHADOWFAX_MAX_BODY_BYTES`, `SHADOWFAX_MAX_EVENTS_PER_REQUEST`,
-`SHADOWFAX_MAX_METADATA_BYTES`). Shadowfax does not rate-limit ingest; put that
-in the proxy that exposes it. Findings and manifests arrive only through the
+`SHADOWFAX_MAX_METADATA_BYTES`). Each ingest credential also has a budget —
+6,000 events a minute by default (`SHADOWFAX_INGEST_EVENTS_PER_MINUTE`) — past
+which requests are refused whole with `429` and `Retry-After`, and the first
+refusal raises an `ingest_flood` alert naming the credential. Findings and manifests arrive only through the
 endpoints that validate them — `POST /events` refuses both event types, and an
 envelope may not claim to come from Shadowfax. Hashing is
 stdlib PBKDF2 rather than bcrypt/argon2; that, and the still-single-writer

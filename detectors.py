@@ -34,7 +34,11 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "rate_anomaly", "token_spend_anomaly", "undeclared_agent",
     # v0.18: an agent's declared capabilities, against its profile and its calls.
     "capability_drift", "excess_capability", "unlisted_tool_call",
+    # v0.20: an ingest credential refused for exceeding its budget.
+    "ingest_flood",
 })
+
+INGEST_ACTOR_ID = "shadowfax-ingest"
 
 
 def external_alert_identity(tool: str, finding_id: str) -> str:
@@ -305,6 +309,17 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
             found = _external_alert(e, meta)
             if found:
                 alerts.append(found)
+            continue
+
+        # Ingest floods (v0.20). Shadowfax writes these itself when its limiter
+        # refuses a credential, one per episode; POST /events refuses the type,
+        # and only the platform's own actor is honoured.
+        if e["event_type"] == "ingest_throttled":
+            if e["actor_id"] == INGEST_ACTOR_ID:
+                alerts.append(_mk_alert(e, "high", "ingest_flood",
+                    f"{meta.get('principal', 'an ingest credential')} exceeded its budget of "
+                    f"{meta.get('budget_per_minute', '?')} events per minute -- a runaway "
+                    f"harness, or a credential no longer in the hands it was issued to"))
             continue
 
         # Capability manifests (v0.18). A manifest is a declaration, not an

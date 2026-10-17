@@ -346,7 +346,7 @@ class Demo:
 
         Without --assert this is a demo and returns 0 whatever happened: a
         person watching can see for themselves. With it, the replay becomes an
-        end-to-end check of the whole stack -- ingest, twenty-one detectors,
+        end-to-end check of the whole stack -- ingest, twenty-two detectors,
         correlation, kill-chain ordering, envelope ingest, the front door and
         the ledger -- against a real server over real HTTP. That is a different
         kind of evidence from the unit suite, which never leaves the process.

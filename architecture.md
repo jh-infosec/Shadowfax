@@ -387,6 +387,17 @@ manifest event, like a finding, skips the behavioural heuristics and the
 permission target check -- it is a declaration, not an action. Excess tools are
 reported once each across manifests; unlisted calls once per tool per manifest.
 
+#### ratelimit.py
+
+Ingest budgets (v0.20): `TokenBucket` (capacity = a minute's budget, continuous
+refill, `spend(cost)` returning a `Decision` with an exact `retry_after` and
+whether the refusal opens a new episode), `RateLimiter` (one bucket per
+credential, injectable clock, idle buckets dropped), `principal_of()` keying on
+API key id or user id. `app._charge_ingest` spends after the batch checks and
+before anything is stored; a new episode is written as `ingest_throttled` under
+`shadowfax-ingest`, which the detector turns into `ingest_flood` -- only under
+that actor, and `POST /events` refuses the type.
+
 #### tickets.py
 
 Single-use stream tickets (v0.17.1): `TicketBook.issue(user_id, session_fp)`
@@ -877,14 +888,15 @@ PBKDF2 rather than bcrypt/argon2, there is no rate limiting or account
 lockout, tokens are bearer tokens without rotation, and the store is
 single-writer SQLite. Harden these before running it anywhere shared.
 
-### Request limits, but no rate limit
+### Request limits and ingest budgets
 
 `limits.py` bounds each request (v0.17.1): the whole body by ASGI middleware
 before it is parsed -- a declared `Content-Length` refused unread, a chunked
 body counted and cut off -- then events or findings per request, metadata per
-event, and identifier lengths. Nothing bounds how *many* requests a client
-sends, and the event store grows with each; an append-only evidence log should
-not shed events under load. Volume over time belongs at the proxy in front.
+event, and identifier lengths. `ratelimit.py` (v0.20) bounds volume over time,
+per credential, in memory. The event store still grows with everything accepted
+-- an append-only evidence log should not shed events -- so a deployment that
+must cap total volume does it at the proxy in front.
 
 ### Single-writer database
 
@@ -968,6 +980,14 @@ an anonymous pull, warning (not failing) if the package is still private.
 Verifying the pulled digest rather than the local build is the point: the
 artifact people run is the one in the registry.
 
+**Signed (v0.20).** Between the push and the pull-back the job signs the digest
+with Sigstore cosign, keylessly: `id-token: write` (granted to this job alone)
+lets it obtain a short-lived certificate naming this repository, workflow and
+tag, and the signature goes into the public Rekor log. It then runs
+`cosign verify` pinned to exactly that identity
+(`https://github.com/<repo>/.github/workflows/ci.yml@<tag ref>`) and GitHub's
+issuer, so a release fails if the signature would not convince a stranger.
+
 **No known password in a published image.** From source, a fresh database gets
 `admin/admin` with a warning. The Dockerfile sets
 `SHADOWFAX_GENERATE_ADMIN_PASSWORD=1`, so the image instead generates a random
@@ -989,6 +1009,7 @@ seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
 throttle.py             envelope.py             permissions.py
 tickets.py              limits.py               manifest.py
+ratelimit.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml

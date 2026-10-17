@@ -44,6 +44,7 @@ _CATEGORY_PHRASE = {
     "excess_capability": "tools configured beyond what was granted",
     "capability_drift": "tools added between manifests",
     "unlisted_tool_call": "calls to tools missing from the manifest",
+    "ingest_flood": "an ingest credential over its budget",
 }
 
 

@@ -328,10 +328,11 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 - [x] Change and reset passwords (`v0.19.0`): current password required and
       throttled, other sessions ended, admin resets forced to change before the
       session can do anything else, a length-based policy, ledger events.
-- [ ] Rate-limit ingest per API key. Size limits bound one request; nothing yet
-      bounds how many a client sends.
-- [ ] Sign the image (cosign, keyless via GitHub's OIDC), so "this came from
-      that repository's CI" can be verified, not just stated in a label.
+- [x] Rate-limit ingest per credential (`v0.20.0`): a token bucket of events
+      per minute per API key or user; refused whole with 429 and Retry-After;
+      the first refusal of an episode raises `ingest_flood`.
+- [x] Sign the image (`v0.20.0`): cosign, keyless via GitHub's OIDC, verified in
+      the same job against the exact workflow-and-tag identity.
 - [ ] A way to reset a lost admin password that does not mean discarding the
       volume -- a one-off `docker exec` command, recorded in the ledger.
 

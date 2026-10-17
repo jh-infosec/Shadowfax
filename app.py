@@ -29,7 +29,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -48,12 +48,13 @@ import ledger
 import limits
 import manifest
 import permissions
+import ratelimit
 import throttle
 import tickets
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.19.0"
+VERSION = "0.20.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -72,11 +73,20 @@ STREAM_TICKETS = tickets.TicketBook()
 # which opened it is still signed in.
 STREAM_KEEPALIVE_SECONDS = 15.0
 
+# Per-credential ingest budget (v0.20), and the actor its refusals are recorded
+# under. See ratelimit.py.
+INGEST_LIMITER = ratelimit.RateLimiter.from_env(LIMITS.max_events_per_request)
+INGEST_ACTOR_ID = "shadowfax-ingest"
+INGEST_THROTTLED = "ingest_throttled"
+
 # Event types that may only arrive through the endpoint that validates them
 # (v0.18), mapped to that endpoint for the refusal message.
 RESERVED_EVENT_TYPES = {
     envelope.EVENT_TYPE: "POST /findings",
     manifest.EVENT_TYPE: "POST /agents/{agent_id}/manifest",
+    # v0.20: written only by Shadowfax itself, so an ingest_flood alert always
+    # means its own limiter refused someone.
+    INGEST_THROTTLED: "nothing -- Shadowfax records these itself",
 }
 
 # Recorded sign-in attempts are operational state for the throttle, not
@@ -440,10 +450,43 @@ def _record_auth_event(conn: sqlite3.Connection, event_type: str, username: str,
     bus.publish({"type": "change", "reason": "auth", "actors": [SELF_ACTOR_ID]})
 
 
+def _charge_ingest(identity: dict[str, Any], cost: int, response: Response) -> None:
+    """Spend `cost` events from the caller's budget, or refuse the request whole
+    with 429 (v0.20). The first refusal of an episode is recorded as evidence."""
+    key, label = ratelimit.principal_of(identity)
+    decision = INGEST_LIMITER.spend(key, cost)
+    headers = {"X-RateLimit-Limit": str(INGEST_LIMITER.per_minute),
+               "X-RateLimit-Remaining": str(decision.remaining)}
+    if decision.allowed:
+        response.headers.update(headers)
+        return
+    if decision.new_episode and SELF_MONITOR:
+        with db.get_conn() as conn:
+            db.insert_event(conn, {
+                "timestamp": _naive_utc_now().isoformat(),
+                "actor_id": INGEST_ACTOR_ID,
+                "actor_type": SELF_ACTOR_TYPE,
+                "task": "platform_ingest",
+                "event_type": INGEST_THROTTLED,
+                "target": label,
+                "metadata": {"principal": label, "requested": cost,
+                             "budget_per_minute": INGEST_LIMITER.per_minute},
+            })
+            _rescan_actor(conn, INGEST_ACTOR_ID)
+            conn.commit()
+        bus.publish({"type": "change", "reason": "ingest_throttled", "actors": [INGEST_ACTOR_ID]})
+    raise HTTPException(
+        429, f"{label} is over its ingest budget of {INGEST_LIMITER.per_minute:,} events "
+             f"per minute; retry in {decision.retry_after_seconds}s "
+             f"(SHADOWFAX_INGEST_EVENTS_PER_MINUTE)",
+        headers={**headers, "Retry-After": str(decision.retry_after_seconds)})
+
+
 # Event endpoints
 
 @app.post("/events")
-def ingest_events(events: list[EventRequest], identity: dict = Depends(allow_ingest)):
+def ingest_events(events: list[EventRequest], response: Response,
+                  identity: dict = Depends(allow_ingest)):
     """Ingest one or more events and refresh alerts for the affected actors."""
     if not events:
         raise HTTPException(400, "no events provided")
@@ -462,6 +505,7 @@ def ingest_events(events: list[EventRequest], identity: dict = Depends(allow_ing
         raise HTTPException(413, f"{len(events):,} events in one request; the limit is "
                                  f"{LIMITS.max_events_per_request:,} "
                                  f"(SHADOWFAX_MAX_EVENTS_PER_REQUEST) -- split the batch")
+    _charge_ingest(identity, len(events), response)
     with db.get_conn() as conn:
         affected_actors: set[str] = set()
         for ev in events:
@@ -515,7 +559,8 @@ def export_findings(actor_id: str | None = None,
 
 
 @app.post("/findings")
-def ingest_findings(doc: dict[str, Any], identity: dict = Depends(allow_ingest)):
+def ingest_findings(doc: dict[str, Any], response: Response,
+                    identity: dict = Depends(allow_ingest)):
     """Ingest a findings envelope (v0.11). See `findings-envelope.md`.
 
     Shadowfax knows nothing about the emitter. Anything that writes the envelope
@@ -534,6 +579,7 @@ def ingest_findings(doc: dict[str, Any], identity: dict = Depends(allow_ingest))
         raise HTTPException(413, f"{len(findings):,} findings in one envelope; the limit is "
                                  f"{LIMITS.max_events_per_request:,} "
                                  f"(SHADOWFAX_MAX_EVENTS_PER_REQUEST) -- split the envelope")
+    _charge_ingest(identity, len(findings) if isinstance(findings, list) else 1, response)
     try:
         envelope.validate(doc, detectors.NATIVE_CATEGORIES,
                           reserved_tools=frozenset({detectors.TOOL_NAME}))
@@ -780,7 +826,7 @@ def actor_detail(actor_id: str, identity: dict = Depends(require_role("viewer"))
 
 
 @app.post("/agents/{agent_id}/manifest")
-def post_manifest(agent_id: str, doc: dict[str, Any],
+def post_manifest(agent_id: str, doc: dict[str, Any], response: Response,
                   identity: dict = Depends(allow_ingest)):
     """Record what an agent is configured with -- its tools and MCP servers --
     so Shadowfax can compare it with what the agent is allowed (v0.18).
@@ -792,6 +838,7 @@ def post_manifest(agent_id: str, doc: dict[str, Any],
     """
     if not agent_id.strip() or len(agent_id) > limits.FIELD_MAX_LENGTH["actor_id"]:
         raise HTTPException(422, "agent id must be 1-256 characters")
+    _charge_ingest(identity, 1, response)
     try:
         parsed = manifest.parse(doc)
     except manifest.ManifestError as err:

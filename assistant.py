@@ -503,6 +503,9 @@ _CATEGORY_SYNONYMS = {
     "drift": "capability_drift",
     "manifest": "unlisted_tool_call",
     "unlisted": "unlisted_tool_call",
+    "flood": "ingest_flood",
+    "rate limit": "ingest_flood",
+    "throttled": "ingest_flood",
 }
 
 

@@ -54,6 +54,8 @@ CATEGORY_TO_TECHNIQUES: dict[str, list[str]] = {
     # the detector that recognises the technique raises it separately.
     # excess_capability, capability_drift, unlisted_tool_call (v0.18): no
     # mapping. They compare an agent's configuration with its declarations.
+    # ingest_flood (v0.20): no mapping -- a runaway harness is not a technique,
+    # and a flood that is one is better named by whoever investigates it.
 }
 
 

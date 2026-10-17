@@ -1757,6 +1757,126 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== ingest budgets and signed images (v0.20) ==")
+import ratelimit as rl
+
+# -- the bucket, as a pure object -------------------------------------------------
+_t = [0.0]
+_lim = rl.RateLimiter(per_minute=60, clock=lambda: _t[0])
+check("a fresh credential may spend its whole minute at once",
+      _lim.spend("k", 60).allowed and not _lim.spend("k", 1).allowed)
+_t[0] += 10
+_d = _lim.spend("k", 20)
+check("it refills continuously -- ten seconds buys ten of sixty",
+      not _d.allowed and _d.retry_after_seconds == 10)
+check("and Retry-After is exactly how long the request would have to wait",
+      _lim.spend("k", 10).allowed)
+check("an empty request still costs one, so tiny requests are counted",
+      not _lim.spend("k", 0).allowed)
+check("credentials have separate budgets", _lim.spend("other", 60).allowed)
+_t[0] += 1000
+_lim.spend("k", 60)
+_first = _lim.spend("k", 1)
+_again = _lim.spend("k", 1)
+check("the first refusal after a quiet spell opens an episode; the next does not",
+      _first.new_episode and not _again.new_episode)
+_t[0] += 61
+check("a refusal a minute later is a new episode", _lim.spend("k", 120).new_episode)
+for _bad in ("0", "-1", "lots"):
+    os.environ["SHADOWFAX_INGEST_EVENTS_PER_MINUTE"] = _bad
+    try:
+        rl.RateLimiter.from_env(1000); _ok = False
+    except ValueError:
+        _ok = True
+    check(f"a nonsensical budget ({_bad!r}) stops startup", _ok)
+os.environ["SHADOWFAX_INGEST_EVENTS_PER_MINUTE"] = "500"
+try:
+    rl.RateLimiter.from_env(1000); _ok = False
+except ValueError as _e:
+    _ok = "could never fit" in str(_e)
+check("a budget smaller than the largest batch is refused -- it would be a silent ban", _ok)
+del os.environ["SHADOWFAX_INGEST_EVENTS_PER_MINUTE"]
+
+# -- through the API ----------------------------------------------------------------
+_saved_lim = app_module.INGEST_LIMITER
+_clock = [5000.0]
+app_module.INGEST_LIMITER = rl.RateLimiter(per_minute=10, clock=lambda: _clock[0])
+app_module.SELF_MONITOR = True
+def _evs(n, actor="flood-probe"):
+    return [{"timestamp": f"2026-10-13T10:00:{i:02d}", "actor_id": actor, "actor_type": "ai_agent",
+             "event_type": "file_access", "target": "x", "metadata": {}} for i in range(n)]
+_r = client.post("/events", json=_evs(6))
+check("within budget, ingest is accepted and says what is left",
+      _r.status_code == 200 and _r.headers.get("x-ratelimit-remaining") == "4"
+      and _r.headers.get("x-ratelimit-limit") == "10")
+_before = client.get("/stats").json()["event_count"]
+_r = client.post("/events", json=_evs(5))
+check("a batch that does not fit is refused with 429 and Retry-After",
+      _r.status_code == 429 and int(_r.headers["retry-after"]) >= 1
+      and "SHADOWFAX_INGEST_EVENTS_PER_MINUTE" in _r.json()["detail"])
+_after = client.get("/stats").json()["event_count"]
+check("and refused whole: none of its events are stored",
+      _after == _before + 1)      # +1 is the throttle's own evidence, checked next
+_fl = client.get("/alerts", params={"category": ["ingest_flood"]}).json()
+check("the refusal is evidence: an ingest_flood alert, naming the credential",
+      len(_fl) == 1 and _fl[0]["severity"] == "high" and "user 'admin'" in _fl[0]["message"]
+      and _fl[0]["actor_id"] == "shadowfax-ingest")
+client.post("/events", json=_evs(5))
+client.post("/agents/flood-probe/manifest", json={"tools": []})
+check("further refusals in the same episode are not recorded again",
+      len(client.get("/alerts", params={"category": ["ingest_flood"]}).json()) == 1)
+_kk = client.post("/api-keys", json={"label": "flood-harness"}).json()["api_key"]
+check("another credential's budget is untouched",
+      TestClient(app).post("/events", json=_evs(3, "other-probe"),
+                           headers={"X-API-Key": _kk}).status_code == 200)
+check("a manifest spends from the same budget",
+      TestClient(app).post("/agents/other-probe/manifest", json={"tools": []},
+                           headers={"X-API-Key": _kk}).headers.get("x-ratelimit-remaining") == "6")
+_clock[0] += 120
+check("once the minute has refilled, ingest is accepted again",
+      client.post("/events", json=_evs(10)).status_code == 200)
+_r = client.post("/events", json=[{"timestamp": "2026-10-13T10:00:00", "actor_id": "shadowfax-ingest",
+                                   "actor_type": "service_account", "event_type": "ingest_throttled",
+                                   "target": "x", "metadata": {"principal": "someone innocent"}}])
+check("nobody can forge an ingest_flood by posting the event type themselves",
+      _r.status_code == 400)
+with db_module.get_conn() as _c:     # and a stored row under any other actor is ignored
+    db_module.insert_event(_c, {"timestamp": "2026-10-13T10:00:00", "actor_id": "user-framed",
+                                "actor_type": "human", "event_type": "ingest_throttled",
+                                "target": "x", "metadata": {"principal": "user-framed"}})
+    _c.commit()
+client.put("/policy", json=client.get("/policy").json())
+check("only the platform's own actor can carry an ingest_flood",
+      not client.get("/alerts", params={"actor_id": "user-framed"}).json())
+app_module.INGEST_LIMITER = _saved_lim
+app_module.SELF_MONITOR = False
+check("a flood is not mistaken for the platform going quiet and waking up",
+      "shadowfax-ingest" in client.get("/policy").json()["dormancy_exempt_actors"])
+
+# -- signing, as wired in CI --------------------------------------------------------
+if _ci_path.exists():
+    _pub = _yaml.safe_load(_ci_path.read_text(encoding="utf-8"))["jobs"]["publish"]
+    _steps = [st for st in _pub["steps"]]
+    _names = [st.get("name", st.get("uses", "")) for st in _steps]
+    _text = [json.dumps(st) for st in _steps]
+    _idx = lambda needle: next(i for i, t in enumerate(_text) if needle in t)
+    check("only the publish job may ask GitHub for an identity token",
+          _pub["permissions"].get("id-token") == "write"
+          and all("id-token" not in (j.get("permissions") or {})
+                  for n, j in _yaml.safe_load(_ci_path.read_text(encoding="utf-8"))["jobs"].items()
+                  if n != "publish"))
+    check("the image is signed by digest, after it is pushed",
+          _idx("build-push-action") < _idx("cosign sign") and "${IMAGE}@${DIGEST}" in _text[_idx("cosign sign")])
+    _verify = _text[_idx("cosign verify")]
+    check("and the signature is verified against the exact identity that should have made it",
+          _idx("cosign sign") < _idx("cosign verify")
+          and "ci.yml@${GITHUB_REF}" in _verify
+          and "token.actions.githubusercontent.com" in _verify)
+    check("before the published image is pulled back and checked",
+          _idx("cosign verify") < _idx("Pull back"))
+else:
+    print("[SKIP] .github/workflows/ci.yml not present in this copy")
+
 print("\n== changing and resetting passwords (v0.19) ==")
 import auth as _auth_mod
 import cli as _cli_mod
