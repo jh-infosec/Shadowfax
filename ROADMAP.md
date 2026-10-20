@@ -333,6 +333,11 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       the first refusal of an episode raises `ingest_flood`.
 - [x] Sign the image (`v0.20.0`): cosign, keyless via GitHub's OIDC, verified in
       the same job against the exact workflow-and-tag identity.
+- [x] An independent security review of v0.20 (`v0.21.0`): fifteen findings,
+      all fixed -- strict UTC timestamps, a locked ledger head, reserved
+      actors, subject-scoped finding ids, the sign-in race closed,
+      `history_rewritten` when an upload retires alerts, CLI credentials
+      scoped to their server, the compose port bound to localhost.
 - [ ] A way to reset a lost admin password that does not mean discarding the
       volume -- a one-off `docker exec` command, recorded in the ledger.
 

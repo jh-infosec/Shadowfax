@@ -41,7 +41,7 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across twenty-two alert categories, including AI-agent tool-call analysis
+- Rule-based detection engine across twenty-three alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
@@ -68,6 +68,7 @@ investigation and explainability.
 - Command-line interface — ingest, query, explain and gate on alerts from a shell; `--json` everywhere for agents
 - Tamper-evident event ledger — every event hash-chained to the one before it, so an edit, deletion or reordering breaks the chain at a locatable point
 - Sign-in throttling and lockout — backoff then lockout on the platform's own login, with no enumeration oracle and no sleeping
+- History that cannot be quietly rewritten — when a new upload makes alerts disappear, Shadowfax records which ones and who sent it, and raises `history_rewritten`
 - Self-monitoring — attacks on Shadowfax's own front door become ordinary events and raise ordinary alerts, through the same detectors as everything else
 - Findings-envelope ingest — any tool that writes the shared envelope can post findings, and Shadowfax needs to know nothing about it
 - Findings-envelope export — Shadowfax speaks the format as well as reads it, so the portfolio's other tools can consume it in turn
@@ -235,6 +236,10 @@ Planned
 ### v0.20
 
 - Ingest budgets per credential; signed images — shipped (v0.20.0)
+
+### v0.21
+
+- Fixes from an independent security review — shipped (v0.21.0)
 
 ### v1.0
 
@@ -412,7 +417,7 @@ python demo.py --fast --assert
 ```
 
 That turns the demo into an end-to-end check of the whole stack — ingest,
-twenty-two detectors, correlation, kill-chain ordering, findings-envelope ingest,
+twenty-three detectors, correlation, kill-chain ordering, findings-envelope ingest,
 the front door and the ledger — against a real server over real HTTP. It is a
 different kind of evidence from the unit suite, which never leaves the process.
 
@@ -833,7 +838,7 @@ critical, high, medium, low, info
 ```
 
 A finding's `key` becomes the alert category, so an emitter **may not use one of
-Shadowfax's own twenty-two detector categories**. An alert reading
+Shadowfax's own twenty-three detector categories**. An alert reading
 `destructive_action` must mean Shadowfax's detector found it, not that somebody
 else said so.
 
@@ -959,7 +964,20 @@ limits on identifiers — and each refusal names the setting that controls it
 which requests are refused whole with `429` and `Retry-After`, and the first
 refusal raises an `ingest_flood` alert naming the credential. Findings and manifests arrive only through the
 endpoints that validate them — `POST /events` refuses both event types, and an
-envelope may not claim to come from Shadowfax. Hashing is
+envelope may not claim to come from Shadowfax.
+
+Timestamps must be ISO 8601 and are stored in UTC, so `+02:00` and `Z` sort
+and compare as the same instant. Because detection reads the whole history,
+a new event dated in the past can change what was concluded about the past —
+so when an upload makes existing alerts disappear, Shadowfax writes an
+`alerts_retired` event naming them and the credential that sent it, and raises
+`history_rewritten` (high). Nobody can ingest under Shadowfax's own actors
+(`shadowfax`, `shadowfax-ingest`), tool names in findings are restricted to
+letters, digits, `.`, `_` and `-`, and an external tool's finding ids are
+scoped to the subject they describe. The ledger takes a write lock before it
+reads the chain head, so two writers cannot fork it. The command line only
+sends a saved token to the server it was saved for, and does not follow
+redirects. Hashing is
 stdlib PBKDF2 rather than bcrypt/argon2; that, and the still-single-writer
 SQLite backend, are the reasons Shadowfax remains a local-development tool.
 

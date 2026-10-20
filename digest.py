@@ -27,6 +27,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import timeutil
+
 # Points per incident severity. Deliberately coarse: the point is ordering, not
 # false precision.
 # `info` scores nothing: informational findings are context for a triage
@@ -52,7 +54,7 @@ DEFAULT_LIMIT = 5
 
 def _age_days(end: str, now: datetime) -> int:
     try:
-        return max(0, (now - datetime.fromisoformat(end)).days)
+        return max(0, (now - timeutil.parse(end)).days)
     except (TypeError, ValueError):
         return 0
 

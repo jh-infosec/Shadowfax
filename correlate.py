@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import attack
+import timeutil
 
 SEVERITY_WEIGHT = {"critical": 10, "high": 5, "medium": 2, "low": 1, "info": 0}
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -45,6 +46,7 @@ _CATEGORY_PHRASE = {
     "capability_drift": "tools added between manifests",
     "unlisted_tool_call": "calls to tools missing from the manifest",
     "ingest_flood": "an ingest credential over its budget",
+    "history_rewritten": "alerts retired by later ingest",
 }
 
 
@@ -60,9 +62,15 @@ def _fmt_time(ts: str) -> str:
     return ts.replace("T", " ")[:16]
 
 
-def _neg_ts(ts: str) -> str:
-    # Sort key that puts the most recent end first, after severity.
-    return "".join(chr(255 - ord(c)) for c in ts)
+def _neg_ts(ts: str) -> float:
+    # Sort key that puts the most recent end first, after severity. Numeric,
+    # from the parsed time: the old string trick -- chr(255 - ord(c)) per
+    # character -- raised on any character above U+00FF, so one crafted
+    # timestamp took /incidents and /digest down for everyone (v0.21).
+    try:
+        return -timeutil.parse(ts).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # --- attack-chain detection (v0.6) -----------------------------------------
@@ -167,11 +175,11 @@ def correlate(alerts: list[dict[str, Any]], window_minutes: int,
     incidents: list[dict[str, Any]] = []
 
     for actor_id, actor_alerts in by_actor.items():
-        ordered = sorted(actor_alerts, key=lambda a: a["timestamp"])
+        ordered = sorted(actor_alerts, key=lambda a: timeutil.parse(a["timestamp"]))
         cluster: list[dict[str, Any]] = []
         last_ts: datetime | None = None
         for a in ordered:
-            ts = datetime.fromisoformat(a["timestamp"])
+            ts = timeutil.parse(a["timestamp"])
             if last_ts is not None and ts - last_ts > window:
                 incidents.append(_build_incident(actor_id, cluster, chain_min_stages))
                 cluster = []
@@ -186,12 +194,12 @@ def correlate(alerts: list[dict[str, Any]], window_minutes: int,
 
 def _build_incident(actor_id: str, cluster: list[dict[str, Any]],
                     chain_min_stages: int = 3) -> dict[str, Any]:
-    cluster = sorted(cluster, key=lambda a: a["timestamp"])
+    cluster = sorted(cluster, key=lambda a: timeutil.parse(a["timestamp"]))
     first, last = cluster[0], cluster[-1]
     severities = [a["severity"] for a in cluster]
     severity_counts = {s: severities.count(s) for s in ("critical", "high", "medium", "low")}
-    start = datetime.fromisoformat(first["timestamp"])
-    end = datetime.fromisoformat(last["timestamp"])
+    start = timeutil.parse(first["timestamp"])
+    end = timeutil.parse(last["timestamp"])
 
     categories: list[str] = []
     for a in cluster:

@@ -51,10 +51,11 @@ import permissions
 import ratelimit
 import throttle
 import tickets
+import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.20.0"
+VERSION = "0.21.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -87,6 +88,7 @@ RESERVED_EVENT_TYPES = {
     # v0.20: written only by Shadowfax itself, so an ingest_flood alert always
     # means its own limiter refused someone.
     INGEST_THROTTLED: "nothing -- Shadowfax records these itself",
+    "alerts_retired": "nothing -- Shadowfax records these itself",
 }
 
 # Recorded sign-in attempts are operational state for the throttle, not
@@ -111,6 +113,27 @@ EMPTY_RISK = {"score": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "info
 SELF_ACTOR_ID = "shadowfax-auth"
 SELF_ACTOR_TYPE = "service_account"
 SELF_TARGET = "shadowfax_login"
+
+# The platform's own actors (v0.21). Only Shadowfax writes their timelines: an
+# ingest client posting a "password_reset ... reset_by: admin" event under
+# shadowfax-auth produced an entry indistinguishable from a real one.
+RESERVED_ACTORS = frozenset({SELF_ACTOR_ID, INGEST_ACTOR_ID})
+
+
+def _refuse_reserved_actor(actor_id: str) -> None:
+    if actor_id in RESERVED_ACTORS:
+        raise HTTPException(400, f"'{actor_id}' is one of Shadowfax's own actors; only "
+                                 f"Shadowfax writes its timeline")
+
+
+def _alerts_for(identity: dict[str, Any], alerts: list[dict[str, Any]]) -> Any:
+    """What an ingest response may say about alerts (v0.21). A service key is
+    for ingest only and gets 403 on GET /alerts -- but every ingest response
+    used to return all alerts for each actor it touched, messages included.
+    A key now learns how many, not what."""
+    if identity.get("kind") == "service":
+        return {"count": len(alerts)}
+    return alerts
 
 # Off only if explicitly disabled. The volume is bounded by the throttle itself:
 # a scope can log at most `max_failures` failures before it is locked out, so
@@ -255,6 +278,13 @@ class EventRequest(BaseModel):
     target: str = Field(max_length=_MAX["target"])
     metadata: dict[str, Any] = {}
 
+    @field_validator("timestamp")
+    @classmethod
+    def _timestamp_is_iso(cls, value: str) -> str:
+        # v0.21: one strict shape, stored as naive UTC. See timeutil.py for the
+        # two outages a loosely-parsed timestamp caused.
+        return timeutil.normalise(value)
+
     @field_validator("metadata")
     @classmethod
     def _metadata_is_bounded(cls, value: dict[str, Any]) -> dict[str, Any]:
@@ -278,8 +308,11 @@ class AlertStateUpdate(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    # Bounded (v0.21): the attempted username is stored with every failure, and
+    # this endpoint is unauthenticated -- a 2 MB username was 2 MB of disk per
+    # request, in a ledger that is never pruned.
+    username: str = Field(max_length=64)
+    password: str = Field(max_length=1024)
 
 
 class CreateUserRequest(BaseModel):
@@ -289,8 +322,8 @@ class CreateUserRequest(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str
+    current_password: str = Field(max_length=1024)
+    new_password: str = Field(max_length=1024)
 
 
 class ResetPasswordRequest(BaseModel):
@@ -368,6 +401,11 @@ def allow_ingest(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any
     """Ingestion is open to a service API key or to an analyst-or-higher user."""
     if identity["kind"] == "service":
         return identity
+    if identity.get("must_change_password"):
+        # v0.21: a session that must change its password could still ingest,
+        # because this dependency bypassed require_user. It can't now.
+        raise HTTPException(403, "password change required: choose your own with "
+                                 "POST /auth/password")
     if auth.role_at_least(identity.get("role"), "analyst"):
         return identity
     raise HTTPException(403, "ingest requires a service API key or an analyst (or higher) user")
@@ -380,6 +418,34 @@ def _rescan_actor(conn: sqlite3.Connection, actor_id: str) -> list[dict[str, Any
     events = db.get_events_for_actor(conn, actor_id)
     alerts = detectors.run_for_actor(events, policy)
     db.replace_alerts_for_actor(conn, actor_id, alerts)
+    return alerts
+
+
+def _rescan_after_ingest(conn: sqlite3.Connection, actor_id: str,
+                         identity: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rescan after an ingest, recording any alert the new events retired (v0.21).
+
+    A policy change retiring alerts is the analyst's own doing; an ingest doing
+    so means new events changed what the engine concluded about events it had
+    already judged. That is written into the ledger under shadowfax-ingest and
+    raises history_rewritten, naming the credential, so it is never silent.
+    """
+    before = {r["id"]: (r["category"], r["severity"]) for r in conn.execute(
+        "SELECT id, category, severity FROM alerts WHERE actor_id = ?", (actor_id,))}
+    alerts = _rescan_actor(conn, actor_id)
+    after = {a["id"] for a in alerts}
+    retired = [{"id": i, "category": c, "severity": sv}
+               for i, (c, sv) in before.items() if i not in after]
+    if retired and SELF_MONITOR:
+        _, label = ratelimit.principal_of(identity)
+        db.insert_event(conn, {
+            "timestamp": _naive_utc_now().isoformat(),
+            "actor_id": INGEST_ACTOR_ID, "actor_type": SELF_ACTOR_TYPE,
+            "task": "platform_ingest", "event_type": "alerts_retired",
+            "target": actor_id,
+            "metadata": {"actor_id": actor_id, "principal": label, "retired": retired},
+        })
+        _rescan_actor(conn, INGEST_ACTOR_ID)
     return alerts
 
 
@@ -499,6 +565,8 @@ def ingest_events(events: list[EventRequest], response: Response,
         # against anyone. Each now has exactly one way in.
         raise HTTPException(400, f"event_type {reserved[0]!r} cannot be posted as a raw "
                                  f"event; use {RESERVED_EVENT_TYPES[reserved[0]]}")
+    for ev in events:
+        _refuse_reserved_actor(ev.actor_id)
     if len(events) > LIMITS.max_events_per_request:
         # Each affected actor is rescanned, so the batch bounds the work one
         # request can cause. 413 with the number, so a client can split.
@@ -513,10 +581,11 @@ def ingest_events(events: list[EventRequest], response: Response,
             affected_actors.add(ev.actor_id)
         new_alerts: list[dict[str, Any]] = []
         for actor_id in affected_actors:
-            new_alerts.extend(_rescan_actor(conn, actor_id))
+            new_alerts.extend(_rescan_after_ingest(conn, actor_id, identity))
         conn.commit()
     bus.publish({"type": "change", "reason": "ingest", "actors": list(affected_actors)})
-    return {"ingested": len(events), "affected_actors": list(affected_actors), "alerts": new_alerts}
+    return {"ingested": len(events), "affected_actors": list(affected_actors),
+            "alerts": _alerts_for(identity, new_alerts)}
 
 
 @app.get("/findings")
@@ -592,13 +661,14 @@ def ingest_findings(doc: dict[str, Any], response: Response,
 
     tool = doc["source"]["tool"]
     actor_id = envelope.actor_for(doc["subject"])
+    _refuse_reserved_actor(actor_id)
 
     with db.get_conn() as conn:
         actor_types = dict(db.distinct_actors(conn))
         events = envelope.to_events(doc, actor_types)
 
         already = db.known_finding_ids(
-            conn, tool, [e["metadata"]["finding"]["id"] for e in events])
+            conn, tool, [e["metadata"]["finding"]["id"] for e in events], actor_id)
         fresh = [e for e in events if e["metadata"]["finding"]["id"] not in already]
 
         for event in fresh:
@@ -614,7 +684,7 @@ def ingest_findings(doc: dict[str, Any], response: Response,
         "skipped": len(already),
         "actor_id": actor_id,
         "envelope": envelope.summarise(doc),
-        "alerts": alerts,
+        "alerts": _alerts_for(identity, alerts),
     }
 
 
@@ -728,8 +798,11 @@ def stream_ticket(authorization: str | None = Header(None),
 
 
 def _session_alive(session_fp: str) -> bool:
+    # A must-change session is not a live one for streaming (v0.21): the bearer
+    # path used to check only that the session existed.
     with db.get_conn() as conn:
-        return db.get_session_user(conn, session_fp) is not None
+        user = db.get_session_user(conn, session_fp)
+    return user is not None and not user["must_change_password"]
 
 
 @app.get("/stream")
@@ -838,6 +911,7 @@ def post_manifest(agent_id: str, doc: dict[str, Any], response: Response,
     """
     if not agent_id.strip() or len(agent_id) > limits.FIELD_MAX_LENGTH["actor_id"]:
         raise HTTPException(422, "agent id must be 1-256 characters")
+    _refuse_reserved_actor(agent_id)
     _charge_ingest(identity, 1, response)
     try:
         parsed = manifest.parse(doc)
@@ -854,7 +928,7 @@ def post_manifest(agent_id: str, doc: dict[str, Any], response: Response,
         alerts: list[dict[str, Any]] = []
         if changed:
             db.insert_event(conn, manifest.to_event(parsed, agent_id, actor_type))
-            alerts = _rescan_actor(conn, agent_id)
+            alerts = _rescan_after_ingest(conn, agent_id, identity)
         conn.commit()
         policy = db.get_policy(conn) or DEFAULT_POLICY
         resolution = permissions.resolve(agent_id, policy)
@@ -870,8 +944,8 @@ def post_manifest(agent_id: str, doc: dict[str, Any], response: Response,
         "mcp_servers": list(parsed.servers),
         "profile": resolution.name,
         "excess": [t for t in assessed if t["severity"]],
-        "alerts": [a for a in alerts if a["category"] in
-                   ("excess_capability", "capability_drift", "undeclared_agent")],
+        "alerts": _alerts_for(identity, [a for a in alerts if a["category"] in
+                   ("excess_capability", "capability_drift", "undeclared_agent")]),
     }
 
 
@@ -1107,6 +1181,13 @@ def login(req: LoginRequest, request: Request):
     window_start = now - timedelta(minutes=LOGIN_THROTTLE.window_minutes)
 
     with db.get_conn() as conn:
+        # Read the counts and reserve this attempt under one write lock (v0.21).
+        # The check used to read failures, then spend ~0.1s on PBKDF2, then
+        # write: forty concurrent guesses all read "0 failures" and all got a
+        # real password check against a policy of five. Now each attempt is
+        # counted -- as a failure, until proven otherwise -- before the slow
+        # part, so concurrent guesses see each other.
+        conn.execute("BEGIN IMMEDIATE")
         failures = db.recent_login_failures(conn, req.username, source, window_start)
         # Two scopes: this username from this source, and this source across
         # every username it has tried. The second is what stops spraying, where
@@ -1129,6 +1210,9 @@ def login(req: LoginRequest, request: Request):
                 headers={"Retry-After": str(decision.retry_after_seconds)},
             )
 
+        db.record_login_attempt(conn, req.username, source, "failure", now)
+        conn.commit()
+
         user = db.get_user_by_username(conn, req.username)
         if user is None:
             ok = auth.dummy_verify(req.password)
@@ -1136,7 +1220,6 @@ def login(req: LoginRequest, request: Request):
             ok = auth.verify_password(req.password, user["salt"], user["password_hash"])
 
         if not ok:
-            db.record_login_attempt(conn, req.username, source, "failure", now)
             _record_auth_event(conn, "auth_failure", req.username, source, now)
 
             # Re-evaluate including the failure just recorded, so the lockout
@@ -1277,21 +1360,30 @@ def change_password(req: ChangePasswordRequest, request: Request,
     username = identity["username"]
 
     with db.get_conn() as conn:
+        # Counted before the slow check, under the write lock -- see login.
+        conn.execute("BEGIN IMMEDIATE")
         failures = db.recent_login_failures(conn, username, source, window_start)
         decision = throttle.evaluate(failures, now, LOGIN_THROTTLE)
         if not decision.allowed:
             conn.commit()
             raise HTTPException(429, decision.message(),
                                 headers={"Retry-After": str(decision.retry_after_seconds)})
+        db.record_login_attempt(conn, username, source, "failure", now)
+        conn.commit()
 
         user = db.get_user_by_username(conn, username)
         if user is None or not auth.verify_password(req.current_password, user["salt"],
                                                     user["password_hash"]):
-            db.record_login_attempt(conn, username, source, "failure", now)
             _record_auth_event(conn, "auth_failure", username, source, now,
                                context="password_change")
             conn.commit()
             raise HTTPException(401, "current password is incorrect")
+
+        # The current password was right: like a successful sign-in, that
+        # clears the scope -- including the attempt reserved above -- whether
+        # or not the new password is then acceptable.
+        db.clear_login_failures(conn, username, source)
+        conn.commit()
 
         problems = auth.password_problems(req.new_password, username)
         if auth.verify_password(req.new_password, user["salt"], user["password_hash"]):

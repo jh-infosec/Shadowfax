@@ -221,7 +221,9 @@ def _migrate_legacy_alerts(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def get_conn(path: Path | None = None) -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(path or DB_PATH)
+    # A generous busy timeout: writers now queue for the ledger head (v0.21)
+    # rather than racing past each other.
+    conn = sqlite3.connect(path or DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     try:
@@ -303,6 +305,15 @@ def ledger_entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def insert_event(conn: sqlite3.Connection, event: dict[str, Any]) -> int:
     # Chain this event to the current head before storing it, so the ledger is
     # append-only by construction rather than by convention.
+    #
+    # The head must be read inside the write lock (v0.21). sqlite3 only begins
+    # a transaction at the first INSERT, so the SELECT below used to run with no
+    # lock held: two concurrent requests read the same head, both chained to
+    # it, and the ledger forked -- verification then reported tampering that
+    # never happened, and hid any real tampering after the fork. BEGIN
+    # IMMEDIATE takes the write lock first, so heads are read one at a time.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     head = get_ledger_head(conn)
     prev = head["head_hash"]
     entry = ledger.entry_hash(prev, event)
@@ -328,7 +339,7 @@ def insert_event(conn: sqlite3.Connection, event: dict[str, Any]) -> int:
 
 
 def known_finding_ids(conn: sqlite3.Connection, tool: str,
-                      finding_ids: list[str]) -> set[str]:
+                      finding_ids: list[str], actor_id: str | None = None) -> set[str]:
     """Which of these finding ids this store has already ingested from `tool`.
 
     The envelope's id is a function of the finding's content, so re-running an
@@ -338,7 +349,10 @@ def known_finding_ids(conn: sqlite3.Connection, tool: str,
     tell "again" from "new".
 
     Scoped to one tool, because the envelope is explicit that two tools may
-    legitimately produce the same id about the same subject.
+    legitimately produce the same id about the same subject -- and, since
+    v0.21, to one subject. Scoped to the tool alone, a client could post a
+    finding about a decoy with the id a real scanner would later compute for a
+    production host, and the real finding was then skipped as "already known".
     """
     if not finding_ids:
         return set()
@@ -352,8 +366,9 @@ def known_finding_ids(conn: sqlite3.Connection, tool: str,
                 FROM events
                 WHERE event_type = 'finding'
                   AND json_extract(metadata, '$.source.tool') = ?
+                  AND (? IS NULL OR actor_id = ?)
                   AND json_extract(metadata, '$.finding.id') IN ({placeholders})""",
-            (tool, *chunk),
+            (tool, actor_id, actor_id, *chunk),
         ).fetchall()
         out.update(r["fid"] for r in rows if r["fid"])
     return out

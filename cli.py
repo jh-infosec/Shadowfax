@@ -98,12 +98,18 @@ def resolve_settings(args: argparse.Namespace) -> dict[str, Any]:
     """Flag > environment > config file > default, for each setting."""
     cfg = load_config()
     url = (getattr(args, "url", None) or os.environ.get("SHADOWFAX_URL")
-           or cfg.get("url") or DEFAULT_URL)
+           or cfg.get("url") or DEFAULT_URL).rstrip("/")
+    # Credentials saved in the config belong to the server they were issued by
+    # (v0.21). Until then a token saved for one Shadowfax was sent to whatever
+    # --url or SHADOWFAX_URL named -- including one that just redirected it
+    # onwards. A saved credential now goes only to the URL it was saved with;
+    # one given explicitly, by flag or environment, goes where it is told.
+    same_server = (cfg.get("url") or "").rstrip("/") == url
     token = (getattr(args, "token", None) or os.environ.get("SHADOWFAX_TOKEN")
-             or cfg.get("token"))
+             or (cfg.get("token") if same_server else None))
     api_key = (getattr(args, "api_key", None) or os.environ.get("SHADOWFAX_API_KEY")
-               or cfg.get("api_key"))
-    return {"url": url.rstrip("/"), "token": token, "api_key": api_key}
+               or (cfg.get("api_key") if same_server else None))
+    return {"url": url, "token": token, "api_key": api_key}
 
 
 # --- transport -------------------------------------------------------------
@@ -116,6 +122,21 @@ class ApiError(Exception):
     def __init__(self, message: str, code: int = EXIT_FAIL):
         super().__init__(message)
         self.code = code
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects (v0.21). urllib follows them across hosts and carries
+    the Authorization and X-API-Key headers along, so any server -- or anything
+    in front of one -- could forward a credential somewhere else. Shadowfax's
+    API never redirects, so a redirect is a reason to stop, not to follow."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code,
+                                     f"refusing to follow a redirect to {newurl}",
+                                     headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 class HttpTransport:
@@ -136,7 +157,7 @@ class HttpTransport:
             headers={"content-type": "application/json", **(headers or {})},
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with _OPENER.open(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode("utf-8")
                 return resp.status, (json.loads(raw) if raw else None)
         except urllib.error.HTTPError as exc:
@@ -309,6 +330,9 @@ def cmd_status(client: Client, args, out) -> int:
 def cmd_login(client: Client, args, out) -> int:
     import getpass
     username = args.username or input("username: ")
+    if args.password:
+        print("warning: a password given with -p is visible in your shell history and "
+              "the process list; prefer the prompt or SHADOWFAX_PASSWORD", file=sys.stderr)
     password = args.password or os.environ.get("SHADOWFAX_PASSWORD") or getpass.getpass("password: ")
     payload = client.call("POST", "/auth/login",
                           body={"username": username, "password": password})

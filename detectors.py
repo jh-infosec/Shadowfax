@@ -17,6 +17,7 @@ import attack
 import envelope
 import manifest
 import permissions
+import timeutil
 
 TOOL_NAME = "shadowfax"
 
@@ -36,12 +37,14 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "capability_drift", "excess_capability", "unlisted_tool_call",
     # v0.20: an ingest credential refused for exceeding its budget.
     "ingest_flood",
+    # v0.21: an ingest that retired alerts already raised.
+    "history_rewritten",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
 
 
-def external_alert_identity(tool: str, finding_id: str) -> str:
+def external_alert_identity(tool: str, finding_id: str, actor_id: str = "") -> str:
     """The alert id for an ingested finding (v0.11).
 
     Derived from the emitter's deterministic finding id rather than from the
@@ -55,7 +58,9 @@ def external_alert_identity(tool: str, finding_id: str) -> str:
     it under a fixed `external` namespace makes such a collision impossible by
     construction.
     """
-    raw = f"{TOOL_NAME}|external|{tool}|{finding_id}"
+    # The subject is part of it since v0.21: the same tool and finding id about
+    # two different subjects are two findings, and must be two alerts.
+    raw = f"{TOOL_NAME}|external|{tool}|{actor_id}|{finding_id}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -115,7 +120,7 @@ def _external_alert(event: dict, meta: dict) -> dict | None:
                       technique_ids=envelope.techniques_for(finding))
     # Replace the event-derived id with one keyed on the emitter's finding id,
     # so analyst state follows the finding rather than the row it landed in.
-    alert["id"] = external_alert_identity(tool, finding.get("id", ""))
+    alert["id"] = external_alert_identity(tool, finding.get("id", ""), event["actor_id"])
     alert["source_tool"] = tool
     alert["validated"] = bool(finding.get("validated"))
     alert["evidence"] = finding.get("evidence")
@@ -292,7 +297,7 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 "undeclared_agent", permissions.undeclared_message(e["actor_id"])))
 
     for e in events:
-        ts = datetime.fromisoformat(e["timestamp"])
+        ts = timeutil.parse(e["timestamp"])
         meta = e.get("metadata") or {}
 
         # Ingested findings (v0.11).
@@ -314,6 +319,25 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
         # Ingest floods (v0.20). Shadowfax writes these itself when its limiter
         # refuses a credential, one per episode; POST /events refuses the type,
         # and only the platform's own actor is honoured.
+        # Rewritten history (v0.21). Alerts are recomputed from timestamps the
+        # client supplies, so an event dated just before an alert's trigger can
+        # change what the engine concludes about the past -- an outside review
+        # erased a fired privilege_escalation by posting an "approved" privilege
+        # change one second before it. Shadowfax cannot refuse out-of-order
+        # events (late arrival is normal), but it can refuse to let an alert
+        # disappear quietly: when an ingest retires alerts, it records which,
+        # and that record raises history_rewritten.
+        if e["event_type"] == "alerts_retired":
+            if e["actor_id"] == INGEST_ACTOR_ID:
+                retired = meta.get("retired") or []
+                cats = sorted({str(r.get("category")) for r in retired if isinstance(r, dict)})
+                alerts.append(_mk_alert(e, "high", "history_rewritten",
+                    f"ingest by {meta.get('principal', 'a client')} retired {len(retired)} "
+                    f"alert(s) already raised on '{meta.get('actor_id', '?')}' "
+                    f"({', '.join(cats) or 'unknown'}) -- new events changed what the "
+                    f"engine concluded about the past"))
+            continue
+
         if e["event_type"] == "ingest_throttled":
             if e["actor_id"] == INGEST_ACTOR_ID:
                 alerts.append(_mk_alert(e, "high", "ingest_flood",

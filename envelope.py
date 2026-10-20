@@ -69,6 +69,7 @@ EXTERNAL_ACTOR_TYPE = "external"
 EVENT_TYPE = "finding"
 
 KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 REQUIRED_FINDING_FIELDS = ("id", "key", "severity", "title", "evidence", "validated")
 
@@ -125,6 +126,14 @@ def validate(doc: Any, native_categories: frozenset[str] = frozenset(),
         if not isinstance(value, str) or not value.strip():
             raise EnvelopeError("required, and must be a non-empty string",
                                 f"source.{field}")
+    # A tool name is a name, not prose (v0.21): letters, digits and . _ - only.
+    # "shadowfax" with a zero-width space after it passed the reserved-name
+    # check below and still displayed as "reported by shadowfax"; so would a
+    # Cyrillic "а". An ASCII allowlist closes both, and every real emitter
+    # (maltriage, claude-recon-agent) already fits it.
+    if not TOOL_NAME_PATTERN.match(source["tool"]):
+        raise EnvelopeError("must be 1-64 characters of letters, digits, '.', '_' or '-'",
+                            "source.tool")
     if source["tool"].strip().lower() in reserved_tools:
         raise EnvelopeError(f"{source['tool']!r} is reserved -- an envelope may not "
                             f"claim to come from Shadowfax itself", "source.tool")

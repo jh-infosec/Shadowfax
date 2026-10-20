@@ -387,6 +387,14 @@ manifest event, like a finding, skips the behavioural heuristics and the
 permission target check -- it is a declaration, not an action. Excess tools are
 reported once each across manifests; unlisted calls once per tool per manifest.
 
+#### timeutil.py
+
+Time, one way (v0.21): `normalise()` is strict -- ISO 8601 with an optional
+offset, converted to naive UTC -- and is what ingest validates with; `parse()`
+is the lenient reader every consumer uses (detectors, correlation, the digest),
+so rows written before v0.21 still compare correctly. Before this, timestamps
+were compared as strings, and `+02:00` sorted as if it were UTC.
+
 #### ratelimit.py
 
 Ingest budgets (v0.20): `TokenBucket` (capacity = a minute's budget, continuous
@@ -884,9 +892,8 @@ so it stays a deliberate trade-off.
 Authentication, roles, API keys and CORS restriction now exist (see the
 Authentication principle above), so the endpoints are no longer open. What
 keeps Shadowfax a local-development tool is narrower: passwords use stdlib
-PBKDF2 rather than bcrypt/argon2, there is no rate limiting or account
-lockout, tokens are bearer tokens without rotation, and the store is
-single-writer SQLite. Harden these before running it anywhere shared.
+PBKDF2 rather than bcrypt/argon2, tokens are bearer tokens without rotation,
+and the store is SQLite. Harden these before running it anywhere shared.
 
 ### Request limits and ingest budgets
 
@@ -900,8 +907,21 @@ must cap total volume does it at the proxy in front.
 
 ### Single-writer database
 
-SQLite with the default configuration. Concurrent writers are not supported.
-PostgreSQL is planned for v1.0.
+SQLite, with a 30-second busy timeout. `insert_event` opens `BEGIN IMMEDIATE`
+before it reads the chain head (v0.21), so two writers queue rather than both
+chaining onto the same previous hash and forking the ledger. Sign-in and
+password changes take the same lock around reading and recording failures, so
+parallel guesses cannot all read the same failure count. PostgreSQL is planned
+for v1.0.
+
+### Retired alerts
+
+Alerts are recomputed from the whole history, so an event dated in the past can
+make a past alert disappear. After every ingest the alert ids before and after
+are compared; if any vanished, an `alerts_retired` event (the subject, the
+credential, the ids) is written under `shadowfax-ingest` and the detector
+raises `history_rewritten`. Nothing is blocked -- late evidence is legitimate --
+but nothing disappears silently either.
 
 ### Sub-second alert latency
 
@@ -1009,7 +1029,7 @@ seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
 throttle.py             envelope.py             permissions.py
 tickets.py              limits.py               manifest.py
-ratelimit.py
+ratelimit.py            timeutil.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml

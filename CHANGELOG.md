@@ -1,5 +1,108 @@
 # Changelog
 
+## Version 0.21.0
+
+An independent security review. A separate reviewer read the whole codebase
+with fresh eyes and no knowledge of the reasoning behind it, reproduced
+everything it reported against a running server, and found **fifteen
+confirmed defects** — three of them high. v0.18's forged-alert hole had sat
+unnoticed from v0.11 to v0.18; this was the search for others like it, and
+there were. Every finding below is fixed, and every reproduction is now a
+regression check.
+
+### High
+
+1. **An ingest key could switch off the login throttle.** `timestamp` accepted
+   any string. One event with a timezone offset posted to Shadowfax's own
+   `shadowfax-auth` actor made every later self-monitoring write compare naive
+   and offset-aware datetimes and fail — so every failed sign-in returned 500
+   instead of counting toward a lockout: an unlimited password oracle, with no
+   audit trail, and password change and reset broken too.
+2. **One request took `/incidents` and `/digest` down for everyone.** Python
+   3.11's `fromisoformat` accepts *any* character between date and time, and
+   incident sorting turned each character into `chr(255 - ord(c))`, which
+   raises above U+00FF. Events are append-only, so the fix was an admin wiping
+   all data.
+3. **Concurrent ingests forked the ledger.** The head was read before the write
+   lock was taken, so parallel requests chained to the same parent. The ledger
+   then reported tampering that never happened — and, since verification stops
+   at the first break, hid any real tampering after it.
+
+### Medium
+
+4. **Finding de-duplication ignored the subject**, so a finding about a decoy
+   could pre-empt the id a real scanner would later compute for a production
+   host, which was then skipped as "already known".
+5. **Backdated events silently erased alerts.** Posting an "approved" privilege
+   change one second before a fired `privilege_escalation` retired the alert.
+6. **Ingest clients could write to Shadowfax's own audit actors** — a forged
+   `password_reset … reset_by: admin` was indistinguishable from a real one.
+7. **The login throttle could be raced.** Forty concurrent wrong guesses all got
+   a real password check against a policy of five.
+8. **Unauthenticated disk growth.** A failed sign-in stored the attempted
+   username, unbounded, in a ledger that is never pruned: 2 MB per request.
+9. **Must-change sessions could still ingest and stream**, through paths that
+   bypassed the v0.19 check.
+10. **Ingest keys could read alerts** through ingest responses, though they get
+    403 on `GET /alerts`.
+11. **`docker compose` published admin/admin on every network interface.**
+
+### Low
+
+12. `//etc/shadow` slipped past a `/etc/*` denial (POSIX `normpath` keeps a
+    leading double slash).
+13. Untrusted text could close the investigation assistant's prompt fences.
+14. `shadowfax` + a zero-width space passed the reserved-emitter check.
+15. The CLI sent its saved token to any `--url`, and followed redirects across
+    hosts with the token attached.
+
+### Fixed
+
+- **Timestamps** (1, 2): one strict ISO 8601 shape at the door, offsets
+  converted, stored as naive UTC (`timeutil.normalise`); stored values read back
+  defensively as naive UTC everywhere (`timeutil.parse`), so a database
+  poisoned before v0.21 cannot break anything either. Incident sorting uses the
+  parsed time.
+- **The ledger** (3): the head is read under `BEGIN IMMEDIATE`. 32 concurrent
+  ingests now leave a ledger that verifies, with the head counting every entry.
+- **Subject-scoped re-ingest** (4): de-duplication and external alert ids include
+  the subject. Ingested alerts get new ids on upgrade, so acknowledgements on
+  them start fresh.
+- **History is never rewritten silently** (5). Late events are evidence and still
+  count — so the reviewer's attack still retires the alert — but an ingest that
+  retires an alert already raised now records which, under `shadowfax-ingest`,
+  and raises **`history_rewritten`** (high) naming the credential, the actor and
+  the categories. A policy change retiring alerts is the analyst's own doing and
+  raises nothing; neither does a late event that changes no conclusion. The
+  event type is reserved.
+- **Reserved actors** (6): `shadowfax-auth` and `shadowfax-ingest` are refused on
+  `/events`, as a findings subject and as a manifest agent.
+- **The throttle race** (7): each sign-in (and password-change) attempt is read
+  and recorded as a failure under one write lock *before* the PBKDF2 check, and
+  cleared on success. Concurrent guesses see each other.
+- **Bounded login fields** (8): username ≤ 64, password ≤ 1,024, refused before
+  anything is written.
+- **Must-change everywhere** (9): `allow_ingest` and the stream's bearer path
+  refuse must-change sessions.
+- **Ingest keys learn counts, not contents** (10): `{"alerts": {"count": n}}`.
+- **Compose binds `127.0.0.1:8000`** (11).
+- **Leading slashes collapsed** before matching (12).
+- **Inert prompt text** (13): untrusted strings are JSON-encoded with `<` and `>`
+  as `\u003c`/`\u003e`, and the evidence block says that everything in it is
+  attacker-influenced data.
+- **ASCII-only emitter names** (14): `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
+- **CLI credentials stay home** (15): a saved token or key is sent only to the
+  URL it was saved with; redirects are refused; `login -p` warns that the
+  password is now in shell history.
+
+### Tests
+
+**629** API checks (from 593). Every fix was broken on purpose and the right
+check failed — including the two concurrency fixes: reading the ledger head
+outside the lock failed the ledger check, and returning sign-in to
+check-then-write failed the race check. One new check crashed rather than
+failed when its fix was removed; it was rewritten to fail cleanly.
+
 ## Version 0.20.0
 
 Two things that matter once Shadowfax is running somewhere other people's

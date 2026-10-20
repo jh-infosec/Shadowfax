@@ -180,7 +180,12 @@ def resolved_target(target: str) -> str:
     if _is_windows_path(target):
         return ntpath.normpath(target)
     if "/" in target:
-        return posixpath.normpath(target)
+        # POSIX lets a path start with exactly two slashes and mean something
+        # implementation-defined, so normpath keeps "//etc/shadow" as it is --
+        # and "/etc/*" did not match it (v0.21). On every system an agent here
+        # runs on, it is /etc/shadow.
+        resolved = posixpath.normpath(target)
+        return "/" + resolved.lstrip("/") if resolved.startswith("//") else resolved
     return target
 
 

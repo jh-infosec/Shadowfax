@@ -22,7 +22,11 @@ services:
     build: .
     image: shadowfax:local
     ports:
-      - "8000:8000"
+      # This machine only (v0.21). Compose's credentials below are admin/admin,
+      # and "8000:8000" published them on every network interface -- anyone on
+      # the same Wi-Fi could sign in as admin. To expose Shadowfax beyond this
+      # machine, set real credentials first, then change this line.
+      - "127.0.0.1:8000:8000"
     volumes:
       # The event store, outside the image, so a rebuild does not reset it.
       - shadowfax-data:/data
