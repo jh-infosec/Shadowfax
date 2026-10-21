@@ -1,4 +1,4 @@
-# Shadowfax CI (v0.13; publishing from v0.17).
+# Shadowfax CI (v0.13; publishing from v0.17; signing from v0.20).
 #
 # Three jobs, answering three different questions.
 #
@@ -14,11 +14,12 @@
 #
 #   publish    Only when a GitHub release is published. Only after both jobs
 #              above have passed on that exact commit. Pushes the image to
-#              ghcr.io, then pulls back what was published and checks it -- the
-#              thing people will run, not the thing that was built.
+#              ghcr.io, signs it, verifies the signature, then pulls back what
+#              was published and checks it -- the thing people will run, not
+#              the thing that was built.
 #
 # The second job is the one that earns its keep. The unit suite never leaves the
-# process; this exercises ingest, eighteen detectors, correlation, kill-chain
+# process; this exercises ingest, twenty-two detectors, correlation, kill-chain
 # ordering, findings-envelope ingest, the sign-in throttle and the hash-chained
 # ledger, against a real server, in the image that ships.
 
@@ -218,6 +219,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # v0.20: lets this job ask GitHub for a short-lived identity token, which
+      # is what keyless signing uses instead of a private key. No secret is
+      # stored anywhere; the signature says "this workflow, at this tag".
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -281,6 +286,32 @@ jobs:
           provenance: mode=max
           sbom: true
 
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign the image
+        # Keyless: cosign trades this job's GitHub identity token for a
+        # short-lived certificate (Sigstore's Fulcio) naming this repository,
+        # this workflow and this tag, signs the digest with it, and records the
+        # signature in a public transparency log (Rekor). Anyone can later check
+        # that an image came from this repository's CI at a given release --
+        # not merely that someone with push access put it there.
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Verify the signature, as a stranger would
+        # Pinned to the exact identity that should have signed: this
+        # repository's ci.yml, at this release's tag, via GitHub's issuer. A
+        # signature from any other workflow, fork or branch fails here.
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            > /dev/null
+          echo "signature verified for ${IMAGE}@${DIGEST}"
+
       - name: Pull back what was published, and check it
         # The image that matters is the one in the registry, not the one this
         # runner happened to build. Pulled by digest, so it is exactly the
@@ -331,6 +362,13 @@ jobs:
             echo '```'
             echo
             echo "Digest: \`${DIGEST}\`"
+            echo
+            echo "Verify the signature:"
+            echo '```bash'
+            echo "cosign verify ${IMAGE}:${TAG#v} \\"
+            echo "  --certificate-identity-regexp '^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci.yml@refs/tags/v' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
             echo
             echo "Tags:"
             echo '```'
