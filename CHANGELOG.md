@@ -1,5 +1,77 @@
 # Changelog
 
+## Version 0.22.0
+
+Two things that were on the roadmap and that anyone running Shadowfax for real
+would hit: what to do when the admin password is gone, and a dashboard that
+ignored the Escape key.
+
+### Locked out of your own Shadowfax (`recover.py`)
+
+Until now, losing the only admin password — or missing the generated one before
+it scrolled out of the container log — left one way back in: delete the volume
+and start again, losing every event the ledger held. A tamper-evident evidence
+store whose recovery procedure is "throw the evidence away" is not much of one.
+
+```bash
+docker exec -it shadowfax python recover.py admin
+```
+
+- **Runs where the database is, never over the network.** Anyone able to run it
+  can already read and rewrite the database file, so it grants nothing new.
+  There is no API endpoint for this and there will not be one.
+- **Generated, shown once.** The new password is chosen by Shadowfax and printed
+  to that terminal only — not to the server log, and never taken as an argument,
+  where shell history would keep it. You type the username a second time to
+  confirm (`--yes` skips this for scripts).
+- **Must-change, sessions ended, lockout cleared.** The same treatment as an
+  admin reset (v0.19): the next sign-in can do nothing but choose a new
+  password, every session the account had is ended, and its sign-in failures
+  are cleared so a lockout does not outlive the reset.
+- **Recorded, and alerted on.** A `console_password_reset` event is written into
+  the ledger under `shadowfax-auth` — the account, its role, the OS user who ran
+  the command, how many sessions were ended; never the password — and a new
+  detector raises **`console_recovery`** (high). It is recorded **even when
+  self-monitoring is switched off**: a reset that bypassed every sign-in check
+  is the owner on a bad day or someone with a shell on the server, and an
+  analyst should not have to guess which from silence. Only the platform's own
+  actor counts; v0.21 already refuses ingest under `shadowfax-auth`, so the
+  event cannot be forged over the API.
+- An unknown username is refused with the list of admins that do exist; a
+  missing database is reported rather than quietly created.
+
+Detector categories: twenty-three → **twenty-four**. `console_recovery` is a
+native category, so an ingested finding cannot claim it, and "console" or
+"recovery" in a natural-language search finds it.
+
+### Escape closes drawers
+
+The roadmap has carried this since v0.16, when a browser test turned out to
+have been pressing Escape and leaving a drawer open over the table. Escape now
+closes the topmost layer — the explanation, then the lockouts, digest or
+incidents drawer, then the actor drawer — one per press. The policy editor and
+the password form deliberately ignore it: both hold typed input, and a stray
+keypress should not throw away an unsaved policy.
+
+### Housekeeping
+
+- ROADMAP: "Publish the image" was still unticked two releases after it shipped.
+
+### Verification
+
+- **649** API checks (from 629). Five code mutations, each caught: recovery not
+  marking must-change, not ending sessions, not clearing failures, recording
+  only when self-monitoring is on, and the detector honouring the event type
+  under any actor.
+- **28** dashboard checks (from 26), including that Escape closes a drawer and
+  that it leaves the policy editor open. Both mutation-tested: with the handler
+  removed, and with Escape made to close the policy editor, the matching check
+  fails.
+- Recovered a live server's admin while it was running: the old password and
+  every old session refused, the new one signed in as must-change, changed
+  through the dashboard flow, the alert raised, the ledger still verified.
+- Replay: all 12 assertions held.
+
 ## Version 0.21.0
 
 An independent security review. A separate reviewer read the whole codebase

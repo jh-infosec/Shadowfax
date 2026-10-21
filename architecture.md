@@ -387,6 +387,20 @@ manifest event, like a finding, skips the behavioural heuristics and the
 permission target check -- it is a declaration, not an action. Excess tools are
 reported once each across manifests; unlisted calls once per tool per manifest.
 
+#### recover.py
+
+Console recovery (v0.22), run beside the database rather than through the API:
+`recover(username)` takes the write lock, generates a password, marks it
+must-change, ends the account's sessions, clears its sign-in failures and writes
+`console_password_reset` under `shadowfax-auth` through the ordinary
+`db.insert_event`, so it is chained like every other entry; then it rescans that
+actor with the server's own `_rescan_actor`, and the detector raises
+`console_recovery`. It records even when `SHADOWFAX_SELF_MONITOR` is off -- an
+unrecorded reset would be a back door. The running server sees the change on
+its next request (sessions and users are read from the database each time); the
+dashboard sees the alert on its next refresh, since the event bus lives inside
+the server process.
+
 #### timeutil.py
 
 Time, one way (v0.21): `normalise()` is strict -- ISO 8601 with an optional
@@ -1029,7 +1043,7 @@ seed_data.py            test_api.py             requirements.txt
 cli.py                  digest.py               ledger.py
 throttle.py             envelope.py             permissions.py
 tickets.py              limits.py               manifest.py
-ratelimit.py            timeutil.py
+ratelimit.py            timeutil.py             recover.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml

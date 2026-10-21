@@ -39,9 +39,13 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "ingest_flood",
     # v0.21: an ingest that retired alerts already raised.
     "history_rewritten",
+    # v0.22: a password reset from the server console, bypassing sign-in.
+    "console_recovery",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
+# The platform's own sign-in actor (app.SELF_ACTOR_ID); only Shadowfax writes it.
+AUTH_ACTOR_ID = "shadowfax-auth"
 
 
 def external_alert_identity(tool: str, finding_id: str, actor_id: str = "") -> str:
@@ -327,6 +331,19 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
         # events (late arrival is normal), but it can refuse to let an alert
         # disappear quietly: when an ingest retires alerts, it records which,
         # and that record raises history_rewritten.
+        # Console recovery (v0.22). recover.py resets a password with no
+        # sign-in at all -- the way back in when the only admin is locked out,
+        # and equally the way in for anyone with a shell on the server. Either
+        # way an analyst should see it, so it is always high.
+        if e["event_type"] == "console_password_reset":
+            if e["actor_id"] == AUTH_ACTOR_ID:
+                alerts.append(_mk_alert(e, "high", "console_recovery",
+                    f"the password for '{meta.get('attempted_username', '?')}' "
+                    f"({meta.get('role', '?')}) was reset from the server console by OS "
+                    f"user '{meta.get('os_user', '?')}', bypassing sign-in; "
+                    f"{meta.get('sessions_ended', 0)} session(s) ended"))
+            continue
+
         if e["event_type"] == "alerts_retired":
             if e["actor_id"] == INGEST_ACTOR_ID:
                 retired = meta.get("retired") or []

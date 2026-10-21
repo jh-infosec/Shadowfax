@@ -41,7 +41,7 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across twenty-three alert categories, including AI-agent tool-call analysis
+- Rule-based detection engine across twenty-four alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
@@ -68,6 +68,7 @@ investigation and explainability.
 - Command-line interface — ingest, query, explain and gate on alerts from a shell; `--json` everywhere for agents
 - Tamper-evident event ledger — every event hash-chained to the one before it, so an edit, deletion or reordering breaks the chain at a locatable point
 - Sign-in throttling and lockout — backoff then lockout on the platform's own login, with no enumeration oracle and no sleeping
+- Console recovery — a lost admin password is reset from the server's own shell, never over the network, and raises an alert
 - History that cannot be quietly rewritten — when a new upload makes alerts disappear, Shadowfax records which ones and who sent it, and raises `history_rewritten`
 - Self-monitoring — attacks on Shadowfax's own front door become ordinary events and raise ordinary alerts, through the same detectors as everything else
 - Findings-envelope ingest — any tool that writes the shared envelope can post findings, and Shadowfax needs to know nothing about it
@@ -241,6 +242,10 @@ Planned
 
 - Fixes from an independent security review — shipped (v0.21.0)
 
+### v0.22
+
+- Console recovery of a lost admin password; Escape closes drawers — shipped (v0.22.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -384,7 +389,7 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Twenty-six checks, each one an assertion a person makes when they glance at the
+Twenty-eight checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
@@ -417,7 +422,7 @@ python demo.py --fast --assert
 ```
 
 That turns the demo into an end-to-end check of the whole stack — ingest,
-twenty-three detectors, correlation, kill-chain ordering, findings-envelope ingest,
+twenty-four detectors, correlation, kill-chain ordering, findings-envelope ingest,
 the front door and the ledger — against a real server over real HTTP. It is a
 different kind of evidence from the unit suite, which never leaves the process.
 
@@ -756,6 +761,27 @@ poisoning the evidence for an unrelated investigation.
 
 Set `SHADOWFAX_SELF_MONITOR=0` to turn it off.
 
+### Locked out of your own Shadowfax
+
+If the only admin password is lost — or the generated one has scrolled out of the
+container log — reset it from the machine Shadowfax runs on:
+
+```bash
+docker exec -it shadowfax python recover.py admin       # the published image
+docker compose exec shadowfax python recover.py admin   # with docker compose
+python recover.py admin                                  # from source
+```
+
+It asks you to type the username again, then prints a newly generated password
+once. That password must be changed at the next sign-in; every session the
+account had is ended and its sign-in failures are cleared. It works on the
+database file directly, so it is not reachable over the network, and anyone able
+to run it could already rewrite that file. It is also not quiet: the reset is
+written into the ledger and raises a high `console_recovery` alert naming the
+account and the OS user — even with self-monitoring switched off, because a
+reset that bypassed sign-in is exactly what an analyst should see. Your events
+are untouched; nothing is discarded.
+
 ### Configuration
 
 | Variable | Default | Meaning |
@@ -838,7 +864,7 @@ critical, high, medium, low, info
 ```
 
 A finding's `key` becomes the alert category, so an emitter **may not use one of
-Shadowfax's own twenty-three detector categories**. An alert reading
+Shadowfax's own twenty-four detector categories**. An alert reading
 `destructive_action` must mean Shadowfax's detector found it, not that somebody
 else said so.
 
@@ -951,6 +977,10 @@ the same throttle as sign-in — and signs out every other session. An admin res
 ends all of the user's sessions and marks the new password must-change: until
 the owner replaces it, the server allows nothing else. Changes and resets are
 written into the ledger.
+
+A lost admin password is recovered with `recover.py` on the server itself (see
+Locked out of your own Shadowfax above), never over the API; the recovery is
+recorded and raises `console_recovery`.
 
 The session token never appears in a URL. The dashboard's live stream is opened
 with a single-use ticket that expires in 30 seconds (`POST /stream/ticket`),

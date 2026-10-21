@@ -221,6 +221,27 @@ export default function App() {
     });
   }, [alerts]);
 
+  // Escape closes the topmost drawer or modal (v0.22) -- one layer per press,
+  // so a drawer opened over another goes first. The policy editor and the
+  // password form are left alone: both hold typed input, and a stray keypress
+  // should not throw an unsaved policy away.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (passwordOpen || policyOpen) return;
+      if (explainAlert) setExplainAlert(null);
+      else if (lockoutsOpen) setLockoutsOpen(false);
+      else if (digestOpen) setDigestOpen(false);
+      else if (incidentsOpen) setIncidentsOpen(false);
+      else if (selectedActorId) setSelectedActorId(null);
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [passwordOpen, policyOpen, explainAlert, lockoutsOpen, digestOpen, incidentsOpen,
+      selectedActorId]);
+
   const handleLogout = async () => {
     await api.logout();
     setUser(null);

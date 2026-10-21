@@ -530,6 +530,9 @@ _CATEGORY_SYNONYMS = {
     "throttled": "ingest_flood",
     "rewritten": "history_rewritten",
     "retired": "history_rewritten",
+    "recovery": "console_recovery",
+    "recovered": "console_recovery",
+    "console": "console_recovery",
 }
 
 

@@ -251,8 +251,8 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       The attack's clock and the replay's pacing are deliberately separate, and
       the replay honours the server's `Retry-After` so it demonstrates the
       detection as well as the throttle. Shipped in `v0.12.0`.
-- [ ] Publish the image, so `docker run ghcr.io/jh-infosec/shadowfax` needs no
-      clone at all.
+- [x] Publish the image, so `docker run ghcr.io/jh-infosec/shadowfax` needs no
+      clone at all. Shipped in `v0.17.0`; signed since `v0.20.0`.
 - [ ] A recorded terminal/dashboard capture of the replay in the README, for
       people who will not run anything.
 
@@ -296,9 +296,9 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       at `PUT /policy`. `GET /actors/{id}/permissions` and `shadowfax
       permissions` ask the detector's question ahead of time; the actor drawer
       shows the profile beside the timeline. Shipped in `v0.16.0`.
-- [ ] Close drawers with Escape. The dashboard test that assumed it could was
-      quietly leaving the incidents drawer open; the test is fixed, the
-      keyboard handling is still missing.
+- [x] Close drawers with Escape (`v0.22.0`): one layer per press, topmost
+      first. The policy editor and the password form ignore it -- both hold
+      typed input that a stray keypress should not discard.
 - [x] Capability manifests (shipped in `v0.18.0`, as a comparison rather than as
       a source of profiles -- a profile written *from* the configuration would
       grant whatever the agent was given, which is the thing to check).
@@ -338,8 +338,11 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       actors, subject-scoped finding ids, the sign-in race closed,
       `history_rewritten` when an upload retires alerts, CLI credentials
       scoped to their server, the compose port bound to localhost.
-- [ ] A way to reset a lost admin password that does not mean discarding the
-      volume -- a one-off `docker exec` command, recorded in the ledger.
+- [x] A way to reset a lost admin password that does not mean discarding the
+      volume (`v0.22.0`): `docker exec -it shadowfax python recover.py admin`.
+      Generated, shown once, must-change, sessions ended, recorded in the
+      ledger, and raises `console_recovery` (high) -- even with
+      self-monitoring off.
 
 ---
 

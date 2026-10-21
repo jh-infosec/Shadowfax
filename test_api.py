@@ -1757,6 +1757,106 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== console recovery and Escape (v0.22) ==")
+import builtins as _bi
+import contextlib as _ctx
+import recover as _recover
+
+# A throwaway admin, so recovering it cannot end the session this suite runs on.
+client.post("/users", json={"username": "lost-admin", "password": TEST_PW, "role": "admin"})
+_lost = as_user("lost-admin", TEST_PW)
+check("the account to be recovered works before", _lost.get("/alerts").status_code == 200)
+for _ in range(3):
+    client.post("/auth/login", json={"username": "lost-admin", "password": "wrong-password-xx"})
+_n_cr = len(client.get("/alerts", params={"category": ["console_recovery"]}).json())
+_head_before = client.get("/ledger/head").json()
+
+try:
+    _recover.recover("nobody-here")
+    _unk = None
+except LookupError as _e:
+    _unk = _e.args[0]
+check("an unknown user is refused, naming the admins that do exist",
+      _unk is not None and "nobody-here" in _unk and "lost-admin" in _unk)
+
+_real_path = db_module.DB_PATH
+db_module.DB_PATH = _real_path.parent / "no-such-shadowfax.db"
+try:
+    _recover.recover("lost-admin")
+    _missing = False
+except FileNotFoundError:
+    _missing = True
+db_module.DB_PATH = _real_path
+check("a missing database is reported, not silently created",
+      _missing and not (_real_path.parent / "no-such-shadowfax.db").exists())
+
+_rec = _recover.recover("lost-admin")
+check("recovery returns a generated password that meets the policy",
+      _rec["role"] == "admin" and not _auth.password_problems(_rec["password"], "lost-admin"))
+check("the old session is ended", _lost.get("/alerts").status_code == 401)
+check("the old password no longer signs in",
+      client.post("/auth/login", json={"username": "lost-admin", "password": TEST_PW}).status_code == 401)
+_r = client.post("/auth/login", json={"username": "lost-admin", "password": _rec["password"]})
+check("the new password signs in, marked must-change",
+      _r.status_code == 200 and _r.json()["user"]["must_change_password"] is True)
+check("and the session can do nothing else until it is changed",
+      as_user("lost-admin", _rec["password"]).get("/alerts").status_code == 403)
+check("the sign-in failures were cleared, so a lockout does not outlive the reset",
+      _rec["failures_cleared"] >= 3)
+
+_cr = client.get("/alerts", params={"category": ["console_recovery"]}).json()
+check("recovery raises console_recovery (high), even with self-monitoring off",
+      app_module.SELF_MONITOR is False and len(_cr) == _n_cr + 1
+      and all(a["severity"] == "high" and a["actor_id"] == "shadowfax-auth" for a in _cr))
+check("the alert names the account and the OS user",
+      any("lost-admin" in a["message"] and "OS user" in a["message"] for a in _cr))
+_ev_cr = [e for e in client.get("/actors/shadowfax-auth").json()["events"]
+          if e["event_type"] == "console_password_reset"]
+check("the reset is in the ledger under shadowfax-auth, without the password",
+      len(_ev_cr) == 1 and _ev_cr[0]["metadata"]["source"] == "console"
+      and _rec["password"] not in json.dumps(_ev_cr[0]))
+check("and the ledger still verifies, one entry longer",
+      client.get("/ledger/verify").json()["ok"] is True
+      and client.get("/ledger/head").json()["entry_count"] == _head_before["entry_count"] + 1)
+
+check("an ingest client cannot forge a console reset",
+      client.post("/events", json=[{"timestamp": "2026-10-14T09:00:00", "actor_id": "shadowfax-auth",
+                                    "actor_type": "service_account", "event_type": "console_password_reset",
+                                    "target": "shadowfax_login", "metadata": {}}]).status_code == 400)
+check("and the detector ignores the event type under any other actor",
+      not [a for a in detectors.run_for_actor([{
+          "id": 1, "timestamp": "2026-10-14T09:00:00", "actor_id": "someone", "actor_type": "human",
+          "event_type": "console_password_reset", "target": "x", "metadata": {}}], _POLICY)
+          if a["category"] == "console_recovery"])
+
+_out = _io.StringIO()
+_orig_input = _bi.input
+_bi.input = lambda prompt="": "not-the-name"
+try:
+    with _ctx.redirect_stdout(_out), _ctx.redirect_stderr(_io.StringIO()):
+        _rc = _recover.main(["lost-admin"])
+finally:
+    _bi.input = _orig_input
+check("without confirmation nothing changes",
+      _rc == 1 and client.post("/auth/login", json={"username": "lost-admin",
+                                                    "password": _rec["password"]}).status_code == 200)
+_out = _io.StringIO()
+with _ctx.redirect_stdout(_out), _ctx.redirect_stderr(_io.StringIO()):
+    _rc = _recover.main(["lost-admin", "--yes"])
+_printed = _out.getvalue()
+_new_pw = next((l.split(":", 1)[1].strip() for l in _printed.splitlines() if "New password:" in l), "")
+check("the command prints the new password once, and it works",
+      _rc == 0 and _printed.count(_new_pw) == 1 and len(_new_pw) >= 12
+      and client.post("/auth/login", json={"username": "lost-admin", "password": _new_pw}).status_code == 200)
+with _ctx.redirect_stdout(_io.StringIO()), _ctx.redirect_stderr(_io.StringIO()):
+    _rc = _recover.main(["nobody-here", "--yes"])
+check("the command exits non-zero for an unknown user", _rc == 1)
+check("'console recovery' searches for the new category",
+      client.post("/search", json={"query": "console recovery"}).json()["filters"].get("category")
+      == ["console_recovery"])
+check("console_recovery is a native category, so a finding cannot claim it",
+      "console_recovery" in detectors.NATIVE_CATEGORIES and "console_recovery" in _correlate._CATEGORY_PHRASE)
+
 print("\n== an independent security review, fixed (v0.21) ==")
 import asyncio as _aio
 import threading as _th

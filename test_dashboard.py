@@ -305,6 +305,24 @@ def _run_checks(page, url: str, requested: list[str]) -> None:
             check("the sample agent's alerts could be found to open its drawer",
                   False, "no rows for recon-agent-3")
 
+    # -- Escape closes the top layer, but not a form (v0.22) ----------------
+    # Run once a drawer is known to be open, so "no drawer afterwards" cannot
+    # pass on a page that never opened one.
+    if page.locator(".drawer").count():
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
+        check("Escape closes the open drawer", page.locator(".drawer").count() == 0)
+    else:
+        check("a drawer was open to test Escape on", False)
+    page.click("text=Edit policy")
+    page.wait_for_selector(".policy-modal", timeout=10000)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    check("Escape leaves the policy editor open, so an edit is not lost to a keypress",
+          page.locator(".policy-modal").count() == 1)
+    page.click(".policy-modal .drawer-close")
+    page.wait_for_timeout(300)
+
 
 def _api(url: str, method: str, path: str, body=None, token: str | None = None):
     req = urllib.request.Request(
