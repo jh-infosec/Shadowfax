@@ -158,6 +158,15 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_login_attempts_scope
     ON login_attempts(username, source, at);
+
+-- v0.25: two-factor recovery codes. Fingerprints only; each works once.
+CREATE TABLE IF NOT EXISTS recovery_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    code_fp TEXT NOT NULL,
+    used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_recovery_codes_user ON recovery_codes(user_id);
 """
 
 
@@ -196,6 +205,15 @@ def _migrate_users(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0")
     if "disabled_at" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN disabled_at TEXT")
+    # v0.25: two-factor. The secret has to be readable to check a code, so it
+    # is stored as is -- like the database's other contents, it is protected by
+    # whoever can read the file (see recover.py for the same reasoning).
+    # `totp_pending_secret` holds an enrolment until a first code confirms it.
+    for col, decl in (("totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
+                      ("totp_secret", "TEXT"), ("totp_pending_secret", "TEXT"),
+                      ("totp_last_step", "INTEGER"), ("totp_enabled_at", "TEXT")):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
 
 
 def _migrate_legacy_alerts(conn: sqlite3.Connection) -> None:
@@ -677,7 +695,7 @@ def get_user_by_username(conn: sqlite3.Connection, username: str) -> dict[str, A
 def list_users(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT id, username, role, created_at, must_change_password, password_changed_at, "
-        "disabled, disabled_at FROM users ORDER BY username"
+        "disabled, disabled_at, totp_enabled FROM users ORDER BY username"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -742,6 +760,54 @@ def set_disabled(conn: sqlite3.Connection, user_id: int, disabled: bool) -> None
                  (1 if disabled else 0, _iso(_utc_now()) if disabled else None, user_id))
 
 
+# Two-factor (v0.25)
+
+def set_totp_pending(conn: sqlite3.Connection, user_id: int, secret: str | None) -> None:
+    conn.execute("UPDATE users SET totp_pending_secret = ? WHERE id = ?", (secret, user_id))
+
+
+def enable_totp(conn: sqlite3.Connection, user_id: int, secret: str, step: int,
+                recovery_fps: list[str]) -> None:
+    conn.execute(
+        """UPDATE users SET totp_enabled = 1, totp_secret = ?, totp_pending_secret = NULL,
+                            totp_last_step = ?, totp_enabled_at = ? WHERE id = ?""",
+        (secret, step, _iso(_utc_now()), user_id))
+    conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user_id,))
+    conn.executemany("INSERT INTO recovery_codes (user_id, code_fp) VALUES (?, ?)",
+                     [(user_id, fp) for fp in recovery_fps])
+
+
+def disable_totp(conn: sqlite3.Connection, user_id: int) -> None:
+    conn.execute(
+        """UPDATE users SET totp_enabled = 0, totp_secret = NULL, totp_pending_secret = NULL,
+                            totp_last_step = NULL, totp_enabled_at = NULL WHERE id = ?""",
+        (user_id,))
+    conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user_id,))
+
+
+def set_totp_last_step(conn: sqlite3.Connection, user_id: int, step: int) -> None:
+    conn.execute("UPDATE users SET totp_last_step = ? WHERE id = ?", (step, user_id))
+
+
+def use_recovery_code(conn: sqlite3.Connection, user_id: int, code_fp: str) -> int | None:
+    """Spend a recovery code. Returns how many remain, or None if it was not a
+    live code for this user."""
+    cur = conn.execute(
+        "UPDATE recovery_codes SET used_at = ? WHERE user_id = ? AND code_fp = ? AND used_at IS NULL",
+        (_iso(_utc_now()), user_id, code_fp))
+    if cur.rowcount != 1:
+        return None
+    return conn.execute(
+        "SELECT COUNT(*) FROM recovery_codes WHERE user_id = ? AND used_at IS NULL",
+        (user_id,)).fetchone()[0]
+
+
+def recovery_codes_left(conn: sqlite3.Connection, user_id: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM recovery_codes WHERE user_id = ? AND used_at IS NULL",
+        (user_id,)).fetchone()[0]
+
+
 def count_active_admins(conn: sqlite3.Connection) -> int:
     return conn.execute(
         "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0").fetchone()[0]
@@ -803,10 +869,19 @@ def record_login_attempt(conn: sqlite3.Connection, username: str, source: str,
     whether or not the account exists, or the endpoint becomes a way to discover
     which usernames are real.
     """
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO login_attempts (username, source, at, outcome) VALUES (?, ?, ?, ?)",
         (username, source, _iso(at or _utc_now()), outcome),
     )
+    return cur.lastrowid
+
+
+def withdraw_login_attempt(conn: sqlite3.Connection, attempt_id: int) -> None:
+    """Remove one reserved attempt (v0.25) -- a sign-in whose password was right
+    and which is only waiting for its second factor has not failed. Only that
+    row: clearing the scope would let anyone holding the password reset the
+    count between guesses at the code."""
+    conn.execute("DELETE FROM login_attempts WHERE id = ?", (attempt_id,))
 
 
 def recent_login_failures(conn: sqlite3.Connection, username: str, source: str,

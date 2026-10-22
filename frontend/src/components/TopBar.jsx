@@ -1,7 +1,8 @@
 import React from "react";
 import LedgerBadge from "./LedgerBadge.jsx";
 
-export default function TopBar({ stats, connected, onReset, canReset, user, onLogout, onChangePassword }) {
+export default function TopBar({ stats, connected, onReset, canReset, user, onLogout, onChangePassword,
+                                 onTwoFactor }) {
   return (
     <div className="topbar">
       <div className="brand">
@@ -50,6 +51,7 @@ export default function TopBar({ stats, connected, onReset, canReset, user, onLo
             <span className="user-role">{user.role}</span>
           </div>
           <button className="btn" onClick={onChangePassword}>Change password</button>
+          <button className="btn" onClick={onTwoFactor}>Two-factor</button>
           <button className="btn" onClick={onLogout}>Sign out</button>
         </div>
       )}

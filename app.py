@@ -50,12 +50,13 @@ import manifest
 import permissions
 import ratelimit
 import throttle
+import totp
 import tickets
 import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.24.0"
+VERSION = "0.25.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -313,6 +314,10 @@ class LoginRequest(BaseModel):
     # request, in a ledger that is never pruned.
     username: str = Field(max_length=64)
     password: str = Field(max_length=1024)
+    # v0.25: the second factor, for accounts that have it -- a code from the
+    # authenticator app, or one of the recovery codes.
+    totp_code: str | None = Field(default=None, max_length=16)
+    recovery_code: str | None = Field(default=None, max_length=32)
 
 
 class CreateUserRequest(BaseModel):
@@ -1169,6 +1174,42 @@ def reset(identity: dict = Depends(require_role("admin"))):
     return {"status": "reset to bundled sample data"}
 
 
+# Two-factor sign-in (v0.25)
+
+def _second_factor(conn: sqlite3.Connection, user: dict, req: "LoginRequest", reserved: int,
+                   source: str, now: datetime) -> tuple[bool, dict, str]:
+    """Check the second factor once the password is known to be right.
+
+    With no code at all the reply asks for one and the reserved failure is
+    withdrawn -- the password was right, nothing has failed yet. A wrong code
+    is an ordinary failure: throttled, counted towards lockout, recorded. The
+    check runs under the write lock and re-reads the last accepted step, so
+    two requests racing with the same code cannot both get in.
+    """
+    if not req.totp_code and not req.recovery_code:
+        db.withdraw_login_attempt(conn, reserved)
+        conn.commit()
+        raise HTTPException(401, {"message": "enter the code from your authenticator app",
+                                  "mfa_required": True})
+    conn.execute("BEGIN IMMEDIATE")
+    fresh = db.get_user_by_username(conn, user["username"])
+    if req.recovery_code:
+        left = db.use_recovery_code(conn, fresh["id"], totp.recovery_fingerprint(req.recovery_code))
+        conn.commit()
+        if left is None:
+            return False, {"context": "recovery_code"}, "invalid recovery code"
+        _record_auth_event(conn, "recovery_code_used", user["username"], source, now,
+                           remaining=left)
+        return True, {}, ""
+    step = totp.verify(fresh["totp_secret"], req.totp_code, last_step=fresh["totp_last_step"])
+    if step is None:
+        conn.commit()
+        return False, {"context": "totp"}, "invalid code"
+    db.set_totp_last_step(conn, fresh["id"], step)
+    conn.commit()
+    return True, {}, ""
+
+
 # Authentication endpoints
 
 @app.post("/auth/login")
@@ -1219,7 +1260,7 @@ def login(req: LoginRequest, request: Request):
                 headers={"Retry-After": str(decision.retry_after_seconds)},
             )
 
-        db.record_login_attempt(conn, req.username, source, "failure", now)
+        reserved = db.record_login_attempt(conn, req.username, source, "failure", now)
         conn.commit()
 
         user = db.get_user_by_username(conn, req.username)
@@ -1227,6 +1268,8 @@ def login(req: LoginRequest, request: Request):
             ok = auth.dummy_verify(req.password)
         else:
             ok = auth.verify_password(req.password, user["salt"], user["password_hash"])
+        failure_context: dict[str, Any] = {}
+        refusal = "invalid username or password"
 
         if ok and user["disabled"]:
             # The right password for a switched-off account (v0.24). Saying so
@@ -1239,8 +1282,12 @@ def login(req: LoginRequest, request: Request):
             conn.commit()
             raise HTTPException(403, "this account is disabled; ask an administrator")
 
+        if ok and user["totp_enabled"]:
+            ok, failure_context, refusal = _second_factor(conn, user, req, reserved, source, now)
+
         if not ok:
-            _record_auth_event(conn, "auth_failure", req.username, source, now)
+            _record_auth_event(conn, "auth_failure", req.username, source, now,
+                               **failure_context)
 
             # Re-evaluate including the failure just recorded, so the lockout
             # event is emitted exactly once -- at the attempt that trips it,
@@ -1261,8 +1308,9 @@ def login(req: LoginRequest, request: Request):
             conn.commit()
             # One message for both branches. "Invalid username or password" is
             # the whole point: naming which half was wrong is a free gift to
-            # anyone enumerating accounts.
-            raise HTTPException(401, "invalid username or password")
+            # anyone enumerating accounts. (A wrong second factor says so: by
+            # then the caller has shown it holds the password.)
+            raise HTTPException(401, refusal)
 
         token = auth.new_session_token()
         expires = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
@@ -1277,7 +1325,8 @@ def login(req: LoginRequest, request: Request):
     return {
         "token": token,
         "user": {"username": user["username"], "role": user["role"],
-                 "must_change_password": bool(user.get("must_change_password"))},
+                 "must_change_password": bool(user.get("must_change_password")),
+                 "totp_enabled": bool(user.get("totp_enabled"))},
         "expires_at": expires.isoformat(),
     }
 
@@ -1351,8 +1400,138 @@ def logout(authorization: str | None = Header(None),
 
 @app.get("/auth/me")
 def whoami(identity: dict = Depends(require_session)):
+    with db.get_conn() as conn:
+        user = db.get_user_by_username(conn, identity["username"])
     return {"username": identity["username"], "role": identity["role"],
-            "must_change_password": bool(identity.get("must_change_password"))}
+            "must_change_password": bool(identity.get("must_change_password")),
+            "totp_enabled": bool(user and user["totp_enabled"])}
+
+
+class TotpSetupRequest(BaseModel):
+    current_password: str = Field(max_length=1024)
+
+
+class TotpConfirmRequest(BaseModel):
+    code: str = Field(max_length=16)
+
+
+class TotpDisableRequest(BaseModel):
+    current_password: str = Field(max_length=1024)
+    code: str | None = Field(default=None, max_length=16)
+    recovery_code: str | None = Field(default=None, max_length=32)
+
+
+def _check_current_password(conn: sqlite3.Connection, username: str, password: str,
+                            source: str, now: datetime, context: str) -> dict:
+    """The current password, through the sign-in throttle (v0.25; the same
+    steps as POST /auth/password). A stolen session must not be enough to turn
+    two-factor on with the thief's phone, or off."""
+    window_start = now - timedelta(minutes=LOGIN_THROTTLE.window_minutes)
+    conn.execute("BEGIN IMMEDIATE")
+    decision = throttle.evaluate(db.recent_login_failures(conn, username, source, window_start),
+                                 now, LOGIN_THROTTLE)
+    if not decision.allowed:
+        conn.commit()
+        raise HTTPException(429, decision.message(),
+                            headers={"Retry-After": str(decision.retry_after_seconds)})
+    reserved = db.record_login_attempt(conn, username, source, "failure", now)
+    conn.commit()
+    user = db.get_user_by_username(conn, username)
+    if user is None or not auth.verify_password(password, user["salt"], user["password_hash"]):
+        _record_auth_event(conn, "auth_failure", username, source, now, context=context)
+        conn.commit()
+        raise HTTPException(401, "current password is incorrect")
+    # Only this attempt is withdrawn, not the scope's history: a right password
+    # followed by a wrong code must still count, or this endpoint would be a way
+    # to guess codes without ever being throttled.
+    db.withdraw_login_attempt(conn, reserved)
+    conn.commit()
+    return user
+
+
+@app.get("/auth/totp")
+def totp_status(identity: dict = Depends(require_user)):
+    with db.get_conn() as conn:
+        user = db.get_user_by_username(conn, identity["username"])
+        left = db.recovery_codes_left(conn, user["id"]) if user["totp_enabled"] else 0
+    return {"enabled": bool(user["totp_enabled"]), "recovery_codes_left": left,
+            "pending": bool(user["totp_pending_secret"])}
+
+
+@app.post("/auth/totp/setup")
+def totp_setup(req: TotpSetupRequest, request: Request, identity: dict = Depends(require_user)):
+    """Start turning two-factor on (v0.25). Returns a new secret and the
+    otpauth:// URI an authenticator app reads from a QR code. Nothing changes
+    for sign-in until a code from the app confirms it (POST /auth/totp/confirm),
+    so a mistyped secret cannot lock anyone out."""
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        user = _check_current_password(conn, identity["username"], req.current_password,
+                                       source, now, "totp_setup")
+        if user["totp_enabled"]:
+            raise HTTPException(409, "two-factor is already on; turn it off first to "
+                                     "move it to another device")
+        secret = totp.new_secret()
+        db.set_totp_pending(conn, user["id"], secret)
+        conn.commit()
+    return {"secret": secret, "uri": totp.provisioning_uri(secret, identity["username"]),
+            "digits": totp.DIGITS, "period": totp.STEP_SECONDS}
+
+
+@app.post("/auth/totp/confirm")
+def totp_confirm(req: TotpConfirmRequest, request: Request,
+                 identity: dict = Depends(require_user)):
+    """Finish turning two-factor on with a first code from the app. Returns the
+    recovery codes -- once."""
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        user = db.get_user_by_username(conn, identity["username"])
+        if not user["totp_pending_secret"]:
+            raise HTTPException(409, "start with POST /auth/totp/setup")
+        step = totp.verify(user["totp_pending_secret"], req.code)
+        if step is None:
+            raise HTTPException(400, "that code does not match; check the app's clock "
+                                     "and try the current code")
+        codes = totp.new_recovery_codes()
+        db.enable_totp(conn, user["id"], user["totp_pending_secret"], step,
+                       [totp.recovery_fingerprint(c) for c in codes])
+        _record_auth_event(conn, "totp_enabled", identity["username"], source, now)
+        conn.commit()
+    return {"status": "two-factor is on", "recovery_codes": codes,
+            "note": "each recovery code works once; keep them somewhere other than your phone"}
+
+
+@app.post("/auth/totp/disable")
+def totp_disable(req: TotpDisableRequest, request: Request,
+                 identity: dict = Depends(require_user)):
+    """Turn your own two-factor off: current password and a current code (or a
+    recovery code), so neither a stolen session nor a stolen password alone can."""
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        user = _check_current_password(conn, identity["username"], req.current_password,
+                                       source, now, "totp_disable")
+        if not user["totp_enabled"]:
+            raise HTTPException(409, "two-factor is not on")
+        conn.execute("BEGIN IMMEDIATE")
+        user = db.get_user_by_username(conn, identity["username"])
+        if req.recovery_code:
+            good = db.use_recovery_code(conn, user["id"],
+                                        totp.recovery_fingerprint(req.recovery_code)) is not None
+        else:
+            good = totp.verify(user["totp_secret"], req.code or "",
+                               last_step=user["totp_last_step"]) is not None
+        if not good:
+            db.record_login_attempt(conn, identity["username"], source, "failure", now)
+            _record_auth_event(conn, "auth_failure", identity["username"], source, now,
+                               context="totp_disable")
+            conn.commit()
+            raise HTTPException(401, "invalid code")
+        db.disable_totp(conn, user["id"])
+        _record_auth_event(conn, "totp_disabled", identity["username"], source, now,
+                           changed_by=identity["username"])
+        conn.commit()
+    return {"status": "two-factor is off"}
 
 
 def _password_refusal(problems: list[str]) -> HTTPException:
@@ -1507,6 +1686,31 @@ def reset_password(username: str, req: ResetPasswordRequest, request: Request,
         out["password"] = new_password
         out["note"] = "shown once; give it to the user over a channel you trust"
     return out
+
+
+@app.post("/users/{username}/totp/reset")
+def reset_user_totp(username: str, request: Request,
+                    identity: dict = Depends(require_role("admin"))):
+    """Remove someone else's two-factor (v0.25) -- for the lost phone with the
+    recovery codes lost too. Their sessions end, and the removal raises
+    `mfa_removed`: taking a second factor off an account is also exactly what an
+    attacker with an admin session would do before using a stolen password."""
+    if username == identity["username"]:
+        raise HTTPException(400, "turn your own two-factor off with POST /auth/totp/disable")
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        user = db.get_user_by_username(conn, username)
+        if user is None:
+            raise HTTPException(404, f"no user '{username}'")
+        if not user["totp_enabled"]:
+            raise HTTPException(409, f"'{username}' does not have two-factor on")
+        db.disable_totp(conn, user["id"])
+        ended = db.delete_sessions_for_user(conn, user["id"])
+        _record_auth_event(conn, "totp_reset", username, source, now,
+                           changed_by=identity["username"], sessions_ended=ended)
+        conn.commit()
+    return {"username": username, "status": "two-factor removed", "sessions_ended": ended}
 
 
 @app.patch("/users/{username}")

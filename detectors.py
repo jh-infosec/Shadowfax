@@ -45,6 +45,8 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "admin_account_created",
     # v0.24: an existing account made an administrator.
     "admin_role_granted",
+    # v0.25: a second factor taken off an account.
+    "mfa_removed",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
@@ -345,7 +347,8 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                     f"the password for '{meta.get('attempted_username', '?')}' "
                     f"({meta.get('role', '?')}) was reset from the server console by OS "
                     f"user '{meta.get('os_user', '?')}', bypassing sign-in; "
-                    f"{meta.get('sessions_ended', 0)} session(s) ended"))
+                    f"{meta.get('sessions_ended', 0)} session(s) ended"
+                    + ("; two-factor removed" if meta.get("two_factor_removed") else "")))
             continue
 
         # A new administrator (v0.23). Usually a colleague being onboarded;
@@ -365,6 +368,18 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 alerts.append(_mk_alert(e, "medium", "admin_role_granted",
                     f"'{meta.get('attempted_username', '?')}' was made an administrator "
                     f"(was {meta.get('old_role', '?')}) by '{meta.get('changed_by', '?')}'"))
+            continue
+
+        # Two-factor removed (v0.25). By its owner -- password and a code --
+        # low; by an admin, medium: the lost-phone case, and also the step an
+        # attacker holding an admin session takes before using a stolen password.
+        if e["event_type"] in ("totp_disabled", "totp_reset"):
+            if e["actor_id"] == AUTH_ACTOR_ID:
+                by_admin = e["event_type"] == "totp_reset"
+                alerts.append(_mk_alert(e, "medium" if by_admin else "low", "mfa_removed",
+                    f"two-factor was removed from '{meta.get('attempted_username', '?')}' "
+                    + (f"by admin '{meta.get('changed_by', '?')}'" if by_admin
+                       else "by its owner")))
             continue
 
         if e["event_type"] == "alerts_retired":

@@ -110,6 +110,11 @@ export default function AccountsDrawer({ me, onClose }) {
     });
   };
 
+  const removeTotp = (name) => {
+    if (confirming !== `totp:${name}`) { setConfirming(`totp:${name}`); return; }
+    run(() => api.resetUserTotp(name));
+  };
+
   const toggleDisabled = (u) => {
     if (!u.disabled && confirming !== `disable:${u.username}`) {
       setConfirming(`disable:${u.username}`);
@@ -177,7 +182,7 @@ export default function AccountsDrawer({ me, onClose }) {
             <div className="risk-label">Users</div>
             <table className="lockout-table accounts-users">
               <thead>
-                <tr><th>Username</th><th>Role</th><th>Status</th><th>Changed</th><th /></tr>
+                <tr><th>Username</th><th>Role</th><th>Status</th><th>2FA</th><th>Changed</th><th /></tr>
               </thead>
               <tbody>
                 {users.map((u) => (
@@ -209,10 +214,20 @@ export default function AccountsDrawer({ me, onClose }) {
                       : u.must_change_password
                         ? <span className="lockout-state backoff">must change</span>
                         : <span className="lockout-state">active</span>}</td>
+                    <td>{u.totp_enabled
+                      ? <span className="lockout-state tf-on">on</span>
+                      : <span className="lockout-state">off</span>}</td>
                     <td className="mono">{when(u.password_changed_at)}</td>
                     <td>
                       {u.username !== me && (
                         <div className="row-actions">
+                          {!!u.totp_enabled && (
+                            <button className={`btn${confirming === `totp:${u.username}` ? " danger" : ""}`}
+                                    disabled={busy || !!secret} onClick={() => removeTotp(u.username)}
+                                    title="for a lost phone: removes two-factor and signs them out">
+                              {confirming === `totp:${u.username}` ? "Confirm remove" : "Remove 2FA"}
+                            </button>
+                          )}
                           <button className={`btn${confirming === `reset:${u.username}` ? " danger" : ""}`}
                                   disabled={busy || !!secret || !!u.disabled}
                                   onClick={() => reset(u.username)}>

@@ -41,12 +41,13 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across twenty-six alert categories, including AI-agent tool-call analysis
+- Rule-based detection engine across twenty-seven alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
 - Acknowledge and assign alerts, with analyst state that persists across rescans
 - Authentication with user accounts, roles (admin / analyst / viewer) and API keys
+- Two-factor sign-in — codes from any authenticator app (QR enrolment from the dashboard), single-use and throttled, with recovery codes; removing it raises an alert
 - Password changes and admin resets — the current password required and throttled, other sessions signed out, admin-reset passwords forced to change before anything else works
 - Dashboard sign-in, with the UI adapting to the signed-in user's role
 - Live push over Server-Sent Events — the dashboard updates the instant data changes
@@ -255,6 +256,10 @@ Planned
 
 - Change roles; disable and re-enable accounts — shipped (v0.24.0)
 
+### v0.25
+
+- Two-factor sign-in (TOTP) with recovery codes — shipped (v0.25.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -398,7 +403,7 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Forty-two checks, each one an assertion a person makes when they glance at the
+Fifty checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
@@ -433,7 +438,7 @@ python demo.py --fast --assert
 ```
 
 That turns the demo into an end-to-end check of the whole stack — ingest,
-twenty-six detectors, correlation, kill-chain ordering, findings-envelope ingest,
+twenty-seven detectors, correlation, kill-chain ordering, findings-envelope ingest,
 the front door and the ledger — against a real server over real HTTP. It is a
 different kind of evidence from the unit suite, which never leaves the process.
 
@@ -779,6 +784,7 @@ container log — reset it from the machine Shadowfax runs on:
 
 ```bash
 docker exec -it shadowfax python recover.py admin       # the published image
+docker exec -it shadowfax python recover.py admin --remove-2fa   # phone lost too
 docker compose exec shadowfax python recover.py admin   # with docker compose
 python recover.py admin                                  # from source
 ```
@@ -875,7 +881,7 @@ critical, high, medium, low, info
 ```
 
 A finding's `key` becomes the alert category, so an emitter **may not use one of
-Shadowfax's own twenty-six detector categories**. An alert reading
+Shadowfax's own twenty-seven detector categories**. An alert reading
 `destructive_action` must mean Shadowfax's detector found it, not that somebody
 else said so.
 
@@ -1000,6 +1006,19 @@ T1098). Disabling an account signs it out everywhere and refuses its sign-in
 without deleting anything it did; an admin cannot change their own role or
 disable themselves, and the last enabled admin can be neither demoted nor
 disabled. `recover.py` re-enables the account it recovers.
+
+**Two-factor sign-in** (TOTP, RFC 6238) is available to every account from the
+dashboard's **Two-factor** button: scan the QR code (or type the key) into any
+authenticator app and confirm with a first code. Sign-in then asks for a code
+after the password. A code works once, one 30-second step of clock drift is
+allowed either way, and wrong codes count towards the same backoff and lockout
+as wrong passwords. Ten recovery codes, shown once and stored as fingerprints,
+cover a lost phone. Turning it off takes the password and a code; an admin can
+remove it from someone else's account (their sessions end), which raises
+`mfa_removed` (medium, ATT&CK T1556). The TOTP secret is stored in the database
+as it must be readable to check a code — whoever can read the database file can
+read it. `shadowfax login` prompts for the code; `recover.py` keeps two-factor
+unless given `--remove-2fa`.
 
 A lost admin password is recovered with `recover.py` on the server itself (see
 Locked out of your own Shadowfax above), never over the API; the recovery is

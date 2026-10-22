@@ -213,8 +213,15 @@ Harden the platform's own front door, then point the engine at it.
       never on yourself, never leaving no enabled admin; disabling ends every
       session and keeps the history; promotion to admin raises
       `admin_role_granted`.
-- [ ] Second factor (TOTP) for admin accounts. Throttling slows guessing; it
-      does not stop a leaked password.
+- [x] Second factor (TOTP) (`v0.25.0`): any account can turn it on from the
+      dashboard (QR code or key, confirmed by a first code); codes are
+      single-use and throttled like passwords; ten single-use recovery codes;
+      admins can remove it for a lost phone, which raises `mfa_removed`.
+- [ ] Require two-factor for admins (a policy switch), and regenerate recovery
+      codes without turning two-factor off and on.
+- [ ] Update the dashboard's build toolchain: `npm audit` flags the Vite dev
+      server's esbuild and `source-map-js` (development only; nothing in the
+      shipped dashboard).
 
 ---
 

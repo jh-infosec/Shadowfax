@@ -538,6 +538,9 @@ _CATEGORY_SYNONYMS = {
     "administrator": "admin_account_created",
     "promoted": "admin_role_granted",
     "made admin": "admin_role_granted",
+    "two-factor": "mfa_removed",
+    "2fa": "mfa_removed",
+    "mfa": "mfa_removed",
 }
 
 

@@ -1757,6 +1757,178 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== two-factor sign-in (v0.25) ==")
+import totp as _totp
+import tempfile as _tf
+from datetime import datetime as _dt, timedelta, timezone
+from pathlib import Path as _Path
+import recover as _recover
+
+def _login(u, pw, **extra):
+    return client.post("/auth/login", json={"username": u, "password": pw, **extra})
+
+def _failures(u):
+    with db_module.get_conn() as _c:
+        return len(db_module.recent_login_failures(
+            _c, u, "testclient", _dt.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)))
+
+def _clear(u):
+    with db_module.get_conn() as _c:
+        db_module.clear_login_failures(_c, u); _c.commit()
+
+def _now_code(secret, ahead=0):
+    return _totp.code_at(secret, _totp.current_step() + ahead)
+
+check("TOTP matches the RFC 6238 test vectors",
+      [_totp.code_at("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", t // 30)
+       for t in (59, 1111111109, 1234567890, 2000000000)]
+      == ["287082", "081804", "005924", "279037"])
+
+client.post("/users", json={"username": "mfa-user", "password": TEST_PW, "role": "analyst"})
+_mu = as_user("mfa-user", TEST_PW)
+check("two-factor starts off", _mu.get("/auth/totp").json()["enabled"] is False
+      and _mu.get("/auth/me").json()["totp_enabled"] is False)
+check("starting setup needs the current password",
+      _mu.post("/auth/totp/setup", json={"current_password": "wrong-password-xx"}).status_code == 401)
+_clear("mfa-user")
+_setup = _mu.post("/auth/totp/setup", json={"current_password": TEST_PW}).json()
+_sec = _setup["secret"]
+check("setup returns a secret and an otpauth URI naming the account",
+      len(_sec) == 32 and _setup["uri"].startswith("otpauth://totp/Shadowfax:mfa-user?")
+      and f"secret={_sec}" in _setup["uri"])
+check("until a code confirms it, sign-in is unchanged", _login("mfa-user", TEST_PW).status_code == 200)
+check("a wrong first code does not turn it on",
+      _mu.post("/auth/totp/confirm", json={"code": "000000" if _now_code(_sec) != "000000" else "111111"}).status_code == 400
+      and _mu.get("/auth/totp").json()["enabled"] is False)
+_conf = _mu.post("/auth/totp/confirm", json={"code": _now_code(_sec)}).json()
+_codes = _conf.get("recovery_codes", [])
+check("a right code turns it on and returns ten recovery codes, once",
+      _mu.get("/auth/totp").json() == {"enabled": True, "recovery_codes_left": 10, "pending": False}
+      and len(set(_codes)) == 10)
+with db_module.get_conn() as _c:
+    _stored = [r[0] for r in _c.execute("SELECT code_fp FROM recovery_codes").fetchall()]
+check("recovery codes are stored only as fingerprints",
+      not any(c in _stored for c in _codes) and _totp.recovery_fingerprint(_codes[0]) in _stored)
+check("setting up again while on is refused",
+      _mu.post("/auth/totp/setup", json={"current_password": TEST_PW}).status_code == 409)
+
+_f0 = _failures("mfa-user")
+_r = _login("mfa-user", TEST_PW)
+check("the right password alone now asks for a code",
+      _r.status_code == 401 and _r.json()["detail"]["mfa_required"] is True and "token" not in _r.json())
+check("and that request is not counted as a failure", _failures("mfa-user") == _f0)
+_r = _login("mfa-user", "wrong-password-xx")
+check("a wrong password does not reveal that two-factor is on",
+      _r.status_code == 401 and _r.json()["detail"] == "invalid username or password")
+_clear("mfa-user")
+# The confirm step used the current code; the next step's code is fresh.
+_code = _now_code(_sec, 1)
+_r = _login("mfa-user", TEST_PW, totp_code=_code[:3] + " " + _code[3:])
+check("password plus a current code signs in (spaces allowed, one step of drift)",
+      _r.status_code == 200 and _r.json()["user"]["totp_enabled"] is True)
+_r = _login("mfa-user", TEST_PW, totp_code=_code)
+check("the same code cannot be used twice", _r.status_code == 401 and _r.json()["detail"] == "invalid code")
+check("an old code is refused too",
+      _login("mfa-user", TEST_PW, totp_code=_now_code(_sec, -1)).status_code == 401)
+_f1 = _failures("mfa-user")
+_bad = "000000" if _now_code(_sec) != "000000" else "111111"
+_login("mfa-user", TEST_PW, totp_code=_bad)
+check("a wrong code counts as a failure", _failures("mfa-user") == _f1 + 1)
+_codes_seen = []
+for _ in range(8):
+    _codes_seen.append(_login("mfa-user", TEST_PW, totp_code=_bad).status_code)
+check("guessing codes is throttled like guessing passwords", 429 in _codes_seen)
+_clear("mfa-user")
+_r = _login("mfa-user", TEST_PW, recovery_code=_codes[0].upper())
+check("a recovery code signs in (any case)", _r.status_code == 200)
+check("and works only once", _login("mfa-user", TEST_PW, recovery_code=_codes[0]).status_code == 401
+      and _mu.get("/auth/totp").json()["recovery_codes_left"] == 9)
+check("a made-up recovery code is refused",
+      _login("mfa-user", TEST_PW, recovery_code="aaaa-bbbb-cccc").status_code == 401)
+_clear("mfa-user")
+check("/users shows who has two-factor on",
+      any(u["username"] == "mfa-user" and u["totp_enabled"] for u in client.get("/users").json()))
+
+# The command line asks for the code.
+_cfg = _Path(_tf.mkdtemp()) / "cfg.json"
+_orig_cfg, _orig_ask = _cli.CONFIG_PATH, _cli._ask
+_cli.CONFIG_PATH = _cfg
+_cli._ask = lambda prompt: _codes[1]
+try:
+    _code_rc, _cout, _cerr = run_cli(["login", "-u", "mfa-user", "-p", TEST_PW], transport=_anon_tp)
+finally:
+    _cli.CONFIG_PATH, _cli._ask = _orig_cfg, _orig_ask
+check("`shadowfax login` prompts for the second factor and signs in",
+      _code_rc == 0 and "token" in json.loads(_cfg.read_text()))
+
+# Turning it off: password and a code, both.
+_clear("mfa-user")
+_r = _login("mfa-user", TEST_PW, recovery_code=_codes[2])
+_mu = TestClient(app); _mu.headers.update({"Authorization": f"Bearer {_r.json()['token']}"})
+_f2 = _failures("mfa-user")
+check("turning it off with a wrong code is refused and counted",
+      _mu.post("/auth/totp/disable", json={"current_password": TEST_PW, "code": _bad}).status_code == 401
+      and _failures("mfa-user") == _f2 + 1)
+_mu.post("/auth/totp/disable", json={"current_password": TEST_PW, "code": _bad})
+check("and a right password does not wipe the count, so codes cannot be guessed this way",
+      _failures("mfa-user") == _f2 + 2)
+check("or with a wrong password",
+      _mu.post("/auth/totp/disable", json={"current_password": "wrong-password-xx",
+                                           "recovery_code": _codes[3]}).status_code == 401)
+_clear("mfa-user")
+
+app_module.SELF_MONITOR = True
+try:
+    _n_mr = len(client.get("/alerts", params={"category": ["mfa_removed"]}).json())
+    _r = _mu.post("/auth/totp/disable", json={"current_password": TEST_PW, "recovery_code": _codes[3]})
+    _mr = client.get("/alerts", params={"category": ["mfa_removed"]}).json()
+    check("its owner can turn it off; that raises mfa_removed (low)",
+          _r.status_code == 200 and _login("mfa-user", TEST_PW).status_code == 200
+          and len(_mr) == _n_mr + 1 and any(a["severity"] == "low" and "by its owner" in a["message"]
+                                            for a in _mr))
+    # Back on, then removed by an admin.
+    _clear("mfa-user")
+    _mu = as_user("mfa-user", TEST_PW)
+    _s2 = _mu.post("/auth/totp/setup", json={"current_password": TEST_PW}).json()["secret"]
+    _mu.post("/auth/totp/confirm", json={"code": _now_code(_s2)})
+    _clear("mfa-user")
+    _r = client.post("/users/mfa-user/totp/reset")
+    _mr = client.get("/alerts", params={"category": ["mfa_removed"]}).json()
+    check("an admin can remove someone's two-factor, ending their sessions",
+          _r.status_code == 200 and _r.json()["sessions_ended"] >= 1
+          and _mu.get("/alerts").status_code == 401
+          and _login("mfa-user", TEST_PW).status_code == 200)
+    check("which raises mfa_removed (medium, T1556) naming the admin",
+          len(_mr) == _n_mr + 2 and any(a["severity"] == "medium" and "by admin 'admin'" in a["message"]
+                                        and any(t["id"] == "T1556" for t in a["attack"]) for a in _mr))
+    check("the ledger verifies", client.get("/ledger/verify").json()["ok"] is True)
+finally:
+    app_module.SELF_MONITOR = False
+check("an admin cannot reset their own two-factor that way",
+      client.post("/users/admin/totp/reset").status_code == 400)
+check("nor an account without it", client.post("/users/mfa-user/totp/reset").status_code == 409)
+check("nor can a non-admin",
+      as_user("analyst1", TEST_PW).post("/users/mfa-user/totp/reset").status_code == 403)
+
+# Console recovery keeps two-factor unless told otherwise.
+_clear("mfa-user")
+_mu = as_user("mfa-user", TEST_PW)
+_s3 = _mu.post("/auth/totp/setup", json={"current_password": TEST_PW}).json()["secret"]
+_mu.post("/auth/totp/confirm", json={"code": _now_code(_s3)})
+_rec = _recover.recover("mfa-user")
+_r = _login("mfa-user", _rec["password"])
+check("console recovery keeps two-factor by default",
+      _rec["two_factor_kept"] is True and _r.status_code == 401 and _r.json()["detail"]["mfa_required"])
+_rec = _recover.recover("mfa-user", remove_2fa=True)
+check("and removes it when asked",
+      _rec["two_factor_removed"] is True
+      and _login("mfa-user", _rec["password"]).status_code == 200)
+check("the detector ignores totp_reset under any other actor",
+      not [a for a in detectors.run_for_actor([{
+          "id": 1, "timestamp": "2026-10-19T09:00:00", "actor_id": "someone", "actor_type": "human",
+          "event_type": "totp_reset", "target": "x", "metadata": {}}], _POLICY)
+          if a["category"] == "mfa_removed"])
+
 print("\n== roles and disabled accounts (v0.24) ==")
 import types as _types
 import recover as _recover

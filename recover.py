@@ -53,7 +53,7 @@ def _os_user() -> str:
         return "unknown"
 
 
-def recover(username: str, *, now: datetime | None = None) -> dict:
+def recover(username: str, *, now: datetime | None = None, remove_2fa: bool = False) -> dict:
     """Reset `username`'s password from the console. Returns what was done,
     including the new password. Raises LookupError for an unknown user and
     FileNotFoundError when there is no database to recover."""
@@ -83,6 +83,13 @@ def recover(username: str, *, now: datetime | None = None) -> dict:
         re_enabled = bool(user.get("disabled"))
         if re_enabled:
             db.set_disabled(conn, user["id"], False)
+        # Two-factor stays on unless asked (v0.25): a forgotten password is not
+        # a lost phone, and quietly removing the second factor would make this
+        # command a way round it.
+        has_2fa = bool(user.get("totp_enabled"))
+        removed_2fa = has_2fa and remove_2fa
+        if removed_2fa:
+            db.disable_totp(conn, user["id"])
         db.insert_event(conn, {
             "timestamp": now.isoformat(),
             "actor_id": app.SELF_ACTOR_ID,
@@ -93,12 +100,13 @@ def recover(username: str, *, now: datetime | None = None) -> dict:
             "metadata": {"attempted_username": username, "role": user["role"],
                          "source": "console", "os_user": _os_user(),
                          "sessions_ended": ended, "failures_cleared": cleared,
-                         "re_enabled": re_enabled},
+                         "re_enabled": re_enabled, "two_factor_removed": removed_2fa},
         })
         app._rescan_actor(conn, app.SELF_ACTOR_ID)
         conn.commit()
     return {"username": username, "role": user["role"], "password": password,
-            "sessions_ended": ended, "failures_cleared": cleared, "re_enabled": re_enabled}
+            "sessions_ended": ended, "failures_cleared": cleared, "re_enabled": re_enabled,
+            "two_factor_kept": has_2fa and not removed_2fa, "two_factor_removed": removed_2fa}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
                     "password is generated, shown once, and must be changed at the "
                     "next sign-in. Recorded in the ledger; raises console_recovery.")
     p.add_argument("username", help="the account to recover, e.g. admin")
+    p.add_argument("--remove-2fa", action="store_true",
+                   help="also remove two-factor, when the authenticator and its "
+                        "recovery codes are lost too")
     p.add_argument("--yes", action="store_true",
                    help="do not ask for confirmation (for scripts)")
     args = p.parse_args(argv)
@@ -123,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Not confirmed; nothing changed.", file=sys.stderr)
             return 1
     try:
-        r = recover(args.username)
+        r = recover(args.username, remove_2fa=args.remove_2fa)
     except (LookupError, FileNotFoundError) as exc:
         print(f"error: {exc.args[0]}", file=sys.stderr)
         return 1
@@ -135,6 +146,11 @@ def main(argv: list[str] | None = None) -> int:
     print("  Shown once. It must be changed at the next sign-in.")
     if r["re_enabled"]:
         print("  The account was disabled; it has been re-enabled.")
+    if r["two_factor_removed"]:
+        print("  Two-factor has been removed; turn it on again after signing in.")
+    elif r["two_factor_kept"]:
+        print("  Two-factor is still on: sign-in will also need a code or a recovery")
+        print("  code. If both are lost, run this again with --remove-2fa.")
     print(f"  Sessions ended: {r['sessions_ended']}; "
           f"sign-in failures cleared: {r['failures_cleared']}.")
     print("  Recorded in the ledger; a console_recovery alert has been raised.")

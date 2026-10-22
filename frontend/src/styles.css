@@ -619,3 +619,31 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .accounts-drawer { width: 860px; }
 .accounts-users .lockout-state { white-space: nowrap; }
 .accounts-users tr.user-disabled td:not(:last-child) { opacity: 0.55; }
+
+/* ---- two-factor (v0.25) ------------------------------------------------- */
+
+.login-step { font-size: 12.5px; color: var(--muted); margin: 4px 0 12px; line-height: 1.5; }
+.login-step b { color: var(--text); }
+.login-code { font-family: var(--mono); letter-spacing: 0.2em; font-size: 16px; }
+.login-links { display: flex; justify-content: space-between; margin: -4px 0 12px; }
+.link-btn {
+  background: none; border: none; color: var(--accent); font-size: 12px; cursor: pointer; padding: 0;
+}
+.link-btn:hover { text-decoration: underline; }
+.twofactor-modal { width: 460px; }
+.twofactor-modal form label { display: block; margin-top: 12px; }
+.tf-foot { padding: 14px 0 0; border-top: none; }
+.tf-on { color: #6fd39b; }
+.tf-scan { display: flex; flex-direction: column; align-items: center; gap: 10px; margin: 8px 0; }
+.tf-qr { width: 200px; height: 200px; border-radius: 6px; background: #fff; }
+.tf-qr-missing { display: flex; align-items: center; justify-content: center; color: #333; font-size: 12px; }
+.tf-key { text-align: center; letter-spacing: 0.05em; }
+.tf-code { font-family: var(--mono); letter-spacing: 0.2em; }
+.tf-recovery {
+  list-style: none; margin: 4px 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px;
+}
+.tf-recovery code { font-family: var(--mono); font-size: 13px; }
+.twofactor-modal form label { font-size: 12.5px; color: var(--muted); }
+.twofactor-modal form label input {
+  display: block; width: 100%; box-sizing: border-box; margin-top: 6px;
+}

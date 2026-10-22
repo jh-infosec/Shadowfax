@@ -9,6 +9,7 @@ import IncidentsDrawer from "./components/IncidentsDrawer.jsx";
 import DigestDrawer from "./components/DigestDrawer.jsx";
 import LockoutsDrawer from "./components/LockoutsDrawer.jsx";
 import AccountsDrawer from "./components/AccountsDrawer.jsx";
+import TwoFactorModal from "./components/TwoFactorModal.jsx";
 import ExplanationModal from "./components/ExplanationModal.jsx";
 import NLSearch from "./components/NLSearch.jsx";
 import Login from "./components/Login.jsx";
@@ -66,6 +67,7 @@ export default function App() {
   const [digestOpen, setDigestOpen] = useState(false);
   const [lockoutsOpen, setLockoutsOpen] = useState(false);
   const [accountsOpen, setAccountsOpen] = useState(false);
+  const [twoFactorOpen, setTwoFactorOpen] = useState(false);
   // The alert whose explanation modal is open, or null.
   const [explainAlert, setExplainAlert] = useState(null);
   // Active natural-language search result (snapshot), or null for the normal
@@ -230,7 +232,7 @@ export default function App() {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
-      if (passwordOpen || policyOpen) return;
+      if (passwordOpen || policyOpen || twoFactorOpen) return;
       if (explainAlert) setExplainAlert(null);
       else if (accountsOpen) setAccountsOpen(false);
       else if (lockoutsOpen) setLockoutsOpen(false);
@@ -242,7 +244,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [passwordOpen, policyOpen, explainAlert, accountsOpen, lockoutsOpen, digestOpen,
+  }, [passwordOpen, policyOpen, twoFactorOpen, explainAlert, accountsOpen, lockoutsOpen, digestOpen,
       incidentsOpen, selectedActorId]);
 
   const handleLogout = async () => {
@@ -336,7 +338,9 @@ export default function App() {
         user={user}
         onLogout={handleLogout}
         onChangePassword={() => setPasswordOpen(true)}
+        onTwoFactor={() => setTwoFactorOpen(true)}
       />
+      {twoFactorOpen && <TwoFactorModal onClose={() => setTwoFactorOpen(false)} />}
       {passwordOpen && (
         <PasswordModal
           user={user}

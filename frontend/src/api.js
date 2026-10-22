@@ -71,10 +71,12 @@ async function request(path, { headers: extraHeaders, ...options } = {}) {
 
 // Authentication
 
-export async function login(username, password) {
+// `second` is {totp_code} or {recovery_code} (v0.25). Without one, an account
+// with two-factor on throws with err.detail.mfa_required.
+export async function login(username, password, second = {}) {
   const data = await request("/auth/login", {
     method: "POST",
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, ...second }),
   });
   setToken(data.token);
   return data.user; // { username, role }
@@ -222,6 +224,34 @@ export function updateUser(username, patch) {
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+}
+
+// Two-factor (v0.25).
+export function getTotp() {
+  return request("/auth/totp");
+}
+
+export function startTotp(currentPassword) {
+  return request("/auth/totp/setup", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword }),
+  });
+}
+
+export function confirmTotp(code) {
+  return request("/auth/totp/confirm", { method: "POST", body: JSON.stringify({ code }) });
+}
+
+export function disableTotp(currentPassword, code) {
+  const second = code.includes("-") ? { recovery_code: code } : { code };
+  return request("/auth/totp/disable", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, ...second }),
+  });
+}
+
+export function resetUserTotp(username) {
+  return request(`/users/${encodeURIComponent(username)}/totp/reset`, { method: "POST" });
 }
 
 export function listApiKeys() {

@@ -1,5 +1,93 @@
 # Changelog
 
+## Version 0.25.0
+
+Two-factor sign-in. Throttling and lockout slow someone *guessing* a password;
+they do nothing for someone who already *has* it — phished, reused, read over a
+shoulder. A code from an authenticator app on the owner's phone does.
+
+### Turning it on
+
+The **Two-factor** button in the top bar, for any account:
+
+1. The current password — a session left open on someone else's screen must
+   not be enough to put the thief's phone on the account.
+2. A QR code to scan into any authenticator app (Google Authenticator,
+   Microsoft Authenticator, 1Password, Aegis…), with the key printed beneath it
+   for typing in.
+3. A first code from the app. **Nothing about sign-in changes until this code
+   matches**, so a mistyped key cannot lock anyone out.
+
+Then ten **recovery codes**, shown once, held on screen until dismissed, stored
+only as fingerprints. Each works once in place of a code, for a lost phone.
+
+### Signing in
+
+The password, then a second screen for the code (or a recovery code). The CLI's
+`shadowfax login` prompts for it the same way.
+
+- **A code works once.** The step it was accepted for is stored, and that step
+  and every earlier one are refused afterwards, so a code read over a shoulder
+  or out of a proxy log cannot be replayed. The check runs under the database
+  write lock, so two requests racing with the same code cannot both succeed.
+- **One step of clock drift** either way (30 seconds), and no more.
+- **Wrong codes are wrong passwords** as far as the throttle is concerned:
+  backoff, lockout and `auth_failure` events alike. The password-only request
+  that leads to the code screen is *not* counted — nothing has failed yet — but
+  only that one attempt is withdrawn, never the earlier history, or anyone
+  holding the password could reset the count between guesses at the code.
+- A **wrong password** gives the same answer whether or not two-factor is on, so
+  the endpoint does not reveal which accounts have it.
+
+### Turning it off, and the lost phone
+
+- Its owner turns it off with the password **and** a current code or recovery
+  code. Wrong codes here are counted too; a right password does not wipe the
+  count, so this cannot be used to guess codes either.
+- An admin can **Remove 2FA** from someone else's account in the Accounts drawer
+  (two presses). Their sessions end.
+- Either way **`mfa_removed`** is raised — low when the owner did it, medium
+  when an admin did (ATT&CK **T1556** Modify Authentication Process): it is the
+  lost-phone case, and also the step an attacker holding an admin session takes
+  before using a stolen password.
+- `recover.py` keeps two-factor on by default — a forgotten password is not a
+  lost phone, and removing it silently would make the console a way round it —
+  and removes it with `--remove-2fa`, which the `console_recovery` alert names.
+
+### Under the hood
+
+- `totp.py`: RFC 6238 in the standard library — no new Python dependency —
+  checked against the RFC's test vectors.
+- The dashboard draws the QR code with the `qrcode` npm package (1.5.4, pinned;
+  `npm audit` reports no issues in runtime dependencies). A screenshot of the
+  QR was decoded during verification: it carries the same key printed under it.
+  (`npm audit` does flag the dev-only Vite toolchain; that predates this
+  release and is noted on the roadmap.)
+- The TOTP secret is stored in the database, because checking a code needs it.
+  Like everything else there, it is protected by whoever can read the file.
+- Detector categories: twenty-six → **twenty-seven**.
+
+Not yet: requiring two-factor for admins, and regenerating recovery codes
+without turning it off and on. Both are on the roadmap.
+
+### Verification
+
+- **733** API checks (from 698), including the four RFC 6238 test vectors. Ten
+  code mutations, each caught by its own check: replay allowed, the code-screen
+  request counted as a failure, two-factor not enforced, a wrong code not
+  counted, recovery codes reusable, the password check wiping the failure count
+  on disable, disable without a code, an admin removal leaving sessions alive,
+  recovery always removing two-factor, and no clock drift allowed.
+- **50** dashboard checks (from 42): two-factor turned on from the dashboard
+  with a code computed from the key on screen; recovery codes held on screen;
+  sign-in asks for a code, refuses a wrong one, accepts the right one. Two UI
+  mutations caught (the code not sent; recovery codes closable by a click
+  outside). One check was found vacuous and replaced: "Escape keeps the codes
+  on screen" passed with the code meant to guarantee it removed, because Escape
+  never closes that window at all; the code was dead and is gone, and the check
+  now clicks outside instead.
+- Replay: all 12 assertions held.
+
 ## Version 0.24.0
 
 Finishing the Accounts drawer. v0.23 could add users and reset passwords; it

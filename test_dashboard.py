@@ -119,6 +119,7 @@ def run(url: str, headed: bool) -> int:
         try:
             _run_checks(page, url, requested)
             _run_reset_checks(browser, url)
+            _run_two_factor_checks(browser, url)
         except Exception as exc:
             # A component that throws on mount takes the whole page with it, and
             # the first thing to notice is a selector that never appears. Report
@@ -412,6 +413,71 @@ def _api(url: str, method: str, path: str, body=None, token: str | None = None):
         method=method)
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read())
+
+
+def _run_two_factor_checks(browser, url: str) -> None:
+    """Two-factor (v0.25), end to end: turn it on from the dashboard with a
+    code computed from the key the page shows, then sign in again through the
+    code step. The code is computed here with the server's own totp module --
+    the same arithmetic as any authenticator app (it is checked against the
+    RFC 6238 vectors in test_api.py)."""
+    import secrets
+    import totp
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    name, pw = f"dash-2fa-{secrets.token_hex(3)}", "two-factor-pass-123"
+    _api(url, "POST", "/users", {"username": name, "password": pw, "role": "analyst"}, admin)
+
+    context = browser.new_context(viewport={"width": 1300, "height": 900})
+    page = context.new_page()
+    page.goto(url, wait_until="networkidle")
+    page.fill('input[autocomplete="username"]', name)
+    page.fill('input[type="password"]', pw)
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".topbar", timeout=15000)
+    page.click("button:has-text('Two-factor')")
+    page.click(".twofactor-modal button:has-text('Turn on')")
+    page.fill(".twofactor-modal input[type='password']", pw)
+    page.click(".twofactor-modal button:has-text('Continue')")
+    page.wait_for_selector(".tf-key", timeout=10000)
+    secret = page.inner_text(".tf-key").replace(" ", "").strip()
+    qr = page.get_attribute(".tf-qr", "src") or ""
+    check("turning two-factor on shows a QR code and the key",
+          qr.startswith("data:image/png") and len(secret) == 32)
+    page.fill(".tf-code", totp.code_at(secret, totp.current_step()))
+    page.click(".twofactor-modal button[type='submit']")
+    page.wait_for_selector(".tf-recovery", timeout=10000)
+    check("a first code from the app turns it on and shows ten recovery codes",
+          page.locator(".tf-recovery li").count() == 10)
+    page.keyboard.press("Escape")
+    page.mouse.click(5, 450)          # outside the window, on its overlay
+    page.wait_for_timeout(300)
+    check("the recovery codes stay on screen until dismissed (Escape, a click outside)",
+          page.locator(".tf-recovery").count() == 1)
+    page.click("button:has-text('I have stored them')")
+    page.wait_for_timeout(500)
+    check("the account now shows two-factor on", "on" in page.inner_text(".twofactor-modal .tf-on"))
+    page.click(".twofactor-modal .drawer-close")
+    page.click("button:has-text('Sign out')")
+    page.wait_for_selector('input[type="password"]', timeout=10000)
+
+    page.fill('input[autocomplete="username"]', name)
+    page.fill('input[type="password"]', pw)
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".login-code", timeout=10000)
+    check("signing in again asks for a code after the password",
+          page.locator(".topbar").count() == 0 and "Two-factor is on" in page.inner_text(".login-card"))
+    page.fill(".login-code", "000000" if totp.code_at(secret, totp.current_step() + 1) != "000000" else "111111")
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".login-error", timeout=10000)
+    check("a wrong code is refused on screen",
+          "did not work" in page.inner_text(".login-error") and page.locator(".topbar").count() == 0)
+    page.fill(".login-code", totp.code_at(secret, totp.current_step() + 1))
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".topbar", timeout=15000)
+    check("the right code signs in", page.locator(".topbar").count() == 1)
+    listed = next(u for u in _api(url, "GET", "/users", None, admin) if u["username"] == name)
+    check("and the server agrees two-factor is on", bool(listed["totp_enabled"]))
+    context.close()
 
 
 def _role_of(url: str, username: str) -> str | None:

@@ -41,6 +41,11 @@
       "tactic": "Persistence",
       "url": "https://attack.mitre.org/techniques/T1136/"
     },
+    "T1556": {
+      "name": "Modify Authentication Process",
+      "tactic": "Credential Access",
+      "url": "https://attack.mitre.org/techniques/T1556/"
+    },
     "T1485": {
       "name": "Data Destruction",
       "tactic": "Impact",

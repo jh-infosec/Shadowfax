@@ -387,6 +387,24 @@ manifest event, like a finding, skips the behavioural heuristics and the
 permission target check -- it is a declaration, not an action. Excess tools are
 reported once each across manifests; unlisted calls once per tool per manifest.
 
+#### totp.py
+
+Two-factor (v0.25), standard library only: RFC 6238 with the parameters every
+authenticator app assumes (HMAC-SHA1, 30-second steps, six digits), checked
+against the RFC's own test vectors. `verify()` compares all three candidate
+steps in constant time and never matches a step at or before the last accepted
+one, which is what makes a code single-use. Recovery codes are 12 characters
+from a 31-letter alphabet without look-alikes, stored as SHA-256 fingerprints.
+
+In `app.py`, `_second_factor()` runs only after the password is known to be
+right. With no code it withdraws the attempt reserved by the throttle (nothing
+has failed yet) and replies `401 {mfa_required: true}`; only that row is
+withdrawn, never the scope's history, or holding the password would reset the
+count between guesses at the code. A code is checked under `BEGIN IMMEDIATE`
+against a freshly read `totp_last_step`, so two requests racing with one code
+cannot both succeed. Enrolment is pending until a first code confirms it.
+`_check_current_password()` guards setup and disable with the same throttle.
+
 #### recover.py
 
 Console recovery (v0.22), run beside the database rather than through the API:
@@ -1067,6 +1085,7 @@ cli.py                  digest.py               ledger.py
 throttle.py             envelope.py             permissions.py
 tickets.py              limits.py               manifest.py
 ratelimit.py            timeutil.py             recover.py
+totp.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml
@@ -1097,4 +1116,5 @@ frontend/src/components/PermissionsPanel.jsx
 frontend/src/components/CapabilitiesPanel.jsx
 frontend/src/components/PasswordModal.jsx
 frontend/src/components/AccountsDrawer.jsx
+frontend/src/components/TwoFactorModal.jsx
 ```

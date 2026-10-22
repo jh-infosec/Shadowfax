@@ -334,8 +334,20 @@ def cmd_login(client: Client, args, out) -> int:
         print("warning: a password given with -p is visible in your shell history and "
               "the process list; prefer the prompt or SHADOWFAX_PASSWORD", file=sys.stderr)
     password = args.password or os.environ.get("SHADOWFAX_PASSWORD") or getpass.getpass("password: ")
-    payload = client.call("POST", "/auth/login",
-                          body={"username": username, "password": password})
+    body = {"username": username, "password": password}
+    # Two-factor (v0.25): the server answers a right password on a protected
+    # account by asking for the code; ask for it here and sign in again.
+    status, first = client.transport.request("POST", "/auth/login", None, body, {})
+    detail = first.get("detail") if isinstance(first, dict) else None
+    if status == 401 and isinstance(detail, dict) and detail.get("mfa_required"):
+        code = _ask("authenticator code (or a recovery code): ").strip()
+        body["recovery_code" if "-" in code else "totp_code"] = code
+        payload = client.call("POST", "/auth/login", body=body)
+    elif status == 200:
+        payload = first
+    else:
+        # Not repeated: a second try would be a second recorded failure.
+        raise ApiError(_detail(first), EXIT_AUTH if status in (401, 403, 429) else EXIT_FAIL)
     cfg = load_config()
     cfg["url"] = args.resolved_url
     cfg["token"] = payload["token"]

@@ -1,7 +1,7 @@
 {
   "name": "shadowfax-dashboard",
   "private": true,
-  "version": "0.24.0",
+  "version": "0.25.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "qrcode": "1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

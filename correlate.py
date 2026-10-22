@@ -50,6 +50,7 @@ _CATEGORY_PHRASE = {
     "console_recovery": "a password reset from the server console",
     "admin_account_created": "a new administrator account",
     "admin_role_granted": "an account promoted to administrator",
+    "mfa_removed": "two-factor removed from an account",
 }
 
 
