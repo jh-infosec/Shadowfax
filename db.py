@@ -190,6 +190,12 @@ def _migrate_users(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
     if "password_changed_at" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN password_changed_at TEXT")
+    # v0.24: an account can be switched off without deleting it, so the
+    # history of what it did keeps a name attached.
+    if "disabled" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0")
+    if "disabled_at" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN disabled_at TEXT")
 
 
 def _migrate_legacy_alerts(conn: sqlite3.Connection) -> None:
@@ -670,8 +676,8 @@ def get_user_by_username(conn: sqlite3.Connection, username: str) -> dict[str, A
 
 def list_users(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT id, username, role, created_at, must_change_password, password_changed_at "
-        "FROM users ORDER BY username"
+        "SELECT id, username, role, created_at, must_change_password, password_changed_at, "
+        "disabled, disabled_at FROM users ORDER BY username"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -694,7 +700,7 @@ def get_session_user(conn: sqlite3.Connection, token_fp: str) -> dict[str, Any] 
     row = conn.execute(
         """SELECT s.expires_at, u.id, u.username, u.role, u.must_change_password
            FROM sessions s JOIN users u ON u.id = s.user_id
-           WHERE s.token_fp = ?""",
+           WHERE s.token_fp = ? AND u.disabled = 0""",
         (token_fp,),
     ).fetchone()
     if row is None:
@@ -725,6 +731,20 @@ def delete_sessions_for_user(conn: sqlite3.Connection, user_id: int,
         cur = conn.execute("DELETE FROM sessions WHERE user_id = ? AND token_fp != ?",
                            (user_id, keep_fp))
     return cur.rowcount
+
+
+def set_role(conn: sqlite3.Connection, user_id: int, role: str) -> None:
+    conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+
+
+def set_disabled(conn: sqlite3.Connection, user_id: int, disabled: bool) -> None:
+    conn.execute("UPDATE users SET disabled = ?, disabled_at = ? WHERE id = ?",
+                 (1 if disabled else 0, _iso(_utc_now()) if disabled else None, user_id))
+
+
+def count_active_admins(conn: sqlite3.Connection) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0").fetchone()[0]
 
 
 def set_password(conn: sqlite3.Connection, user_id: int, password_hash: str, salt: str,

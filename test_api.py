@@ -1757,6 +1757,128 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== roles and disabled accounts (v0.24) ==")
+import types as _types
+import recover as _recover
+client.post("/users", json={"username": "role-target", "password": TEST_PW, "role": "viewer"})
+_rt = as_user("role-target", TEST_PW)
+_pol = client.get("/policy").json()
+check("a viewer cannot edit policy before promotion", _rt.put("/policy", json=_pol).status_code == 403)
+_r = client.patch("/users/role-target", json={"role": "analyst"})
+check("an admin changes a role", _r.status_code == 200 and _r.json()["role"] == "analyst")
+check("and it applies to the live session at once, no sign-out needed",
+      _rt.put("/policy", json=_pol).status_code == 200)
+check("an unknown role is refused",
+      client.patch("/users/role-target", json={"role": "superuser"}).status_code == 400)
+check("an empty change is refused", client.patch("/users/role-target", json={}).status_code == 400)
+check("an unknown user is 404",
+      client.patch("/users/nobody-here", json={"role": "viewer"}).status_code == 404)
+check("an admin cannot change their own role",
+      client.patch("/users/admin", json={"role": "viewer"}).status_code == 400)
+check("nor disable themselves",
+      client.patch("/users/admin", json={"disabled": True}).status_code == 400)
+check("a non-admin cannot change roles",
+      _rt.patch("/users/viewer1", json={"role": "admin"}).status_code == 403)
+
+_r = client.patch("/users/role-target", json={"disabled": True})
+check("disabling ends the account's sessions",
+      _r.status_code == 200 and _r.json()["sessions_ended"] >= 1
+      and _rt.get("/alerts").status_code == 401)
+_r = client.post("/auth/login", json={"username": "role-target", "password": TEST_PW})
+check("a disabled account cannot sign in, and is told why only with the right password",
+      _r.status_code == 403 and "disabled" in _r.json()["detail"])
+_r = client.post("/auth/login", json={"username": "role-target", "password": "wrong-password-xx"})
+check("with the wrong password it looks like any other failure",
+      _r.status_code == 401 and "disabled" not in _r.text)
+check("it is listed as disabled, not deleted",
+      any(u["username"] == "role-target" and u["disabled"] for u in client.get("/users").json()))
+# Defence in depth: a session that survived the disable is still refused.
+with db_module.get_conn() as _c:
+    _uid = db_module.get_user_by_username(_c, "role-target")["id"]
+    db_module.clear_login_failures(_c, "role-target")
+    db_module.set_disabled(_c, _uid, False); _c.commit()
+_rt2 = as_user("role-target", TEST_PW)
+with db_module.get_conn() as _c:
+    db_module.set_disabled(_c, _uid, True); _c.commit()
+check("a disabled account's surviving session is refused anyway",
+      _rt2.get("/alerts").status_code == 401)
+_r = client.patch("/users/role-target", json={"disabled": False})
+with db_module.get_conn() as _c:
+    db_module.clear_login_failures(_c, "role-target"); _c.commit()
+check("re-enabling lets it sign in again",
+      _r.status_code == 200
+      and client.post("/auth/login", json={"username": "role-target",
+                                           "password": TEST_PW}).status_code == 200)
+
+# The last enabled admin. Through the API the caller is always another enabled
+# admin, so the guard is for the race: two admins demoting each other at once,
+# both past the role check before either change lands. That is replayed here
+# by calling the endpoint with the identity of an admin already demoted.
+client.post("/users", json={"username": "admin-two", "password": TEST_PW, "role": "admin"})
+_a2 = as_user("admin-two", TEST_PW)
+for _u in client.get("/users").json():
+    if _u["role"] == "admin" and _u["username"] not in ("admin", "admin-two") and not _u["disabled"]:
+        client.patch(f"/users/{_u['username']}", json={"disabled": True})
+check("with two admins, one may demote the other",
+      _a2.patch("/users/admin", json={"role": "analyst"}).status_code == 200)
+_req = _types.SimpleNamespace(client=_types.SimpleNamespace(host="race"), headers={})
+try:
+    app_module.update_user("admin-two", app_module.UpdateUserRequest(role="viewer"), _req,
+                           {"username": "admin", "role": "admin"})
+    _race = None
+except app_module.HTTPException as _e:
+    _race = _e
+check("the racing request cannot demote the last enabled admin",
+      _race is not None and _race.status_code == 409 and "last enabled admin" in _race.detail)
+try:
+    app_module.update_user("admin-two", app_module.UpdateUserRequest(disabled=True), _req,
+                           {"username": "admin", "role": "admin"})
+    _race = None
+except app_module.HTTPException as _e:
+    _race = _e
+check("nor disable them", _race is not None and _race.status_code == 409)
+check("restoring the first admin", _a2.patch("/users/admin", json={"role": "admin"}).status_code == 200)
+client.patch("/users/admin-two", json={"disabled": True})
+
+app_module.SELF_MONITOR = True
+try:
+    _n_arg = len(client.get("/alerts", params={"category": ["admin_role_granted"]}).json())
+    client.post("/users", json={"username": "promote-me", "password": TEST_PW, "role": "viewer"})
+    client.patch("/users/promote-me", json={"role": "analyst"})
+    check("a promotion to analyst is recorded but raises nothing",
+          any(e["event_type"] == "user_role_changed" and e["metadata"]["new_role"] == "analyst"
+              for e in client.get("/actors/shadowfax-auth").json()["events"])
+          and len(client.get("/alerts", params={"category": ["admin_role_granted"]}).json()) == _n_arg)
+    client.patch("/users/promote-me", json={"role": "admin"})
+    _arg = client.get("/alerts", params={"category": ["admin_role_granted"]}).json()
+    check("making someone an admin raises admin_role_granted (medium, T1098)",
+          len(_arg) == _n_arg + 1 and all(a["severity"] == "medium" for a in _arg)
+          and any("promote-me" in a["message"] and "viewer" not in a["message"] for a in _arg)
+          and all(any(t["id"] == "T1098" for t in a["attack"]) for a in _arg))
+    client.patch("/users/promote-me", json={"disabled": True})
+    client.post("/auth/login", json={"username": "promote-me", "password": TEST_PW})
+    _evs = client.get("/actors/shadowfax-auth").json()["events"]
+    check("disabling is recorded with who did it and the sessions ended",
+          any(e["event_type"] == "user_disabled" and e["metadata"]["changed_by"] == "admin"
+              and e["metadata"]["attempted_username"] == "promote-me" for e in _evs))
+    check("and so is the disabled account trying to sign in",
+          any(e["event_type"] == "auth_disabled_account"
+              and e["metadata"]["attempted_username"] == "promote-me" for e in _evs))
+    check("the ledger verifies", client.get("/ledger/verify").json()["ok"] is True)
+finally:
+    app_module.SELF_MONITOR = False
+
+_rec = _recover.recover("promote-me")
+check("console recovery re-enables a disabled account",
+      _rec["re_enabled"] is True
+      and client.post("/auth/login", json={"username": "promote-me",
+                                           "password": _rec["password"]}).status_code == 200)
+check("the detector ignores user_role_changed under any other actor",
+      not [a for a in detectors.run_for_actor([{
+          "id": 1, "timestamp": "2026-10-19T09:00:00", "actor_id": "someone", "actor_type": "human",
+          "event_type": "user_role_changed", "target": "x", "metadata": {"new_role": "admin"}}], _POLICY)
+          if a["category"] == "admin_role_granted"])
+
 print("\n== accounts from the dashboard (v0.23) ==")
 _r = client.post("/users", json={"username": "gen-analyst", "role": "analyst", "generate": True})
 _gen = _r.json()
@@ -1787,8 +1909,9 @@ def _auth_events(kind):
             if e["event_type"] == kind]
 
 _n_users_ev = len(_auth_events("user_created"))
+client.post("/users", json={"username": "quiet-user", "role": "viewer", "generate": True})
 check("with self-monitoring off, account changes are not recorded (like sign-ins)",
-      app_module.SELF_MONITOR is False and _n_users_ev == 0)
+      app_module.SELF_MONITOR is False and len(_auth_events("user_created")) == _n_users_ev)
 
 app_module.SELF_MONITOR = True
 try:
@@ -1796,10 +1919,10 @@ try:
     _r = client.post("/users", json={"username": "second-admin", "role": "admin", "generate": True})
     _ev_u = _auth_events("user_created")
     check("a new account is written into the ledger, naming who created it",
-          _r.status_code == 200 and len(_ev_u) == 1
-          and _ev_u[0]["metadata"]["attempted_username"] == "second-admin"
-          and _ev_u[0]["metadata"]["created_by"] == "admin"
-          and _ev_u[0]["metadata"]["role"] == "admin")
+          _r.status_code == 200 and len(_ev_u) == _n_users_ev + 1
+          and _ev_u[-1]["metadata"]["attempted_username"] == "second-admin"
+          and _ev_u[-1]["metadata"]["created_by"] == "admin"
+          and _ev_u[-1]["metadata"]["role"] == "admin")
     check("without its password", _r.json()["password"] not in json.dumps(_ev_u))
     _aac = client.get("/alerts", params={"category": ["admin_account_created"]}).json()
     check("a new administrator raises admin_account_created (medium)",
@@ -1809,7 +1932,7 @@ try:
           all(any(t["id"] == "T1136" for t in a["attack"]) for a in _aac))
     client.post("/users", json={"username": "plain-viewer", "role": "viewer", "generate": True})
     check("a new viewer is recorded but raises nothing",
-          len(_auth_events("user_created")) == 2
+          len(_auth_events("user_created")) == _n_users_ev + 2
           and len(client.get("/alerts", params={"category": ["admin_account_created"]}).json())
           == _n_aac + 1)
 
@@ -1881,6 +2004,8 @@ db_module.DB_PATH = _real_path
 check("a missing database is reported, not silently created",
       _missing and not (_real_path.parent / "no-such-shadowfax.db").exists())
 
+_n_cpr = len([e for e in client.get("/actors/shadowfax-auth").json().get("events", [])
+              if e["event_type"] == "console_password_reset"])
 _rec = _recover.recover("lost-admin")
 check("recovery returns a generated password that meets the policy",
       _rec["role"] == "admin" and not _auth.password_problems(_rec["password"], "lost-admin"))
@@ -1904,7 +2029,8 @@ check("the alert names the account and the OS user",
 _ev_cr = [e for e in client.get("/actors/shadowfax-auth").json()["events"]
           if e["event_type"] == "console_password_reset"]
 check("the reset is in the ledger under shadowfax-auth, without the password",
-      len(_ev_cr) == 1 and _ev_cr[0]["metadata"]["source"] == "console"
+      len(_ev_cr) == _n_cpr + 1 and _ev_cr[-1]["metadata"]["source"] == "console"
+      and _ev_cr[-1]["metadata"]["attempted_username"] == "lost-admin"
       and _rec["password"] not in json.dumps(_ev_cr[0]))
 check("and the ledger still verifies, one entry longer",
       client.get("/ledger/verify").json()["ok"] is True

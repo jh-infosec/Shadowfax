@@ -49,6 +49,7 @@ CATEGORY_TO_TECHNIQUES: dict[str, list[str]] = {
     # v0.22/v0.23: changes to Shadowfax's own accounts.
     "console_recovery": ["T1098"],
     "admin_account_created": ["T1136"],
+    "admin_role_granted": ["T1098"],
     # destructive_action: technique comes from the matched policy rule, not here.
     # allowlist_violation, blocked_target_access, rate_anomaly: no mapping.
     # permission_violation, undeclared_agent (v0.16): no mapping either. They

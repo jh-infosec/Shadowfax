@@ -55,7 +55,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.23.0"
+VERSION = "0.24.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -327,6 +327,12 @@ class CreateUserRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(max_length=1024)
     new_password: str = Field(max_length=1024)
+
+
+class UpdateUserRequest(BaseModel):
+    # v0.24: change a role, or switch an account off or back on. Either or both.
+    role: str | None = None
+    disabled: bool | None = None
 
 
 class ResetPasswordRequest(BaseModel):
@@ -1222,6 +1228,17 @@ def login(req: LoginRequest, request: Request):
         else:
             ok = auth.verify_password(req.password, user["salt"], user["password_hash"])
 
+        if ok and user["disabled"]:
+            # The right password for a switched-off account (v0.24). Saying so
+            # tells nothing to anyone who does not already hold the password,
+            # and the owner deserves a better answer than "wrong password".
+            # The reserved failure stands, so it is throttled like any other
+            # refusal, and the attempt is evidence: a disabled account being
+            # used is often the reason it was disabled.
+            _record_auth_event(conn, "auth_disabled_account", req.username, source, now)
+            conn.commit()
+            raise HTTPException(403, "this account is disabled; ask an administrator")
+
         if not ok:
             _record_auth_event(conn, "auth_failure", req.username, source, now)
 
@@ -1490,6 +1507,60 @@ def reset_password(username: str, req: ResetPasswordRequest, request: Request,
         out["password"] = new_password
         out["note"] = "shown once; give it to the user over a channel you trust"
     return out
+
+
+@app.patch("/users/{username}")
+def update_user(username: str, req: UpdateUserRequest, request: Request,
+                identity: dict = Depends(require_role("admin"))):
+    """Change a user's role, or disable or re-enable the account (v0.24).
+
+    Disabling ends every session at once and refuses sign-in; nothing is
+    deleted, so everything the account did keeps a name attached. Two guards:
+    an admin cannot change their own role or disable themselves (ask another
+    admin -- a one-click way to lock yourself out is not a feature), and the
+    last enabled admin cannot be demoted or disabled, or nobody could manage
+    accounts at all. Each change is written into the ledger, and making
+    someone an admin raises `admin_role_granted`.
+    """
+    if req.role is None and req.disabled is None:
+        raise HTTPException(400, "give a role, disabled, or both")
+    if req.role is not None and not auth.is_valid_role(req.role):
+        raise HTTPException(400, f"invalid role '{req.role}', expected one of {list(auth.ROLES)}")
+    if username == identity["username"]:
+        raise HTTPException(400, "you cannot change your own role or disable your own "
+                                 "account; another admin has to")
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        user = db.get_user_by_username(conn, username)
+        if user is None:
+            raise HTTPException(404, f"no user '{username}'")
+        new_role = req.role if req.role is not None else user["role"]
+        new_disabled = bool(req.disabled) if req.disabled is not None else bool(user["disabled"])
+        is_active_admin = user["role"] == "admin" and not user["disabled"]
+        stays_active_admin = new_role == "admin" and not new_disabled
+        if is_active_admin and not stays_active_admin and db.count_active_admins(conn) <= 1:
+            raise HTTPException(409, f"'{username}' is the last enabled admin; make "
+                                     f"someone else an admin first")
+        ended = 0
+        changes = []
+        if new_role != user["role"]:
+            db.set_role(conn, user["id"], new_role)
+            _record_auth_event(conn, "user_role_changed", username, source, now,
+                               old_role=user["role"], new_role=new_role,
+                               changed_by=identity["username"])
+            changes.append(f"role {user['role']} -> {new_role}")
+        if new_disabled != bool(user["disabled"]):
+            db.set_disabled(conn, user["id"], new_disabled)
+            if new_disabled:
+                ended = db.delete_sessions_for_user(conn, user["id"])
+            _record_auth_event(conn, "user_disabled" if new_disabled else "user_enabled",
+                               username, source, now, changed_by=identity["username"],
+                               sessions_ended=ended)
+            changes.append("disabled" if new_disabled else "enabled")
+        conn.commit()
+    return {"username": username, "role": new_role, "disabled": new_disabled,
+            "changes": changes or ["nothing to change"], "sessions_ended": ended}
 
 
 # API keys for programmatic ingest (admin only)

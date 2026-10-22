@@ -754,6 +754,16 @@ which would block the page. The server records `user_created`,
 self-monitoring is on, like every front-door event); the detector raises
 `admin_account_created` for a new admin.
 
+Roles and disabling (v0.24) go through `PATCH /users/{name}`. The role is read
+from `users` on every request (the session lookup joins it), so a change applies
+to live sessions at once; the same join refuses any session of a disabled
+account, in addition to the sessions being deleted when it is disabled. The
+last-enabled-admin guard runs inside `BEGIN IMMEDIATE`: through the API the
+caller is always another enabled admin, so what it stops is two admins demoting
+each other at the same moment, both already past the role check. Role changes
+and disables are recorded as `user_role_changed`, `user_disabled` and
+`user_enabled`; promotion to admin raises `admin_role_granted`.
+
 #### src/components/PermissionsPanel.jsx
 
 The permission profile governing an actor (v0.16), from the `permissions` field

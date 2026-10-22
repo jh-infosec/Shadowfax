@@ -536,6 +536,8 @@ _CATEGORY_SYNONYMS = {
     "new admin": "admin_account_created",
     "admin account": "admin_account_created",
     "administrator": "admin_account_created",
+    "promoted": "admin_role_granted",
+    "made admin": "admin_role_granted",
 }
 
 

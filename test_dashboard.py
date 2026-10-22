@@ -354,6 +354,34 @@ def _run_checks(page, url: str, requested: list[str]) -> None:
     check("the password shown on screen is the one that works",
           signed["user"]["must_change_password"] is True)
 
+    # v0.24: role changes and disabling, each confirmed with a second press.
+    row = page.locator(".accounts-users tr", has_text=new_user)
+    row.locator("select").select_option("analyst")
+    confirm = row.locator("button", has_text="Confirm")
+    check("choosing a new role asks for confirmation before applying it",
+          confirm.count() == 1 and _role_of(url, new_user) == "viewer")
+    confirm.first.click()
+    page.wait_for_timeout(800)
+    check("confirming applies the role on the server", _role_of(url, new_user) == "analyst")
+    row = page.locator(".accounts-users tr", has_text=new_user)
+    row.locator("button", has_text="Disable").click()
+    check("disabling asks for a second press",
+          row.locator("button", has_text="Confirm disable").count() == 1)
+    row.locator("button", has_text="Confirm disable").click()
+    page.wait_for_timeout(800)
+    row = page.locator(".accounts-users tr", has_text=new_user)
+    try:
+        _api(url, "POST", "/auth/login", {"username": new_user, "password": shown})
+        refused = False
+    except urllib.error.HTTPError as exc:
+        refused = exc.code == 403
+    check("a disabled user is shown as disabled and cannot sign in",
+          "disabled" in row.inner_text() and refused)
+    row.locator("button", has_text="Enable").click()
+    page.wait_for_timeout(800)
+    check("Enable brings the account back",
+          "disabled" not in page.locator(".accounts-users tr", has_text=new_user).inner_text())
+
     label = f"ui-key-{stamp}"
     page.fill('.accounts-form input[placeholder^="label"]', label)
     page.click("button:has-text('New API key')")
@@ -384,6 +412,12 @@ def _api(url: str, method: str, path: str, body=None, token: str | None = None):
         method=method)
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read())
+
+
+def _role_of(url: str, username: str) -> str | None:
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    return next((u["role"] for u in _api(url, "GET", "/users", None, admin)
+                 if u["username"] == username), None)
 
 
 def _run_reset_checks(browser, url: str) -> None:

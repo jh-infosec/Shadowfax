@@ -208,8 +208,11 @@ Harden the platform's own front door, then point the engine at it.
 - [x] Users and API keys management UI (`v0.23.0`): an Accounts drawer for
       admins. Generated passwords (must-change) and keys, shown once and held
       on screen until dismissed; two-press revoke; account and key changes in
-      the ledger; a new admin raises `admin_account_created`. Changing a role
-      or disabling a user still has no endpoint.
+      the ledger; a new admin raises `admin_account_created`.
+- [x] Change roles and disable accounts (`v0.24.0`): `PATCH /users/{name}`,
+      never on yourself, never leaving no enabled admin; disabling ends every
+      session and keeps the history; promotion to admin raises
+      `admin_role_granted`.
 - [ ] Second factor (TOTP) for admin accounts. Throttling slows guessing; it
       does not stop a leaked password.
 

@@ -25,7 +25,9 @@ export default function AccountsDrawer({ me, onClose }) {
   const [error, setError] = useState(null);
   const [secret, setSecret] = useState(null); // {title, value, note}
   const [copied, setCopied] = useState(false);
-  const [confirming, setConfirming] = useState(null); // "reset:<name>" | "revoke:<id>"
+  // "reset:<name>" | "revoke:<id>" | "disable:<name>" | "role:<name>"
+  const [confirming, setConfirming] = useState(null);
+  const [pendingRole, setPendingRole] = useState({}); // name -> role chosen, not yet applied
   const [busy, setBusy] = useState(false);
   const [newUser, setNewUser] = useState({ username: "", role: "analyst" });
   const [newKeyLabel, setNewKeyLabel] = useState("");
@@ -89,6 +91,33 @@ export default function AccountsDrawer({ me, onClose }) {
     });
   };
 
+  // Role changes and disabling take two presses, like reset and revoke.
+  const chooseRole = (name, role, current) => {
+    setPendingRole({ ...pendingRole, [name]: role });
+    setConfirming(role === current ? null : `role:${name}`);
+  };
+
+  // A chosen role shows only while its confirmation is pending; pressing
+  // anything else puts the select back to what the server says.
+  const shownRole = (u) =>
+    (confirming === `role:${u.username}` && pendingRole[u.username]) || u.role;
+
+  const applyRole = (name) => {
+    const role = pendingRole[name];
+    run(async () => {
+      await api.updateUser(name, { role });
+      setPendingRole({ ...pendingRole, [name]: undefined });
+    });
+  };
+
+  const toggleDisabled = (u) => {
+    if (!u.disabled && confirming !== `disable:${u.username}`) {
+      setConfirming(`disable:${u.username}`);
+      return;
+    }
+    run(() => api.updateUser(u.username, { disabled: !u.disabled }));
+  };
+
   const addKey = (e) => {
     e.preventDefault();
     run(async () => {
@@ -148,23 +177,53 @@ export default function AccountsDrawer({ me, onClose }) {
             <div className="risk-label">Users</div>
             <table className="lockout-table accounts-users">
               <thead>
-                <tr><th>Username</th><th>Role</th><th>Password</th><th>Changed</th><th /></tr>
+                <tr><th>Username</th><th>Role</th><th>Status</th><th>Changed</th><th /></tr>
               </thead>
               <tbody>
                 {users.map((u) => (
-                  <tr key={u.username}>
+                  <tr key={u.username} className={u.disabled ? "user-disabled" : ""}>
                     <td className="mono">{u.username}{u.username === me ? " (you)" : ""}</td>
-                    <td><span className={`role-chip ${u.role}`}>{u.role}</span></td>
-                    <td>{u.must_change_password
-                      ? <span className="lockout-state backoff">must change</span>
-                      : <span className="lockout-state">set</span>}</td>
+                    <td>
+                      {u.username === me ? (
+                        <span className={`role-chip ${u.role}`}>{u.role}</span>
+                      ) : (
+                        <span className="role-edit">
+                          <select className={`role-select ${shownRole(u)}`}
+                                  value={shownRole(u)}
+                                  disabled={busy || !!secret}
+                                  aria-label={`role for ${u.username}`}
+                                  onChange={(e) => chooseRole(u.username, e.target.value, u.role)}>
+                            {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                          </select>
+                          {confirming === `role:${u.username}` && (
+                            <button className="btn danger" disabled={busy}
+                                    onClick={() => applyRole(u.username)}>
+                              Confirm
+                            </button>
+                          )}
+                        </span>
+                      )}
+                    </td>
+                    <td>{u.disabled
+                      ? <span className="lockout-state locked">disabled</span>
+                      : u.must_change_password
+                        ? <span className="lockout-state backoff">must change</span>
+                        : <span className="lockout-state">active</span>}</td>
                     <td className="mono">{when(u.password_changed_at)}</td>
                     <td>
                       {u.username !== me && (
-                        <button className={`btn${confirming === `reset:${u.username}` ? " danger" : ""}`}
-                                disabled={busy || !!secret} onClick={() => reset(u.username)}>
-                          {confirming === `reset:${u.username}` ? "Confirm reset" : "Reset password"}
-                        </button>
+                        <div className="row-actions">
+                          <button className={`btn${confirming === `reset:${u.username}` ? " danger" : ""}`}
+                                  disabled={busy || !!secret || !!u.disabled}
+                                  onClick={() => reset(u.username)}>
+                            {confirming === `reset:${u.username}` ? "Confirm reset" : "Reset password"}
+                          </button>
+                          <button className={`btn${confirming === `disable:${u.username}` ? " danger" : ""}`}
+                                  disabled={busy || !!secret} onClick={() => toggleDisabled(u)}>
+                            {u.disabled ? "Enable"
+                              : confirming === `disable:${u.username}` ? "Confirm disable" : "Disable"}
+                          </button>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -185,8 +244,10 @@ export default function AccountsDrawer({ me, onClose }) {
             </form>
             <div className="lockout-foot">
               New users get a generated password they must change at first sign-in.
-              Your own password is changed from the top bar, which asks for the
-              current one.
+              Disabling signs an account out everywhere and keeps its history; the
+              last enabled admin cannot be demoted or disabled. Your own role and
+              account are changed by another admin; your own password from the top
+              bar, which asks for the current one.
             </div>
           </section>
         )}

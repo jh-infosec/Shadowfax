@@ -605,3 +605,17 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 }
 .secret-note { font-size: 12px; color: var(--text-dim); margin: 8px 0 10px; }
 .secret-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ---- accounts: roles and disabled users (v0.24) ------------------------- */
+
+.role-edit { display: inline-flex; gap: 6px; align-items: center; }
+.role-select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 3px; padding: 2px 4px; font-family: var(--mono); font-size: 11px;
+}
+.role-select.admin { border-color: var(--crit); color: var(--crit); }
+.role-select.analyst { border-color: var(--accent); color: var(--accent); }
+.row-actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+.accounts-drawer { width: 860px; }
+.accounts-users .lockout-state { white-space: nowrap; }
+.accounts-users tr.user-disabled td:not(:last-child) { opacity: 0.55; }

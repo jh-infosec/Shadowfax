@@ -49,6 +49,7 @@ _CATEGORY_PHRASE = {
     "history_rewritten": "alerts retired by later ingest",
     "console_recovery": "a password reset from the server console",
     "admin_account_created": "a new administrator account",
+    "admin_role_granted": "an account promoted to administrator",
 }
 
 

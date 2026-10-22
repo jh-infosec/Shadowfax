@@ -1,5 +1,67 @@
 # Changelog
 
+## Version 0.24.0
+
+Finishing the Accounts drawer. v0.23 could add users and reset passwords; it
+could not change what an account is allowed to do, or switch one off — the
+two things an admin actually needs on the day someone changes team or leaves.
+
+### Roles
+
+- Each user's row has a role selector. Choosing a new role shows **Confirm**;
+  nothing changes on the server until it is pressed, and pressing anything else
+  puts the selector back.
+- The role applies **to live sessions at once** — the session lookup reads the
+  role from the user record on every request — so a demotion does not wait for
+  a sign-out.
+- **Making someone an admin raises `admin_role_granted`** (medium, ATT&CK
+  **T1098** Account Manipulation). v0.23 alerted on a *new* admin account;
+  promoting an existing one is the same foothold without the new name that
+  would make it stand out.
+
+### Disabling
+
+- **Disable** (two presses) ends every session the account has and refuses its
+  sign-in. Nothing is deleted: everything the account did keeps a name attached.
+  **Enable** brings it back.
+- A disabled account signing in with the **right** password is told the account
+  is disabled (403); with a wrong one it gets the same answer as any other
+  failure, so the message tells nobody anything they did not already know. The
+  attempt is throttled like any refusal and written into the ledger as
+  `auth_disabled_account` — a disabled account being used is often the reason
+  it was disabled.
+- Defence in depth: the session lookup itself refuses any session belonging to a
+  disabled account, so a session that somehow survived is still dead.
+- `recover.py` re-enables the account it recovers — a recovery that left the
+  account switched off would not recover it — and says so.
+
+### Guards
+
+- An admin cannot change **their own** role or disable **themselves**; another
+  admin has to. A one-click way to lock yourself out is not a feature.
+- The **last enabled admin** can be neither demoted nor disabled (409). Through
+  the API the caller is always another enabled admin, so this guard exists for a
+  race: two admins demoting each other at the same moment, both already past the
+  role check. It runs under the database write lock, and the test replays exactly
+  that race.
+
+`PATCH /users/{name}` takes `role`, `disabled`, or both. Changes are recorded as
+`user_role_changed`, `user_disabled` and `user_enabled`, naming who made them.
+Detector categories: twenty-five → **twenty-six**.
+
+### Verification
+
+- **698** API checks (from 672). Eight code mutations, each caught by its own
+  check: the session lookup ignoring `disabled`, disabling without ending
+  sessions, sign-in ignoring `disabled`, the self-change guard removed, the
+  last-admin guard removed, `admin_role_granted` firing for any promotion,
+  recovery not re-enabling, and role changes not recorded.
+- **42** dashboard checks (from 37): a role change needs its confirmation and
+  only then reaches the server; disabling needs a second press, shows the
+  account as disabled, and that account cannot sign in; Enable restores it.
+  Both confirmations mutation-tested.
+- Replay: all 12 assertions held.
+
 ## Version 0.23.0
 
 The roadmap's oldest dashboard gap: accounts. The endpoints for users and API

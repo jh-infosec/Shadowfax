@@ -215,6 +215,15 @@ export function resetUserPassword(username) {
   });
 }
 
+// v0.24: {role} and/or {disabled}. Refused for your own account, and for the
+// last enabled admin.
+export function updateUser(username, patch) {
+  return request(`/users/${encodeURIComponent(username)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
 export function listApiKeys() {
   return request("/api-keys");
 }

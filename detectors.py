@@ -43,6 +43,8 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "console_recovery",
     # v0.23: a new administrator account.
     "admin_account_created",
+    # v0.24: an existing account made an administrator.
+    "admin_role_granted",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
@@ -354,6 +356,15 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 alerts.append(_mk_alert(e, "medium", "admin_account_created",
                     f"administrator account '{meta.get('attempted_username', '?')}' was created "
                     f"by '{meta.get('created_by', '?')}'"))
+            continue
+
+        # An existing account promoted to admin (v0.24): the same foothold as a
+        # new admin, without the new name that would make it stand out.
+        if e["event_type"] == "user_role_changed":
+            if e["actor_id"] == AUTH_ACTOR_ID and meta.get("new_role") == "admin":
+                alerts.append(_mk_alert(e, "medium", "admin_role_granted",
+                    f"'{meta.get('attempted_username', '?')}' was made an administrator "
+                    f"(was {meta.get('old_role', '?')}) by '{meta.get('changed_by', '?')}'"))
             continue
 
         if e["event_type"] == "alerts_retired":

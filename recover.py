@@ -78,6 +78,11 @@ def recover(username: str, *, now: datetime | None = None) -> dict:
         db.set_password(conn, user["id"], pw_hash, salt, must_change=True)
         ended = db.delete_sessions_for_user(conn, user["id"])
         cleared = db.clear_login_failures(conn, username)
+        # A recovery that left the account switched off would not recover it
+        # (v0.24); the event says it was re-enabled.
+        re_enabled = bool(user.get("disabled"))
+        if re_enabled:
+            db.set_disabled(conn, user["id"], False)
         db.insert_event(conn, {
             "timestamp": now.isoformat(),
             "actor_id": app.SELF_ACTOR_ID,
@@ -87,12 +92,13 @@ def recover(username: str, *, now: datetime | None = None) -> dict:
             "target": app.SELF_TARGET,
             "metadata": {"attempted_username": username, "role": user["role"],
                          "source": "console", "os_user": _os_user(),
-                         "sessions_ended": ended, "failures_cleared": cleared},
+                         "sessions_ended": ended, "failures_cleared": cleared,
+                         "re_enabled": re_enabled},
         })
         app._rescan_actor(conn, app.SELF_ACTOR_ID)
         conn.commit()
     return {"username": username, "role": user["role"], "password": password,
-            "sessions_ended": ended, "failures_cleared": cleared}
+            "sessions_ended": ended, "failures_cleared": cleared, "re_enabled": re_enabled}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  New password:  {r['password']}")
     print()
     print("  Shown once. It must be changed at the next sign-in.")
+    if r["re_enabled"]:
+        print("  The account was disabled; it has been re-enabled.")
     print(f"  Sessions ended: {r['sessions_ended']}; "
           f"sign-in failures cleared: {r['failures_cleared']}.")
     print("  Recorded in the ledger; a console_recovery alert has been raised.")

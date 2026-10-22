@@ -41,7 +41,7 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across twenty-five alert categories, including AI-agent tool-call analysis
+- Rule-based detection engine across twenty-six alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
@@ -68,7 +68,7 @@ investigation and explainability.
 - Command-line interface — ingest, query, explain and gate on alerts from a shell; `--json` everywhere for agents
 - Tamper-evident event ledger — every event hash-chained to the one before it, so an edit, deletion or reordering breaks the chain at a locatable point
 - Sign-in throttling and lockout — backoff then lockout on the platform's own login, with no enumeration oracle and no sleeping
-- Accounts screen — admins add users and issue or revoke API keys from the dashboard; passwords and keys are generated, shown once, and every change is in the ledger
+- Accounts screen — admins add users, change roles, disable and re-enable accounts, and issue or revoke API keys from the dashboard; passwords and keys are generated, shown once, and every change is in the ledger
 - Console recovery — a lost admin password is reset from the server's own shell, never over the network, and raises an alert
 - History that cannot be quietly rewritten — when a new upload makes alerts disappear, Shadowfax records which ones and who sent it, and raises `history_rewritten`
 - Self-monitoring — attacks on Shadowfax's own front door become ordinary events and raise ordinary alerts, through the same detectors as everything else
@@ -251,6 +251,10 @@ Planned
 
 - Users and API keys managed from the dashboard — shipped (v0.23.0)
 
+### v0.24
+
+- Change roles; disable and re-enable accounts — shipped (v0.24.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -394,7 +398,7 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Thirty-seven checks, each one an assertion a person makes when they glance at the
+Forty-two checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
@@ -429,7 +433,7 @@ python demo.py --fast --assert
 ```
 
 That turns the demo into an end-to-end check of the whole stack — ingest,
-twenty-five detectors, correlation, kill-chain ordering, findings-envelope ingest,
+twenty-six detectors, correlation, kill-chain ordering, findings-envelope ingest,
 the front door and the ledger — against a real server over real HTTP. It is a
 different kind of evidence from the unit suite, which never leaves the process.
 
@@ -871,7 +875,7 @@ critical, high, medium, low, info
 ```
 
 A finding's `key` becomes the alert category, so an emitter **may not use one of
-Shadowfax's own twenty-five detector categories**. An alert reading
+Shadowfax's own twenty-six detector categories**. An alert reading
 `destructive_action` must mean Shadowfax's detector found it, not that somebody
 else said so.
 
@@ -991,6 +995,11 @@ must change at first sign-in; API keys are shown once and revoked at a click.
 Creating an account and issuing or revoking a key are written into the ledger
 with who did it, and a new **administrator** raises `admin_account_created`
 (medium, ATT&CK T1136) — an extra admin is the classic way to keep a foothold.
+Promoting an existing account to admin raises `admin_role_granted` (medium,
+T1098). Disabling an account signs it out everywhere and refuses its sign-in
+without deleting anything it did; an admin cannot change their own role or
+disable themselves, and the last enabled admin can be neither demoted nor
+disabled. `recover.py` re-enables the account it recovers.
 
 A lost admin password is recovered with `recover.py` on the server itself (see
 Locked out of your own Shadowfax above), never over the API; the recovery is
