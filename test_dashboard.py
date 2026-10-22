@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import os
 import sys
 import urllib.error
@@ -322,6 +323,57 @@ def _run_checks(page, url: str, requested: list[str]) -> None:
           page.locator(".policy-modal").count() == 1)
     page.click(".policy-modal .drawer-close")
     page.wait_for_timeout(300)
+
+    # -- accounts, without curl (v0.23) -------------------------------------
+    # Driven through the screen an admin would use, then checked through the
+    # API: a password that only looks right on screen is not a password.
+    stamp = str(int(time.time()))[-6:]
+    new_user = f"ui-user-{stamp}"
+    page.get_by_role("button", name="Accounts", exact=True).click()
+    page.wait_for_selector(".accounts-drawer .accounts-users", timeout=10000)
+    users_text = page.inner_text(".accounts-users")
+    check("the accounts drawer lists users, marking the signed-in one",
+          f"{USERNAME} (you)" in users_text)
+    page.fill('.accounts-form input[placeholder="new username"]', new_user)
+    page.select_option(".accounts-form select", "viewer")
+    page.click("button:has-text('Add user')")
+    page.wait_for_selector(".secret-box", timeout=10000)
+    shown = page.inner_text(".secret-value").strip()
+    check("adding a user shows its generated password once", len(shown) >= 12)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    check("Escape does not close the drawer while a password is on screen",
+          page.locator(".secret-box").count() == 1 and page.locator(".accounts-drawer").count() == 1)
+    page.click("button:has-text('I have stored it')")
+    page.wait_for_timeout(600)
+    row = page.locator(".accounts-users tr", has_text=new_user)
+    check("the new user is listed as must-change",
+          page.locator(".secret-box").count() == 0 and row.count() == 1
+          and "must change" in row.inner_text())
+    signed = _api(url, "POST", "/auth/login", {"username": new_user, "password": shown})
+    check("the password shown on screen is the one that works",
+          signed["user"]["must_change_password"] is True)
+
+    label = f"ui-key-{stamp}"
+    page.fill('.accounts-form input[placeholder^="label"]', label)
+    page.click("button:has-text('New API key')")
+    page.wait_for_selector(".secret-box", timeout=10000)
+    key = page.inner_text(".secret-value").strip()
+    page.click("button:has-text('I have stored it')")
+    page.wait_for_timeout(600)
+    key_row = page.locator(".accounts-keys tr", has_text=label)
+    check("a new API key is shown once and listed by label", len(key) > 20 and key_row.count() == 1)
+    key_row.locator("button").click()
+    check("revoking asks for a second press",
+          key_row.locator("button").inner_text().strip() == "Confirm revoke")
+    key_row.locator("button").click()
+    page.wait_for_timeout(800)
+    check("a confirmed revoke removes the key",
+          page.locator(".accounts-keys tr", has_text=label).count() == 0)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    check("with nothing secret on screen, Escape closes the accounts drawer",
+          page.locator(".accounts-drawer").count() == 0)
 
 
 def _api(url: str, method: str, path: str, body=None, token: str | None = None):

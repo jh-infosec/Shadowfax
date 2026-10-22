@@ -195,6 +195,38 @@ export function clearLockout(username) {
   return request(`/auth/lockouts/${encodeURIComponent(username)}`, { method: "DELETE" });
 }
 
+// Accounts (v0.23). Admin-only. Passwords and keys come back exactly once, in
+// the response to the call that made them; nothing here can read one later.
+export function listUsers() {
+  return request("/users");
+}
+
+export function createUser(username, role) {
+  return request("/users", {
+    method: "POST",
+    body: JSON.stringify({ username, role, generate: true }),
+  });
+}
+
+export function resetUserPassword(username) {
+  return request(`/users/${encodeURIComponent(username)}/password`, {
+    method: "POST",
+    body: JSON.stringify({ generate: true }),
+  });
+}
+
+export function listApiKeys() {
+  return request("/api-keys");
+}
+
+export function createApiKey(label) {
+  return request("/api-keys", { method: "POST", body: JSON.stringify({ label: label || null }) });
+}
+
+export function revokeApiKey(id) {
+  return request(`/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 export function getPolicy() {
   return request("/policy");
 }

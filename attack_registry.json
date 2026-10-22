@@ -36,6 +36,11 @@
       "tactic": "Persistence",
       "url": "https://attack.mitre.org/techniques/T1098/"
     },
+    "T1136": {
+      "name": "Create Account",
+      "tactic": "Persistence",
+      "url": "https://attack.mitre.org/techniques/T1136/"
+    },
     "T1485": {
       "name": "Data Destruction",
       "tactic": "Impact",

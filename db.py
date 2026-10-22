@@ -653,12 +653,14 @@ def count_users(conn: sqlite3.Connection) -> int:
 
 
 def create_user(conn: sqlite3.Connection, username: str, password_hash: str,
-                salt: str, role: str) -> dict[str, Any]:
+                salt: str, role: str, must_change: bool = False) -> dict[str, Any]:
     cur = conn.execute(
-        "INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)",
-        (username, password_hash, salt, role),
+        "INSERT INTO users (username, password_hash, salt, role, must_change_password) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (username, password_hash, salt, role, 1 if must_change else 0),
     )
-    return {"id": cur.lastrowid, "username": username, "role": role}
+    return {"id": cur.lastrowid, "username": username, "role": role,
+            "must_change_password": bool(must_change)}
 
 
 def get_user_by_username(conn: sqlite3.Connection, username: str) -> dict[str, Any] | None:

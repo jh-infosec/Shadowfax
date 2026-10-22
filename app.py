@@ -55,7 +55,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.22.0"
+VERSION = "0.23.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -317,7 +317,10 @@ class LoginRequest(BaseModel):
 
 class CreateUserRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
-    password: str
+    # Either a password the admin chose, or `generate: true` (v0.23), in which
+    # case Shadowfax picks one, returns it once, and the new user must change it.
+    password: str | None = Field(default=None, max_length=1024)
+    generate: bool = False
     role: str = "analyst"
 
 
@@ -1410,18 +1413,39 @@ def list_users(identity: dict = Depends(require_role("admin"))):
 
 
 @app.post("/users")
-def create_user(req: CreateUserRequest, identity: dict = Depends(require_role("admin"))):
+def create_user(req: CreateUserRequest, request: Request,
+                identity: dict = Depends(require_role("admin"))):
+    """Create an account (admin only).
+
+    `generate: true` (v0.23) has Shadowfax choose the password and return it
+    once; the account is then must-change, because the admin has seen it --
+    the same reasoning as a reset. This is what the dashboard does. Every new
+    account is written into the ledger, and a new *admin* raises
+    `admin_account_created`: an extra administrator is the classic way to keep
+    a foothold.
+    """
     if not auth.is_valid_role(req.role):
         raise HTTPException(400, f"invalid role '{req.role}', expected one of {list(auth.ROLES)}")
-    problems = auth.password_problems(req.password, req.username)
+    if req.generate == (req.password is not None):
+        raise HTTPException(400, "give exactly one of password or generate: true")
+    password = auth.generate_password() if req.generate else req.password
+    problems = auth.password_problems(password, req.username)
     if problems:
         raise _password_refusal(problems)
     with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         if db.get_user_by_username(conn, req.username):
             raise HTTPException(409, f"user '{req.username}' already exists")
-        pw_hash, salt = auth.hash_password(req.password)
-        user = db.create_user(conn, req.username, pw_hash, salt, req.role)
+        pw_hash, salt = auth.hash_password(password)
+        user = db.create_user(conn, req.username, pw_hash, salt, req.role,
+                              must_change=req.generate)
+        _record_auth_event(conn, "user_created", req.username, _client_source(request),
+                           _naive_utc_now(), role=req.role, created_by=identity["username"],
+                           generated=req.generate)
         conn.commit()
+    if req.generate:
+        return {**user, "password": password,
+                "note": "shown once; give it to the user over a channel you trust"}
     return user
 
 
@@ -1477,23 +1501,34 @@ def list_api_keys(identity: dict = Depends(require_role("admin"))):
 
 
 @app.post("/api-keys")
-def create_api_key(req: CreateApiKeyRequest, identity: dict = Depends(require_role("admin"))):
+def create_api_key(req: CreateApiKeyRequest, request: Request,
+                   identity: dict = Depends(require_role("admin"))):
     key = auth.new_api_key()
     with db.get_conn() as conn:
         rec = db.create_api_key(conn, auth.api_key_fingerprint(key),
                                 auth.api_key_display_prefix(key), req.label, "service")
+        # Issued and revoked keys are ledger events (v0.23): a key is a
+        # credential, and "who could ingest, and since when" is evidence.
+        _record_auth_event(conn, "api_key_created", identity["username"], _client_source(request),
+                           _naive_utc_now(), key_id=rec["id"], key_prefix=rec["prefix"],
+                           key_label=req.label)
         conn.commit()
     # The plaintext key is returned exactly once and never stored in the clear.
     return {**rec, "api_key": key, "note": "store this now; it will not be shown again"}
 
 
 @app.delete("/api-keys/{key_id}")
-def delete_api_key(key_id: int, identity: dict = Depends(require_role("admin"))):
+def delete_api_key(key_id: int, request: Request,
+                   identity: dict = Depends(require_role("admin"))):
     with db.get_conn() as conn:
-        deleted = db.delete_api_key(conn, key_id)
+        existing = next((k for k in db.list_api_keys(conn) if k["id"] == key_id), None)
+        if existing is None:
+            raise HTTPException(404, f"no API key with id {key_id}")
+        db.delete_api_key(conn, key_id)
+        _record_auth_event(conn, "api_key_revoked", identity["username"], _client_source(request),
+                           _naive_utc_now(), key_id=key_id, key_prefix=existing["prefix"],
+                           key_label=existing["label"])
         conn.commit()
-    if not deleted:
-        raise HTTPException(404, f"no API key with id {key_id}")
     return {"status": "deleted"}
 
 

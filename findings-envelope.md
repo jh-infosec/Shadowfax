@@ -194,7 +194,7 @@ deterministic id rule for its own alerts earlier, in `v0.3`.
 Notes for an emitter, from building the consumer:
 
 - A finding's `key` becomes Shadowfax's alert category, so it may not collide
-  with one of Shadowfax's twenty-four native detector categories. The rejection
+  with one of Shadowfax's twenty-five native detector categories. The rejection
   names the collision.
 - `source.tool` may not be `shadowfax`, in any capitalisation (v0.18). An alert
   reading "reported by shadowfax" must not be something another tool can write.

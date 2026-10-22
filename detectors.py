@@ -41,6 +41,8 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "history_rewritten",
     # v0.22: a password reset from the server console, bypassing sign-in.
     "console_recovery",
+    # v0.23: a new administrator account.
+    "admin_account_created",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
@@ -342,6 +344,16 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                     f"({meta.get('role', '?')}) was reset from the server console by OS "
                     f"user '{meta.get('os_user', '?')}', bypassing sign-in; "
                     f"{meta.get('sessions_ended', 0)} session(s) ended"))
+            continue
+
+        # A new administrator (v0.23). Usually a colleague being onboarded;
+        # also the classic way to keep a foothold (ATT&CK T1136). Medium: worth
+        # a glance at who did it, not a page.
+        if e["event_type"] == "user_created":
+            if e["actor_id"] == AUTH_ACTOR_ID and meta.get("role") == "admin":
+                alerts.append(_mk_alert(e, "medium", "admin_account_created",
+                    f"administrator account '{meta.get('attempted_username', '?')}' was created "
+                    f"by '{meta.get('created_by', '?')}'"))
             continue
 
         if e["event_type"] == "alerts_retired":

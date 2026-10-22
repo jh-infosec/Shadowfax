@@ -48,6 +48,7 @@ _CATEGORY_PHRASE = {
     "ingest_flood": "an ingest credential over its budget",
     "history_rewritten": "alerts retired by later ingest",
     "console_recovery": "a password reset from the server console",
+    "admin_account_created": "a new administrator account",
 }
 
 

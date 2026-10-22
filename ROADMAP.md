@@ -205,8 +205,11 @@ Harden the platform's own front door, then point the engine at it.
       username is metadata, never the actor id. `dormancy_exempt_actors` keeps a
       quiet front door from raising `dormant_reappearance`. Shipped in
       `v0.10.0`.
-- [ ] Users and API keys management UI. The endpoints exist and are admin-only;
-      the dashboard still makes you reach for `curl`.
+- [x] Users and API keys management UI (`v0.23.0`): an Accounts drawer for
+      admins. Generated passwords (must-change) and keys, shown once and held
+      on screen until dismissed; two-press revoke; account and key changes in
+      the ledger; a new admin raises `admin_account_created`. Changing a role
+      or disabling a user still has no endpoint.
 - [ ] Second factor (TOTP) for admin accounts. Throttling slows guessing; it
       does not stop a leaked password.
 

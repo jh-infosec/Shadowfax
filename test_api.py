@@ -1757,6 +1757,97 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== accounts from the dashboard (v0.23) ==")
+_r = client.post("/users", json={"username": "gen-analyst", "role": "analyst", "generate": True})
+_gen = _r.json()
+check("a generated account returns its password once, marked must-change",
+      _r.status_code == 200 and _gen.get("must_change_password") is True
+      and not _auth.password_problems(_gen.get("password", ""), "gen-analyst"))
+check("the generated password is not in the user list",
+      _gen["password"] not in json.dumps(client.get("/users").json()))
+_r = client.post("/auth/login", json={"username": "gen-analyst", "password": _gen["password"]})
+check("it signs in, and must be changed before anything else works",
+      _r.status_code == 200 and _r.json()["user"]["must_change_password"] is True
+      and as_user("gen-analyst", _gen["password"]).get("/alerts").status_code == 403)
+check("giving a password and asking for one generated is refused",
+      client.post("/users", json={"username": "both-ways", "password": TEST_PW,
+                                  "generate": True}).status_code == 400)
+check("so is giving neither",
+      client.post("/users", json={"username": "neither-way"}).status_code == 400)
+_r = client.post("/users", json={"username": "chosen-pw", "password": TEST_PW})
+check("an admin-chosen password still works as before",
+      _r.status_code == 200 and _r.json().get("must_change_password") is False
+      and "password" not in _r.json())
+check("a non-admin cannot create accounts",
+      as_user("analyst1", TEST_PW).post("/users", json={"username": "sneaky", "role": "admin",
+                                                      "generate": True}).status_code == 403)
+
+def _auth_events(kind):
+    return [e for e in client.get("/actors/shadowfax-auth").json().get("events", [])
+            if e["event_type"] == kind]
+
+_n_users_ev = len(_auth_events("user_created"))
+check("with self-monitoring off, account changes are not recorded (like sign-ins)",
+      app_module.SELF_MONITOR is False and _n_users_ev == 0)
+
+app_module.SELF_MONITOR = True
+try:
+    _n_aac = len(client.get("/alerts", params={"category": ["admin_account_created"]}).json())
+    _r = client.post("/users", json={"username": "second-admin", "role": "admin", "generate": True})
+    _ev_u = _auth_events("user_created")
+    check("a new account is written into the ledger, naming who created it",
+          _r.status_code == 200 and len(_ev_u) == 1
+          and _ev_u[0]["metadata"]["attempted_username"] == "second-admin"
+          and _ev_u[0]["metadata"]["created_by"] == "admin"
+          and _ev_u[0]["metadata"]["role"] == "admin")
+    check("without its password", _r.json()["password"] not in json.dumps(_ev_u))
+    _aac = client.get("/alerts", params={"category": ["admin_account_created"]}).json()
+    check("a new administrator raises admin_account_created (medium)",
+          len(_aac) == _n_aac + 1 and all(a["severity"] == "medium" for a in _aac)
+          and any("second-admin" in a["message"] for a in _aac))
+    check("mapped to ATT&CK T1136 Create Account",
+          all(any(t["id"] == "T1136" for t in a["attack"]) for a in _aac))
+    client.post("/users", json={"username": "plain-viewer", "role": "viewer", "generate": True})
+    check("a new viewer is recorded but raises nothing",
+          len(_auth_events("user_created")) == 2
+          and len(client.get("/alerts", params={"category": ["admin_account_created"]}).json())
+          == _n_aac + 1)
+
+    _k = client.post("/api-keys", json={"label": "v023-harness"}).json()
+    _ev_k = _auth_events("api_key_created")
+    check("issuing an API key is recorded, with its prefix and label but not the key",
+          len(_ev_k) == 1 and _ev_k[0]["metadata"]["key_prefix"] == _k["prefix"]
+          and _ev_k[0]["metadata"]["key_label"] == "v023-harness"
+          and _k["api_key"] not in json.dumps(_ev_k))
+    _svc = TestClient(app)
+    _svc.headers.update({"X-API-Key": _k["api_key"]})
+    _probe = [{"timestamp": "2026-10-17T09:00:00", "actor_id": "v023-probe", "actor_type": "ai_agent",
+               "event_type": "file_access", "target": "x", "metadata": {}}]
+    check("the key ingests", _svc.post("/events", json=_probe).status_code == 200)
+    check("revoking it succeeds", client.delete(f"/api-keys/{_k['id']}").status_code == 200)
+    check("and it stops working at once", _svc.post("/events", json=_probe).status_code == 401)
+    _ev_rv = _auth_events("api_key_revoked")
+    check("the revocation is recorded, naming who did it",
+          len(_ev_rv) == 1 and _ev_rv[0]["metadata"]["key_id"] == _k["id"]
+          and _ev_rv[0]["metadata"]["attempted_username"] == "admin")
+    check("revoking a key that does not exist is 404 and records nothing",
+          client.delete("/api-keys/999999").status_code == 404
+          and len(_auth_events("api_key_revoked")) == 1)
+    check("the ledger verifies after all of it", client.get("/ledger/verify").json()["ok"] is True)
+finally:
+    app_module.SELF_MONITOR = False
+
+check("the detector ignores user_created under any other actor",
+      not [a for a in detectors.run_for_actor([{
+          "id": 1, "timestamp": "2026-10-17T09:00:00", "actor_id": "someone", "actor_type": "human",
+          "event_type": "user_created", "target": "x", "metadata": {"role": "admin"}}], _POLICY)
+          if a["category"] == "admin_account_created"])
+check("console_recovery is mapped to ATT&CK T1098 Account Manipulation",
+      [t["id"] for t in attack.for_category("console_recovery")] == ["T1098"])
+check("'new admin' searches for the new category",
+      client.post("/search", json={"query": "new admin accounts"}).json()["filters"].get("category")
+      == ["admin_account_created"])
+
 print("\n== console recovery and Escape (v0.22) ==")
 import builtins as _bi
 import contextlib as _ctx

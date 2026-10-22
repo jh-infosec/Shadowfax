@@ -741,6 +741,19 @@ the whole screen, with no way out but changing the password or signing out;
 `App.jsx` holds back every data fetch and the live stream until then, since the
 server would refuse them anyway.
 
+#### src/components/AccountsDrawer.jsx
+
+Users and API keys for admins (v0.23). Every secret is generated server-side
+(`POST /users` with `generate: true`, `POST /users/{name}/password` with
+`generate: true`, `POST /api-keys`) and shown once in a box that must be
+dismissed: while it is on screen a capture-phase keydown listener marks Escape
+handled, so `App.jsx`'s handler leaves the drawer open, and the overlay click is
+ignored. Reset and revoke take two presses instead of a `confirm()` dialog,
+which would block the page. The server records `user_created`,
+`api_key_created` and `api_key_revoked` under `shadowfax-auth` (when
+self-monitoring is on, like every front-door event); the detector raises
+`admin_account_created` for a new admin.
+
 #### src/components/PermissionsPanel.jsx
 
 The permission profile governing an actor (v0.16), from the `permissions` field
@@ -1073,4 +1086,5 @@ frontend/src/components/LockoutsDrawer.jsx
 frontend/src/components/PermissionsPanel.jsx
 frontend/src/components/CapabilitiesPanel.jsx
 frontend/src/components/PasswordModal.jsx
+frontend/src/components/AccountsDrawer.jsx
 ```

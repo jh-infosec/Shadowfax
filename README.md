@@ -41,7 +41,7 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across twenty-four alert categories, including AI-agent tool-call analysis
+- Rule-based detection engine across twenty-five alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
@@ -68,6 +68,7 @@ investigation and explainability.
 - Command-line interface — ingest, query, explain and gate on alerts from a shell; `--json` everywhere for agents
 - Tamper-evident event ledger — every event hash-chained to the one before it, so an edit, deletion or reordering breaks the chain at a locatable point
 - Sign-in throttling and lockout — backoff then lockout on the platform's own login, with no enumeration oracle and no sleeping
+- Accounts screen — admins add users and issue or revoke API keys from the dashboard; passwords and keys are generated, shown once, and every change is in the ledger
 - Console recovery — a lost admin password is reset from the server's own shell, never over the network, and raises an alert
 - History that cannot be quietly rewritten — when a new upload makes alerts disappear, Shadowfax records which ones and who sent it, and raises `history_rewritten`
 - Self-monitoring — attacks on Shadowfax's own front door become ordinary events and raise ordinary alerts, through the same detectors as everything else
@@ -246,6 +247,10 @@ Planned
 
 - Console recovery of a lost admin password; Escape closes drawers — shipped (v0.22.0)
 
+### v0.23
+
+- Users and API keys managed from the dashboard — shipped (v0.23.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -389,7 +394,7 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Twenty-eight checks, each one an assertion a person makes when they glance at the
+Thirty-seven checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
@@ -398,7 +403,9 @@ filtering actually filters, that an agent's declared permissions are shown
 beside the breaches of them along with the tools it was configured with, and
 that the live stream connects without the session token appearing in any URL
 the page requests, and that a user whose password an admin reset must choose a
-new one before the dashboard shows anything.
+new one before the dashboard shows anything — and that an admin can add a user
+and issue and revoke an API key from the Accounts drawer, with the password shown
+on screen being the one that signs in.
 
 They refuse to run against an empty instance, because a test that passes on a
 dashboard rendering nothing is worse than no test. `--headed` shows the browser.
@@ -422,7 +429,7 @@ python demo.py --fast --assert
 ```
 
 That turns the demo into an end-to-end check of the whole stack — ingest,
-twenty-four detectors, correlation, kill-chain ordering, findings-envelope ingest,
+twenty-five detectors, correlation, kill-chain ordering, findings-envelope ingest,
 the front door and the ledger — against a real server over real HTTP. It is a
 different kind of evidence from the unit suite, which never leaves the process.
 
@@ -864,7 +871,7 @@ critical, high, medium, low, info
 ```
 
 A finding's `key` becomes the alert category, so an emitter **may not use one of
-Shadowfax's own twenty-four detector categories**. An alert reading
+Shadowfax's own twenty-five detector categories**. An alert reading
 `destructive_action` must mean Shadowfax's detector found it, not that somebody
 else said so.
 
@@ -977,6 +984,13 @@ the same throttle as sign-in — and signs out every other session. An admin res
 ends all of the user's sessions and marks the new password must-change: until
 the owner replaces it, the server allows nothing else. Changes and resets are
 written into the ledger.
+
+Admins manage accounts from the dashboard's **Accounts** drawer (or the same
+`/users` and `/api-keys` endpoints). New users get a generated password they
+must change at first sign-in; API keys are shown once and revoked at a click.
+Creating an account and issuing or revoking a key are written into the ledger
+with who did it, and a new **administrator** raises `admin_account_created`
+(medium, ATT&CK T1136) — an extra admin is the classic way to keep a foothold.
 
 A lost admin password is recovered with `recover.py` on the server itself (see
 Locked out of your own Shadowfax above), never over the API; the recovery is

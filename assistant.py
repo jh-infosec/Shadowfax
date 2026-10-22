@@ -533,6 +533,9 @@ _CATEGORY_SYNONYMS = {
     "recovery": "console_recovery",
     "recovered": "console_recovery",
     "console": "console_recovery",
+    "new admin": "admin_account_created",
+    "admin account": "admin_account_created",
+    "administrator": "admin_account_created",
 }
 
 

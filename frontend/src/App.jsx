@@ -8,6 +8,7 @@ import PasswordModal from "./components/PasswordModal.jsx";
 import IncidentsDrawer from "./components/IncidentsDrawer.jsx";
 import DigestDrawer from "./components/DigestDrawer.jsx";
 import LockoutsDrawer from "./components/LockoutsDrawer.jsx";
+import AccountsDrawer from "./components/AccountsDrawer.jsx";
 import ExplanationModal from "./components/ExplanationModal.jsx";
 import NLSearch from "./components/NLSearch.jsx";
 import Login from "./components/Login.jsx";
@@ -64,6 +65,7 @@ export default function App() {
   const [incidentsOpen, setIncidentsOpen] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
   const [lockoutsOpen, setLockoutsOpen] = useState(false);
+  const [accountsOpen, setAccountsOpen] = useState(false);
   // The alert whose explanation modal is open, or null.
   const [explainAlert, setExplainAlert] = useState(null);
   // Active natural-language search result (snapshot), or null for the normal
@@ -230,6 +232,7 @@ export default function App() {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       if (passwordOpen || policyOpen) return;
       if (explainAlert) setExplainAlert(null);
+      else if (accountsOpen) setAccountsOpen(false);
       else if (lockoutsOpen) setLockoutsOpen(false);
       else if (digestOpen) setDigestOpen(false);
       else if (incidentsOpen) setIncidentsOpen(false);
@@ -239,8 +242,8 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [passwordOpen, policyOpen, explainAlert, lockoutsOpen, digestOpen, incidentsOpen,
-      selectedActorId]);
+  }, [passwordOpen, policyOpen, explainAlert, accountsOpen, lockoutsOpen, digestOpen,
+      incidentsOpen, selectedActorId]);
 
   const handleLogout = async () => {
     await api.logout();
@@ -353,6 +356,7 @@ export default function App() {
           onOpenIncidents={() => setIncidentsOpen(true)}
           onOpenDigest={() => setDigestOpen(true)}
           onOpenLockouts={() => setLockoutsOpen(true)}
+          onOpenAccounts={() => setAccountsOpen(true)}
           canSeeLockouts={canAdmin}
         />
         <div className="main">
@@ -388,6 +392,10 @@ export default function App() {
       )}
 
       {lockoutsOpen && <LockoutsDrawer onClose={() => setLockoutsOpen(false)} />}
+
+      {accountsOpen && (
+        <AccountsDrawer me={user.username} onClose={() => setAccountsOpen(false)} />
+      )}
 
       {explainAlert && (
         <ExplanationModal alert={explainAlert} onClose={() => setExplainAlert(null)} />

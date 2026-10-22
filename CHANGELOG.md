@@ -1,5 +1,67 @@
 # Changelog
 
+## Version 0.23.0
+
+The roadmap's oldest dashboard gap: accounts. The endpoints for users and API
+keys have existed since v0.3.1 and have been admin-only throughout, but the only
+way to use them was `curl`. An admin now has an **Accounts** drawer.
+
+### The Accounts drawer
+
+- **Users**: every account with its role, whether its password must be changed,
+  and when it was last set. **Add user** takes a name and a role; Shadowfax
+  generates the password. **Reset password** generates a new one and signs the
+  user out everywhere (the v0.19 reset, now with a button). There is no reset
+  button on your own row — changing your own password asks for the current one,
+  from the top bar.
+- **API keys**: prefix, label, created, last used. **New API key** takes a
+  label; **Revoke** stops a key at once.
+- **Every secret is shown exactly once** — Shadowfax keeps only fingerprints —
+  in a box that has to be dismissed on purpose ("I have stored it"). While it is
+  on screen the drawer will not close: not on Escape, not on a click outside,
+  not on its own close button. Losing a password nobody has written down yet to
+  a stray keypress would be worse than the inconvenience.
+- **Reset and revoke take two presses**: the button turns into "Confirm reset"
+  or "Confirm revoke". Not a browser `confirm()` dialog, which blocks the page.
+
+### Server changes
+
+- `POST /users` accepts `generate: true` instead of a password: the password is
+  chosen by Shadowfax, returned once, and the account is **must-change**,
+  because the admin has seen it — the same reasoning as a reset. Giving both or
+  neither is refused. An admin-chosen password behaves as before.
+- **Account changes are evidence.** Creating a user, issuing an API key and
+  revoking one are written into the ledger under `shadowfax-auth` — who did it,
+  the account or the key's prefix and label, never a password or a key — when
+  self-monitoring is on, exactly like sign-ins.
+- **New detector, `admin_account_created`** (medium, ATT&CK **T1136** Create
+  Account): a new administrator is usually a colleague being onboarded, and is
+  also the classic way to keep a foothold. Only Shadowfax's own actor counts.
+  Detector categories: twenty-four → **twenty-five**.
+- `console_recovery` (v0.22) is now mapped to ATT&CK **T1098** Account
+  Manipulation. T1136 is added to the shared technique registry.
+- "new admin" / "admin account" in a natural-language search finds the new
+  category.
+
+Not yet: changing a user's role, or disabling an account. There is no endpoint
+for either, and the drawer does not pretend otherwise.
+
+### Verification
+
+- **672** API checks (from 649). Eight code mutations, each caught by the check
+  written for it: generated accounts not marked must-change, the detector firing
+  for any role, or for any actor, account creation or key revocation not
+  recorded, a key leaking into its own ledger event, and the T1136 mapping
+  removed.
+- **37** dashboard checks (from 28): the drawer lists users and marks you; adding
+  a user shows a password once, **and that exact password signs in** (checked
+  through the API, as must-change); Escape is held while a secret is on screen;
+  a key is issued, listed, needs a second press to revoke, and disappears; and
+  Escape closes the drawer once nothing secret is showing. Both safeguards
+  mutation-tested: removing the Escape hold, and removing the second press, each
+  fails its check.
+- Replay: all 12 assertions held.
+
 ## Version 0.22.0
 
 Two things that were on the roadmap and that anyone running Shadowfax for real
