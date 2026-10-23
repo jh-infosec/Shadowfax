@@ -1,0 +1,578 @@
+"""
+Dashboard browser tests (v0.14).
+
+CI has built the dashboard since v0.13 and could not tell a built bundle from a
+working one. Vite exits 0 on a page that renders nothing: a component throwing
+on mount, an API field quietly renamed, a filter that drops every row — all of
+these ship green. The one part of Shadowfax a person actually looks at was the
+one part nothing checked.
+
+These are the assertions a human makes when they glance at the dashboard and
+believe it. Each one is about *what the engine found arriving on screen*, not
+about markup: that alerts the API returned are rendered as rows, that an
+ingested finding says who reported it, that a kill chain Shadowfax correlated
+is drawn, that the ledger badge reflects the real chain. A test that only
+asserted "a table element exists" would pass on an empty table, which is the
+failure it most needs to catch.
+
+Run against a Shadowfax that already has data -- `demo.py` is what puts it
+there, so in CI this runs straight after the replay:
+
+    python demo.py --fast --assert
+    python test_dashboard.py
+
+    python test_dashboard.py --url http://127.0.0.1:8000 --headed
+
+Playwright is a developer dependency, not a runtime one. `requirements-dev.txt`
+carries it; the shipped container has neither it nor a browser.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+import os
+import sys
+import urllib.error
+import urllib.request
+
+DEFAULT_URL = "http://127.0.0.1:8000"
+
+passed = 0
+failures: list[str] = []
+
+
+def check(label: str, condition: bool, detail: str = "") -> None:
+    global passed
+    if condition:
+        passed += 1
+        print(f"[PASS] {label}")
+    else:
+        failures.append(f"{label}{(' — ' + detail) if detail else ''}")
+        print(f"[FAIL] {label}{(' — ' + detail) if detail else ''}")
+
+
+# Credentials for the instance under test. The published image generates its
+# admin password (v0.17), so they cannot be assumed; from source it is admin/admin.
+USERNAME = os.environ.get("SHADOWFAX_ADMIN_USERNAME") or "admin"
+PASSWORD = os.environ.get("SHADOWFAX_ADMIN_PASSWORD") or "admin"
+
+
+def seed_if_empty(url: str) -> bool:
+    """Make sure there is something to look at.
+
+    The tests assert that findings *reach the screen*, so they need a populated
+    instance. In CI the replay has already run; locally it may not have, and a
+    test that silently passes against an empty dashboard would be worthless.
+    """
+    try:
+        req = urllib.request.Request(
+            f"{url}/auth/login",
+            data=json.dumps({"username": USERNAME, "password": PASSWORD}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            token = json.loads(resp.read())["token"]
+        req = urllib.request.Request(f"{url}/stats",
+                                     headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            counts = json.loads(resp.read())["alert_counts"]
+        return sum(counts.values()) > 0
+    except (urllib.error.URLError, urllib.error.HTTPError, KeyError):
+        return False
+
+
+def run(url: str, headed: bool) -> int:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("The dashboard tests need Playwright:\n"
+              "    pip install -r requirements-dev.txt\n"
+              "    python -m playwright install chromium")
+        return 2
+
+    if not seed_if_empty(url):
+        print(f"No alerts at {url} — run `python demo.py --fast` first, or check "
+              f"that Shadowfax is up.\nThese tests assert that findings reach the "
+              f"screen, so an empty instance would make them meaningless.")
+        return 2
+
+    print(f"\n== dashboard, in a real browser ({url}) ==")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=not headed)
+        page = browser.new_page(viewport={"width": 1500, "height": 950})
+
+        # A dashboard that renders but logs errors is a dashboard mid-failure.
+        console_errors: list[str] = []
+        page.on("console", lambda m: console_errors.append(m.text)
+                if m.type == "error" else None)
+        # Only the message: a React stack is a page of minified frames and the
+        # first line is the part that names what went wrong.
+        page.on("pageerror",
+                lambda e: console_errors.append(str(e).strip().splitlines()[0]))
+
+        # Every URL the page asks for, to check what it puts in them (v0.17.1).
+        requested: list[str] = []
+        page.on("request", lambda r: requested.append(r.url))
+
+        try:
+            _run_checks(page, url, requested)
+            _run_reset_checks(browser, url)
+            _run_two_factor_checks(browser, url)
+        except Exception as exc:
+            # A component that throws on mount takes the whole page with it, and
+            # the first thing to notice is a selector that never appears. Report
+            # that as a finding rather than a traceback: CI fails either way, but
+            # only one of them tells you what broke.
+            first_line = str(exc).strip().splitlines()[0]
+            check("the dashboard rendered far enough to finish the checks",
+                  False, f"{type(exc).__name__}: {first_line}")
+        finally:
+            # Reported whatever else happened: an exception during the checks is
+            # often downstream of an error the page already logged.
+            # De-duplicated: React reports the same mount failure several times
+            # over, and three copies of one error reads as three problems.
+            unique = list(dict.fromkeys(e.strip().splitlines()[0]
+                                        for e in console_errors))
+            check("the dashboard logged no console errors",
+                  not unique, "; ".join(unique[:3]))
+            browser.close()
+
+    print()
+    if failures:
+        print(f"{len(failures)} dashboard check(s) failed:")
+        for f in failures:
+            print(f"  ✗ {f}")
+        return 1
+    print(f"All {passed} dashboard checks passed.")
+    return 0
+
+
+def _run_checks(page, url: str, requested: list[str]) -> None:
+    page.goto(url, wait_until="networkidle")
+
+    # -- sign-in ------------------------------------------------------------
+    check("the sign-in form is served", page.locator('input[type="password"]').count() == 1)
+    page.fill('input[type="text"]', USERNAME)
+    page.fill('input[type="password"]', PASSWORD)
+    page.click('button[type="submit"]')
+
+    # Waiting for the ledger badge means waiting for the app shell *and* a
+    # successful authenticated API call, which is a better signal than any
+    # arbitrary sleep.
+    page.wait_for_selector(".ledger-badge", timeout=20000)
+    page.wait_for_timeout(1500)
+    check("signing in reaches the dashboard", page.locator(".topbar").count() == 1)
+
+    # -- the live stream, without the session token in a URL (v0.17.1) ------
+    # URLs are what access logs record, so the token must never be in one.
+    # Checked against everything the page requested, not just the stream:
+    # the claim is about the dashboard, not about one call site.
+    token = page.evaluate("() => localStorage.getItem('shadowfax_token')")
+    page.wait_for_selector(".conn-dot.live", timeout=10000)
+    streams = [u for u in requested if "/stream?" in u]
+    check("the live stream connects, using a single-use ticket",
+          bool(streams) and all("ticket=" in u for u in streams),
+          "; ".join(streams[:2]) or "no stream request seen")
+    check("no URL the dashboard requested carries the session token",
+          bool(token) and not any(token in u for u in requested),
+          "no token in storage to compare against" if not token else "")
+
+    # -- the alert table actually has alerts in it --------------------------
+    # The assertion that matters. A table element exists on an empty dashboard
+    # too; rows are what prove the API's alerts reached the screen.
+    rows = page.locator(".table-wrap tbody tr")
+    check("the alert table renders rows", rows.count() > 0,
+          f"{rows.count()} rows")
+
+    table_text = page.inner_text(".table-wrap")
+    check("rows carry a severity", any(s in table_text.lower()
+                                       for s in ("critical", "high", "medium")))
+    check("rows carry an ATT&CK technique", "T1" in table_text)
+
+    # The counts in the top bar and the rows below come from different calls.
+    # If they disagree, one of them is lying.
+    stats_text = page.inner_text(".stats")
+    check("the top bar shows severity counts", "CRIT" in stats_text and "HIGH" in stats_text)
+    check("the top bar's counts are not all zero",
+          any(ch.isdigit() and ch != "0" for ch in stats_text))
+
+    # -- provenance from an ingested finding --------------------------------
+    # v0.11's whole point: an alert that came from another tool says so.
+    check("an ingested finding names the tool that reported it",
+          page.locator(".src-badge").count() > 0)
+
+    # -- the evidence integrity badge ---------------------------------------
+    badge = page.inner_text(".ledger-badge")
+    check("the ledger badge reports the chain verified", "verified" in badge.lower(),
+          badge.replace("\n", " "))
+
+    # -- the kill chain is drawn, not just computed -------------------------
+    page.click("text=Incidents")
+    page.wait_for_selector(".drawer", timeout=10000)
+    page.wait_for_timeout(1200)
+    drawer = page.inner_text(".drawer")
+    # `or len(drawer) > 50` used to be the escape hatch here, which made this
+    # pass on any drawer with some text in it -- including an empty one with a
+    # heading. By this file's own standard that is worse than no check. What
+    # proves the drawer *opened with incidents in it* is that it lists them:
+    # every row reads "<actor> · N alerts".
+    check("the incidents drawer lists incidents", "alert" in drawer.lower(),
+          drawer[:100].replace("\n", " ") or "(drawer was empty)")
+
+    chained = page.locator(".drawer").get_by_text("chain", exact=False)
+    check("an incident is flagged as a kill chain", chained.count() > 0)
+
+    # Click the chained incident and confirm the stages render.
+    rows_in_drawer = page.locator(".drawer li, .incident-row, .drawer tr")
+    for i in range(min(rows_in_drawer.count(), 12)):
+        row = rows_in_drawer.nth(i)
+        if "chain" in (row.inner_text() or "").lower():
+            row.click()
+            break
+    page.wait_for_timeout(1200)
+    detail = page.inner_text(".drawer")
+    check("the kill chain's tactics are on screen",
+          "Exfiltration" in detail and ("Lateral Movement" in detail
+                                        or "Credential Access" in detail),
+          detail[:120].replace("\n", " "))
+    # Asserted on the chain's own state, not on the "escalated high -> critical"
+    # caption. That caption only appears when escalation *changed* the severity,
+    # and since v0.16 the replayed agent's incident is critical before the chain
+    # completes (its first breach of its permission profile is critical). The
+    # text check then failed on a chain that was escalated -- it was testing the
+    # severity history, not the claim in its name.
+    check("a completed chain is marked as escalated",
+          page.locator(".drawer .kill-chain.escalated").count() > 0
+          and "reaches Exfiltration" in detail,
+          detail[:120].replace("\n", " "))
+
+    # -- filtering still filters --------------------------------------------
+    # A filter that silently matches everything looks identical to a working one
+    # until you count.
+    # Closed with its own button. This used to press Escape, which the dashboard
+    # does not handle: the drawer stayed open over the table, and the filter
+    # checks only passed because typing into the search box needs no click.
+    # The first check that had to click a row (v0.16) found the overlay in the
+    # way.
+    page.click(".drawer-close")
+    page.wait_for_timeout(600)
+    before = page.locator(".table-wrap tbody tr").count()
+    search = page.locator('input[placeholder*="actor"]')
+    # Guarded on `before`: with no rows to begin with, "the filter emptied the
+    # table" and "the rows came back" would both pass on a dashboard that was
+    # already broken. A check that cannot fail is worse than no check.
+    if search.count() and before > 0:
+        search.fill("no-such-actor-anywhere")
+        page.wait_for_timeout(1500)
+        after = page.locator(".table-wrap tbody tr").count()
+        check("a search that matches nothing empties the table",
+              after == 0, f"{before} rows before, {after} after")
+        search.fill("")
+        page.wait_for_timeout(1500)
+        restored = page.locator(".table-wrap tbody tr").count()
+        check("clearing the search brings the rows back",
+              restored == before, f"{before} before, {restored} after clearing")
+    else:
+        check("the filter checks had rows to work with", False,
+              "no rows were rendered, so filtering could not be tested")
+
+    # -- declared permissions, beside what the agent did (v0.16) ------------
+    # An alert reading "outside declared permissions" is half an answer until
+    # the declaration is on screen next to it. recon-agent-3 is in the bundled
+    # sample data, so this holds whether or not the replay has run.
+    if search.count():
+        search.fill("recon-agent-3")
+        page.wait_for_timeout(1500)
+        recon_rows = page.locator(".table-wrap tbody tr")
+        if recon_rows.count():
+            recon_rows.first.click()
+            page.wait_for_selector(".perm-panel", timeout=10000)
+            panel = page.inner_text(".perm-panel")
+            check("the actor drawer shows the profile that governs the agent",
+                  "recon-agent-*" in panel, panel[:120].replace("\n", " "))
+            check("denied grants are shown as denied",
+                  page.locator(".perm-panel .perm-chip.deny").count() > 0)
+            check("a breach of the profile is on the agent's timeline",
+                  "permission_violation" in page.inner_text(".drawer"))
+            # v0.18: what the agent was configured with, beside what it may do.
+            # The sample manifest includes bash, which the profile denies.
+            caps = page.locator(".caps-panel")
+            check("the drawer shows the tools the agent was configured with",
+                  caps.count() == 1 and "bash" in caps.inner_text())
+            check("a configured tool the profile denies is marked as denied",
+                  page.locator(".caps-panel .perm-chip.deny", has_text="bash").count() == 1)
+        else:
+            check("the sample agent's alerts could be found to open its drawer",
+                  False, "no rows for recon-agent-3")
+
+    # -- Escape closes the top layer, but not a form (v0.22) ----------------
+    # Run once a drawer is known to be open, so "no drawer afterwards" cannot
+    # pass on a page that never opened one.
+    if page.locator(".drawer").count():
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
+        check("Escape closes the open drawer", page.locator(".drawer").count() == 0)
+    else:
+        check("a drawer was open to test Escape on", False)
+    page.click("text=Edit policy")
+    page.wait_for_selector(".policy-modal", timeout=10000)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    check("Escape leaves the policy editor open, so an edit is not lost to a keypress",
+          page.locator(".policy-modal").count() == 1)
+    page.click(".policy-modal .drawer-close")
+    page.wait_for_timeout(300)
+
+    # -- accounts, without curl (v0.23) -------------------------------------
+    # Driven through the screen an admin would use, then checked through the
+    # API: a password that only looks right on screen is not a password.
+    stamp = str(int(time.time()))[-6:]
+    new_user = f"ui-user-{stamp}"
+    page.get_by_role("button", name="Accounts", exact=True).click()
+    page.wait_for_selector(".accounts-drawer .accounts-users", timeout=10000)
+    users_text = page.inner_text(".accounts-users")
+    check("the accounts drawer lists users, marking the signed-in one",
+          f"{USERNAME} (you)" in users_text)
+    page.fill('.accounts-form input[placeholder="new username"]', new_user)
+    page.select_option(".accounts-form select", "viewer")
+    page.click("button:has-text('Add user')")
+    page.wait_for_selector(".secret-box", timeout=10000)
+    shown = page.inner_text(".secret-value").strip()
+    check("adding a user shows its generated password once", len(shown) >= 12)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    check("Escape does not close the drawer while a password is on screen",
+          page.locator(".secret-box").count() == 1 and page.locator(".accounts-drawer").count() == 1)
+    page.click("button:has-text('I have stored it')")
+    page.wait_for_timeout(600)
+    row = page.locator(".accounts-users tr", has_text=new_user)
+    check("the new user is listed as must-change",
+          page.locator(".secret-box").count() == 0 and row.count() == 1
+          and "must change" in row.inner_text())
+    signed = _api(url, "POST", "/auth/login", {"username": new_user, "password": shown})
+    check("the password shown on screen is the one that works",
+          signed["user"]["must_change_password"] is True)
+
+    # v0.24: role changes and disabling, each confirmed with a second press.
+    row = page.locator(".accounts-users tr", has_text=new_user)
+    row.locator("select").select_option("analyst")
+    confirm = row.locator("button", has_text="Confirm")
+    check("choosing a new role asks for confirmation before applying it",
+          confirm.count() == 1 and _role_of(url, new_user) == "viewer")
+    confirm.first.click()
+    page.wait_for_timeout(800)
+    check("confirming applies the role on the server", _role_of(url, new_user) == "analyst")
+    row = page.locator(".accounts-users tr", has_text=new_user)
+    row.locator("button", has_text="Disable").click()
+    check("disabling asks for a second press",
+          row.locator("button", has_text="Confirm disable").count() == 1)
+    row.locator("button", has_text="Confirm disable").click()
+    page.wait_for_timeout(800)
+    row = page.locator(".accounts-users tr", has_text=new_user)
+    try:
+        _api(url, "POST", "/auth/login", {"username": new_user, "password": shown})
+        refused = False
+    except urllib.error.HTTPError as exc:
+        refused = exc.code == 403
+    check("a disabled user is shown as disabled and cannot sign in",
+          "disabled" in row.inner_text() and refused)
+    row.locator("button", has_text="Enable").click()
+    page.wait_for_timeout(800)
+    check("Enable brings the account back",
+          "disabled" not in page.locator(".accounts-users tr", has_text=new_user).inner_text())
+
+    label = f"ui-key-{stamp}"
+    page.fill('.accounts-form input[placeholder^="label"]', label)
+    page.click("button:has-text('New API key')")
+    page.wait_for_selector(".secret-box", timeout=10000)
+    key = page.inner_text(".secret-value").strip()
+    page.click("button:has-text('I have stored it')")
+    page.wait_for_timeout(600)
+    key_row = page.locator(".accounts-keys tr", has_text=label)
+    check("a new API key is shown once and listed by label", len(key) > 20 and key_row.count() == 1)
+    key_row.locator("button").click()
+    check("revoking asks for a second press",
+          key_row.locator("button").inner_text().strip() == "Confirm revoke")
+    key_row.locator("button").click()
+    page.wait_for_timeout(800)
+    check("a confirmed revoke removes the key",
+          page.locator(".accounts-keys tr", has_text=label).count() == 0)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(400)
+    check("with nothing secret on screen, Escape closes the accounts drawer",
+          page.locator(".accounts-drawer").count() == 0)
+
+    # -- subject pages (v0.26) ---------------------------------------------
+    # Two tools report on one host; the Subjects drawer lists it, and its own
+    # drawer leads with the findings grouped by tool, the shared one called out.
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    host = f"10.77.{int(stamp) % 250}.{int(stamp[-2:]) % 250}"
+    for tool, fid, sev in (("portscout", "p1", "high"), ("vulnscan", "v1", "critical")):
+        _api(url, "POST", "/findings", {
+            "envelope_version": "1.0", "generated": "2026-10-19T09:00:00Z",
+            "source": {"tool": tool, "version": "1.0"},
+            "subject": {"kind": "host", "id": host, "label": f"dash-host-{stamp}"},
+            "findings": [{"id": f"{fid}-{stamp}", "key": "open_admin_port", "severity": sev,
+                          "title": f"Admin port open ({tool})", "evidence": "22/tcp",
+                          "validated": True}]}, admin)
+    page.get_by_role("button", name="Subjects", exact=True).click()
+    page.wait_for_selector(".subjects-table", timeout=10000)
+    row = page.locator(".subjects-table tr", has_text=f"dash-host-{stamp}")
+    check("the Subjects drawer lists what tools reported on, with the tools",
+          row.count() == 1 and "portscout" in row.inner_text() and "vulnscan" in row.inner_text())
+    row.click()
+    page.wait_for_selector(".subject-report", timeout=10000)
+    report = page.inner_text(".subject-report")
+    check("a subject's drawer leads with its findings, grouped by tool, worst tool first",
+          page.locator(".subject-emitter").count() == 2
+          and page.locator(".subject-emitter").first.inner_text().startswith("via vulnscan"))
+    check("a finding two tools agree on is called out",
+          "reported by more than one tool" in report.lower() and "open_admin_port" in report)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+
+
+def _api(url: str, method: str, path: str, body=None, token: str | None = None):
+    req = urllib.request.Request(
+        f"{url}{path}", data=json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json",
+                 **({"Authorization": f"Bearer {token}"} if token else {})},
+        method=method)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def _run_two_factor_checks(browser, url: str) -> None:
+    """Two-factor (v0.25), end to end: turn it on from the dashboard with a
+    code computed from the key the page shows, then sign in again through the
+    code step. The code is computed here with the server's own totp module --
+    the same arithmetic as any authenticator app (it is checked against the
+    RFC 6238 vectors in test_api.py)."""
+    import secrets
+    import totp
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    name, pw = f"dash-2fa-{secrets.token_hex(3)}", "two-factor-pass-123"
+    _api(url, "POST", "/users", {"username": name, "password": pw, "role": "analyst"}, admin)
+
+    context = browser.new_context(viewport={"width": 1300, "height": 900})
+    page = context.new_page()
+    page.goto(url, wait_until="networkidle")
+    page.fill('input[autocomplete="username"]', name)
+    page.fill('input[type="password"]', pw)
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".topbar", timeout=15000)
+    page.click("button:has-text('Two-factor')")
+    page.click(".twofactor-modal button:has-text('Turn on')")
+    page.fill(".twofactor-modal input[type='password']", pw)
+    page.click(".twofactor-modal button:has-text('Continue')")
+    page.wait_for_selector(".tf-key", timeout=10000)
+    secret = page.inner_text(".tf-key").replace(" ", "").strip()
+    qr = page.get_attribute(".tf-qr", "src") or ""
+    check("turning two-factor on shows a QR code and the key",
+          qr.startswith("data:image/png") and len(secret) == 32)
+    page.fill(".tf-code", totp.code_at(secret, totp.current_step()))
+    page.click(".twofactor-modal button[type='submit']")
+    page.wait_for_selector(".tf-recovery", timeout=10000)
+    check("a first code from the app turns it on and shows ten recovery codes",
+          page.locator(".tf-recovery li").count() == 10)
+    page.keyboard.press("Escape")
+    page.mouse.click(5, 450)          # outside the window, on its overlay
+    page.wait_for_timeout(300)
+    check("the recovery codes stay on screen until dismissed (Escape, a click outside)",
+          page.locator(".tf-recovery").count() == 1)
+    page.click("button:has-text('I have stored them')")
+    page.wait_for_timeout(500)
+    check("the account now shows two-factor on", "on" in page.inner_text(".twofactor-modal .tf-on"))
+    page.click(".twofactor-modal .drawer-close")
+    page.click("button:has-text('Sign out')")
+    page.wait_for_selector('input[type="password"]', timeout=10000)
+
+    page.fill('input[autocomplete="username"]', name)
+    page.fill('input[type="password"]', pw)
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".login-code", timeout=10000)
+    check("signing in again asks for a code after the password",
+          page.locator(".topbar").count() == 0 and "Two-factor is on" in page.inner_text(".login-card"))
+    page.fill(".login-code", "000000" if totp.code_at(secret, totp.current_step() + 1) != "000000" else "111111")
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".login-error", timeout=10000)
+    check("a wrong code is refused on screen",
+          "did not work" in page.inner_text(".login-error") and page.locator(".topbar").count() == 0)
+    page.fill(".login-code", totp.code_at(secret, totp.current_step() + 1))
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".topbar", timeout=15000)
+    check("the right code signs in", page.locator(".topbar").count() == 1)
+    listed = next(u for u in _api(url, "GET", "/users", None, admin) if u["username"] == name)
+    check("and the server agrees two-factor is on", bool(listed["totp_enabled"]))
+    context.close()
+
+
+def _role_of(url: str, username: str) -> str | None:
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    return next((u["role"] for u in _api(url, "GET", "/users", None, admin)
+                 if u["username"] == username), None)
+
+
+def _run_reset_checks(browser, url: str) -> None:
+    """After an admin reset, the dashboard must make the user choose a new
+    password before showing anything (v0.19). Driven end to end: a throwaway
+    user is created and reset over the API, then signs in in a fresh browser."""
+    import secrets
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    name = f"dash-reset-{secrets.token_hex(3)}"
+    _api(url, "POST", "/users", {"username": name, "password": "initial-pass-123",
+                                 "role": "analyst"}, admin)
+    given = _api(url, "POST", f"/users/{name}/password", {"generate": True}, admin)["password"]
+
+    context = browser.new_context(viewport={"width": 1300, "height": 900})
+    page = context.new_page()
+    page.goto(url, wait_until="networkidle")
+    page.fill('input[type="text"]', name)
+    page.fill('input[type="password"]', given)
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".password-screen", timeout=15000)
+    check("after an admin reset, sign-in leads to a forced password change",
+          page.locator(".topbar").count() == 0 and "administrator reset" in page.inner_text(".password-screen"))
+    inputs = page.locator(".password-screen input[type='password']")
+    inputs.nth(0).fill(given)
+    inputs.nth(1).fill("short")
+    inputs.nth(2).fill("short")
+    page.click(".password-screen button[type='submit']")
+    page.wait_for_timeout(500)
+    check("a too-short new password is refused on screen",
+          "at least 12" in page.inner_text(".password-screen"))
+    inputs.nth(1).fill("chosen-in-the-browser")
+    inputs.nth(2).fill("chosen-in-the-browser")
+    page.click(".password-screen button[type='submit']")
+    page.wait_for_selector("text=Password changed", timeout=10000)
+    page.click("text=Continue")
+    page.wait_for_selector(".topbar", timeout=15000)
+    page.wait_for_timeout(1500)
+    check("once changed, the dashboard loads with data",
+          page.locator(".table-wrap tbody tr").count() > 0
+          and page.locator("button", has_text="Change password").count() == 1)
+    context.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Check the Shadowfax dashboard in a real browser.")
+    parser.add_argument("--url", default=DEFAULT_URL,
+                        help=f"a running Shadowfax (default {DEFAULT_URL})")
+    parser.add_argument("--username", help="admin username (default "
+                        "$SHADOWFAX_ADMIN_USERNAME, else admin)")
+    parser.add_argument("--password", help="admin password (default "
+                        "$SHADOWFAX_ADMIN_PASSWORD, else admin)")
+    parser.add_argument("--headed", action="store_true",
+                        help="show the browser, for watching or debugging")
+    args = parser.parse_args(argv)
+    global USERNAME, PASSWORD
+    USERNAME = args.username or USERNAME
+    PASSWORD = args.password or PASSWORD
+    return run(args.url, args.headed)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

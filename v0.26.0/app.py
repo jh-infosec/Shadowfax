@@ -1,0 +1,1860 @@
+"""
+Shadowfax API
+
+REST backend for the Shadowfax security platform.
+
+The API accepts events, evaluates them against the active policy and
+returns alerts for the dashboard or other clients.
+
+Run locally:
+
+    uvicorn app:app --reload --port 8000
+
+Interactive API documentation:
+
+    /docs
+
+Shadowfax is an observability platform. It analyses activity and produces
+alerts, but never blocks or modifies events.
+"""
+
+from __future__ import annotations
+import asyncio
+import json
+import os
+import secrets
+import sqlite3
+from pathlib import Path
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, field_validator
+
+import assistant
+import attack
+import auth
+import bus
+import correlate
+import db
+import detectors
+import digest as digest_mod
+import envelope
+import ledger
+import limits
+import manifest
+import permissions
+import ratelimit
+import subjects
+import throttle
+import totp
+import tickets
+import timeutil
+from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
+
+APP_NAME = "Shadowfax API"
+VERSION = "0.26.0"
+SESSION_TTL_HOURS = 12
+
+# Sign-in throttling (v0.10). Read once at import, from the environment rather
+# than the detection policy: this is enforcement of Shadowfax's own front door,
+# and the policy governs detection. See throttle.py for the reasoning.
+LOGIN_THROTTLE = throttle.Settings.from_env()
+
+# Request size limits (v0.17.1): the whole body, the batch, and each field. Read
+# from the environment like the throttle; see limits.py.
+LIMITS = limits.Limits.from_env()
+
+# Single-use tickets for the live stream (v0.17.1), so a session token never
+# has to appear in a URL. See tickets.py.
+STREAM_TICKETS = tickets.TicketBook()
+# How often an idle stream sends a keepalive -- and re-checks that the session
+# which opened it is still signed in.
+STREAM_KEEPALIVE_SECONDS = 15.0
+
+# Per-credential ingest budget (v0.20), and the actor its refusals are recorded
+# under. See ratelimit.py.
+INGEST_LIMITER = ratelimit.RateLimiter.from_env(LIMITS.max_events_per_request)
+INGEST_ACTOR_ID = "shadowfax-ingest"
+INGEST_THROTTLED = "ingest_throttled"
+
+# Event types that may only arrive through the endpoint that validates them
+# (v0.18), mapped to that endpoint for the refusal message.
+RESERVED_EVENT_TYPES = {
+    envelope.EVENT_TYPE: "POST /findings",
+    manifest.EVENT_TYPE: "POST /agents/{agent_id}/manifest",
+    # v0.20: written only by Shadowfax itself, so an ingest_flood alert always
+    # means its own limiter refused someone.
+    INGEST_THROTTLED: "nothing -- Shadowfax records these itself",
+    "alerts_retired": "nothing -- Shadowfax records these itself",
+}
+
+# Recorded sign-in attempts are operational state for the throttle, not
+# evidence, so they are pruned. The ledger keeps what matters.
+LOGIN_ATTEMPT_RETENTION_HOURS = 24
+
+# Self-monitoring (v0.10). Shadowfax has always been able to detect brute-force
+# authentication; from this version its own front door is one of the things it
+# watches. Failed sign-ins against the platform are ingested as ordinary events
+# under this actor, so the existing brute_force_auth detector fires on attacks
+# against Shadowfax itself with no special-casing anywhere in the engine.
+#
+# One actor, not one per attempted username: the username on a failed sign-in is
+# attacker-controlled, so keying actors on it would let anyone mint actors at
+# will -- or worse, post events into a real actor's timeline by "signing in" as
+# them, poisoning the evidence for an unrelated investigation. The attempted
+# name travels in metadata, where it is plainly untrusted data.
+# An actor with no alerts at all. `info` is in the ladder from v0.11 and weighs
+# nothing in the score -- see db.actor_risk_scores.
+EMPTY_RISK = {"score": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+
+SELF_ACTOR_ID = "shadowfax-auth"
+SELF_ACTOR_TYPE = "service_account"
+SELF_TARGET = "shadowfax_login"
+
+# The platform's own actors (v0.21). Only Shadowfax writes their timelines: an
+# ingest client posting a "password_reset ... reset_by: admin" event under
+# shadowfax-auth produced an entry indistinguishable from a real one.
+RESERVED_ACTORS = frozenset({SELF_ACTOR_ID, INGEST_ACTOR_ID})
+
+
+def _refuse_reserved_actor(actor_id: str) -> None:
+    if actor_id in RESERVED_ACTORS:
+        raise HTTPException(400, f"'{actor_id}' is one of Shadowfax's own actors; only "
+                                 f"Shadowfax writes its timeline")
+
+
+def _alerts_for(identity: dict[str, Any], alerts: list[dict[str, Any]]) -> Any:
+    """What an ingest response may say about alerts (v0.21). A service key is
+    for ingest only and gets 403 on GET /alerts -- but every ingest response
+    used to return all alerts for each actor it touched, messages included.
+    A key now learns how many, not what."""
+    if identity.get("kind") == "service":
+        return {"count": len(alerts)}
+    return alerts
+
+# Off only if explicitly disabled. The volume is bounded by the throttle itself:
+# a scope can log at most `max_failures` failures before it is locked out, so
+# the thing that stops the brute force is also what stops the audit trail from
+# becoming an unauthenticated write amplifier.
+SELF_MONITOR = os.environ.get("SHADOWFAX_SELF_MONITOR", "1").strip().lower() not in (
+    "0", "false", "no", "off")
+
+# Application startup
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Capture the running loop so bus.publish() can signal it from the sync
+    # threadpool where the mutating endpoints run.
+    bus.set_loop(asyncio.get_running_loop())
+    db.init_db()
+    with db.get_conn() as conn:
+        _bootstrap_admin(conn)
+        if db.get_policy(conn) is None:
+            db.set_policy(conn, DEFAULT_POLICY)
+            conn.commit()
+        if not db.get_all_events(conn):
+            _load_events(conn, SAMPLE_EVENTS)
+            conn.commit()
+        elif db.alert_row_count(conn) == 0:
+            # Events survived a restart or a schema migration but alerts did
+            # not (the pre-v0.3 alerts table is dropped on upgrade). Rebuild
+            # them: alerts are a pure function of events and the active policy.
+            _rescan_all(conn)
+            conn.commit()
+    yield
+
+
+def _bootstrap_admin(conn: sqlite3.Connection) -> None:
+    """Create the first admin account on a fresh database.
+
+    Username and password come from SHADOWFAX_ADMIN_USERNAME /
+    SHADOWFAX_ADMIN_PASSWORD. What happens when no password is given depends on
+    where Shadowfax is running:
+
+    * **From source** (`uvicorn app:app`): admin/admin, with a loud warning.
+      Convenient for development and tests, and it looks like what it is.
+    * **From the published image** (v0.17): the Dockerfile sets
+      SHADOWFAX_GENERATE_ADMIN_PASSWORD, and a random password is generated and
+      printed to the log once. An image anyone can `docker run` must not carry a
+      credential everyone already knows -- a security tool shipping admin/admin
+      is the finding it exists to raise.
+
+    An empty SHADOWFAX_ADMIN_PASSWORD counts as unset. `SHADOWFAX_ADMIN_PASSWORD=`
+    with nothing after it is a mistake, and honouring it literally would create
+    an admin whose password is the empty string.
+    """
+    if db.count_users(conn) > 0:
+        return
+    username = os.environ.get("SHADOWFAX_ADMIN_USERNAME") or "admin"
+    password = os.environ.get("SHADOWFAX_ADMIN_PASSWORD") or None
+    generate = os.environ.get("SHADOWFAX_GENERATE_ADMIN_PASSWORD", "") not in ("", "0", "false")
+
+    source = "environment"
+    if password is None:
+        if generate:
+            password = secrets.token_urlsafe(18)
+            source = "generated"
+        else:
+            password = "admin"
+            source = "default"
+
+    pw_hash, salt = auth.hash_password(password)
+    db.create_user(conn, username, pw_hash, salt, "admin")
+    conn.commit()
+
+    # The warning follows the password, not where it came from: docker-compose
+    # sets admin/admin explicitly for local use, and that deserves the same
+    # warning as falling back to it.
+    if source == "default" or password == "admin":
+        print(
+            "\n" + "=" * 72 + "\n"
+            f"  SHADOWFAX: created an admin account with a known password  ->  {username} / admin\n"
+            "  FOR LOCAL DEVELOPMENT ONLY. Set SHADOWFAX_ADMIN_USERNAME and\n"
+            "  SHADOWFAX_ADMIN_PASSWORD, and change this password, before exposing\n"
+            "  the API beyond your machine.\n"
+            + "=" * 72 + "\n"
+        )
+    elif source == "generated":
+        # Printed once, on the start that created the account, and never stored
+        # anywhere but as a PBKDF2 hash. Lose it and the fix is a fresh volume,
+        # or SHADOWFAX_ADMIN_PASSWORD on the first start.
+        print(
+            "\n" + "=" * 72 + "\n"
+            "  SHADOWFAX: created the first admin account with a generated password\n"
+            f"    username: {username}\n"
+            f"    password: {password}\n"
+            "  It is shown once, here. Sign in and choose your own (Change password\n"
+            "  in the dashboard, or `shadowfax passwd`), or set\n"
+            "  SHADOWFAX_ADMIN_PASSWORD on first start instead.\n"
+            + "=" * 72 + "\n"
+        )
+    else:
+        print(f"SHADOWFAX: created admin account '{username}' from the environment.")
+
+
+def _cors_origins() -> list[str]:
+    """Allowed dashboard origins. Override with SHADOWFAX_CORS_ORIGINS (a
+    comma-separated list). CORS is no longer open to all origins."""
+    raw = os.environ.get("SHADOWFAX_CORS_ORIGINS")
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+
+app = FastAPI(
+    title=APP_NAME,
+    version=VERSION,
+    lifespan=lifespan,
+)
+
+# Added before CORS so that CORS wraps it: a 413 the browser cannot read, for
+# want of an Access-Control-Allow-Origin header, would look like a network error.
+app.add_middleware(limits.BodySizeLimit, limit=lambda: LIMITS.max_body_bytes)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Request models
+
+_MAX = limits.FIELD_MAX_LENGTH
+
+
+class EventRequest(BaseModel):
+    # Bounded (v0.17.1): an identifier long enough to be storage is not an
+    # identifier. The whole body is capped before this ever parses.
+    timestamp: str = Field(max_length=_MAX["timestamp"])
+    actor_id: str = Field(min_length=1, max_length=_MAX["actor_id"])
+    actor_type: str = Field(min_length=1, max_length=_MAX["actor_type"])
+    task: str | None = Field(None, max_length=_MAX["task"])
+    event_type: str = Field(min_length=1, max_length=_MAX["event_type"])
+    target: str = Field(max_length=_MAX["target"])
+    metadata: dict[str, Any] = {}
+
+    @field_validator("timestamp")
+    @classmethod
+    def _timestamp_is_iso(cls, value: str) -> str:
+        # v0.21: one strict shape, stored as naive UTC. See timeutil.py for the
+        # two outages a loosely-parsed timestamp caused.
+        return timeutil.normalise(value)
+
+    @field_validator("metadata")
+    @classmethod
+    def _metadata_is_bounded(cls, value: dict[str, Any]) -> dict[str, Any]:
+        size = limits.metadata_size(value)
+        if size > LIMITS.max_metadata_bytes:
+            raise ValueError(f"metadata is {size:,} bytes; the limit is "
+                             f"{LIMITS.max_metadata_bytes:,} (SHADOWFAX_MAX_METADATA_BYTES)")
+        return value
+
+
+class AlertStateUpdate(BaseModel):
+    """Analyst state for an alert. Every field is optional; only those provided
+    are changed. Keyed on the stable alert id, so it survives a rescan.
+
+    `acknowledged_by` is not accepted from the client: it is set from the
+    authenticated session, so an acknowledgement always records who really made
+    it."""
+    acknowledged: bool | None = None
+    assigned_to: str | None = None
+    note: str | None = None
+
+
+class LoginRequest(BaseModel):
+    # Bounded (v0.21): the attempted username is stored with every failure, and
+    # this endpoint is unauthenticated -- a 2 MB username was 2 MB of disk per
+    # request, in a ledger that is never pruned.
+    username: str = Field(max_length=64)
+    password: str = Field(max_length=1024)
+    # v0.25: the second factor, for accounts that have it -- a code from the
+    # authenticator app, or one of the recovery codes.
+    totp_code: str | None = Field(default=None, max_length=16)
+    recovery_code: str | None = Field(default=None, max_length=32)
+
+
+class CreateUserRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    # Either a password the admin chose, or `generate: true` (v0.23), in which
+    # case Shadowfax picks one, returns it once, and the new user must change it.
+    password: str | None = Field(default=None, max_length=1024)
+    generate: bool = False
+    role: str = "analyst"
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(max_length=1024)
+    new_password: str = Field(max_length=1024)
+
+
+class UpdateUserRequest(BaseModel):
+    # v0.24: change a role, or switch an account off or back on. Either or both.
+    role: str | None = None
+    disabled: bool | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    # Either a password the admin chose, or none and `generate: true`, in which
+    # case Shadowfax picks one and returns it exactly once.
+    new_password: str | None = None
+    generate: bool = False
+
+
+class CreateApiKeyRequest(BaseModel):
+    label: str | None = None
+
+
+class SearchRequest(BaseModel):
+    query: str
+
+
+# Authentication dependencies
+
+def _identity(
+    authorization: str | None = Header(None),
+    x_api_key: str | None = Header(None),
+) -> dict[str, Any]:
+    """Resolve the caller from an `Authorization: Bearer <token>` session or an
+    `X-API-Key` service key. Raises 401 if neither identifies a live caller."""
+    with db.get_conn() as conn:
+        if x_api_key:
+            row = db.get_api_key(conn, auth.api_key_fingerprint(x_api_key))
+            if row:
+                db.touch_api_key(conn, row["id"])
+                conn.commit()
+                return {"kind": "service", "role": row["role"], "label": row["label"],
+                        "api_key_id": row["id"]}
+        if authorization and authorization.lower().startswith("bearer "):
+            token = authorization[7:].strip()
+            user = db.get_session_user(conn, auth.token_fingerprint(token))
+            if user:
+                return {"kind": "user", "id": user["id"],
+                        "username": user["username"], "role": user["role"],
+                        "must_change_password": user["must_change_password"],
+                        "session_fp": auth.token_fingerprint(token)}
+    raise HTTPException(status_code=401, detail="authentication required",
+                        headers={"WWW-Authenticate": "Bearer"})
+
+
+def require_session(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any]:
+    """A signed-in user, even one who must change their password first. Only
+    the endpoints that let them do that -- and see who they are, and sign out --
+    use this directly."""
+    if identity["kind"] != "user":
+        raise HTTPException(403, "a signed-in user is required for this action")
+    return identity
+
+
+def require_user(identity: dict[str, Any] = Depends(require_session)) -> dict[str, Any]:
+    # v0.19: after an admin reset, the password is one someone else has seen.
+    # Until the owner replaces it, the session can change it and nothing else --
+    # enforced here, on the server, so a client that skips the prompt gains
+    # nothing.
+    if identity.get("must_change_password"):
+        raise HTTPException(403, "password change required: an administrator reset this "
+                                 "password; choose your own with POST /auth/password")
+    return identity
+
+
+def require_role(minimum: str):
+    def dep(identity: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        if not auth.role_at_least(identity["role"], minimum):
+            raise HTTPException(403, f"this action requires the '{minimum}' role or higher")
+        return identity
+    return dep
+
+
+def allow_ingest(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any]:
+    """Ingestion is open to a service API key or to an analyst-or-higher user."""
+    if identity["kind"] == "service":
+        return identity
+    if identity.get("must_change_password"):
+        # v0.21: a session that must change its password could still ingest,
+        # because this dependency bypassed require_user. It can't now.
+        raise HTTPException(403, "password change required: choose your own with "
+                                 "POST /auth/password")
+    if auth.role_at_least(identity.get("role"), "analyst"):
+        return identity
+    raise HTTPException(403, "ingest requires a service API key or an analyst (or higher) user")
+
+
+# Internal helpers
+
+def _rescan_actor(conn: sqlite3.Connection, actor_id: str) -> list[dict[str, Any]]:
+    policy = db.get_policy(conn) or DEFAULT_POLICY
+    events = db.get_events_for_actor(conn, actor_id)
+    alerts = detectors.run_for_actor(events, policy)
+    db.replace_alerts_for_actor(conn, actor_id, alerts)
+    return alerts
+
+
+def _rescan_after_ingest(conn: sqlite3.Connection, actor_id: str,
+                         identity: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rescan after an ingest, recording any alert the new events retired (v0.21).
+
+    A policy change retiring alerts is the analyst's own doing; an ingest doing
+    so means new events changed what the engine concluded about events it had
+    already judged. That is written into the ledger under shadowfax-ingest and
+    raises history_rewritten, naming the credential, so it is never silent.
+    """
+    before = {r["id"]: (r["category"], r["severity"]) for r in conn.execute(
+        "SELECT id, category, severity FROM alerts WHERE actor_id = ?", (actor_id,))}
+    alerts = _rescan_actor(conn, actor_id)
+    after = {a["id"] for a in alerts}
+    retired = [{"id": i, "category": c, "severity": sv}
+               for i, (c, sv) in before.items() if i not in after]
+    if retired and SELF_MONITOR:
+        _, label = ratelimit.principal_of(identity)
+        db.insert_event(conn, {
+            "timestamp": _naive_utc_now().isoformat(),
+            "actor_id": INGEST_ACTOR_ID, "actor_type": SELF_ACTOR_TYPE,
+            "task": "platform_ingest", "event_type": "alerts_retired",
+            "target": actor_id,
+            "metadata": {"actor_id": actor_id, "principal": label, "retired": retired},
+        })
+        _rescan_actor(conn, INGEST_ACTOR_ID)
+    return alerts
+
+
+def _rescan_all(conn: sqlite3.Connection) -> None:
+    for actor_id, _ in db.distinct_actors(conn):
+        _rescan_actor(conn, actor_id)
+
+
+def _load_events(conn: sqlite3.Connection, events: list[dict[str, Any]]) -> None:
+    for e in events:
+        db.insert_event(conn, e)
+    _rescan_all(conn)
+
+
+# Self-monitoring: Shadowfax's own front door (v0.10)
+
+def _naive_utc_now() -> datetime:
+    """UTC, without a tzinfo, to match the event corpus.
+
+    Every timestamp in the event store is a naive ISO string, and the detectors
+    compare them directly. Mixing an aware timestamp in would not be a style
+    inconsistency, it would be a TypeError the first time a detector subtracted
+    one from the other -- so self-monitoring events are written in the same
+    shape as everything else.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+
+
+def _client_source(request: Request) -> str:
+    """The peer address this request arrived from.
+
+    `X-Forwarded-For` is deliberately ignored. It is set by the client, so
+    keying the throttle on it would let an attacker reset their own counter by
+    changing a header -- the control would belong to them, not to us. An
+    operator behind a proxy needs the proxy to present the real peer address;
+    that requirement is documented rather than quietly assumed away.
+    """
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", None) if client else None
+    return host or "unknown"
+
+
+def _record_auth_event(conn: sqlite3.Connection, event_type: str, username: str,
+                       source: str, at: datetime, **detail: Any) -> None:
+    """Write one front-door event into Shadowfax's own hash-chained log.
+
+    This is the point of the whole feature: an attack on the monitoring platform
+    lands in the same append-only ledger, raises alerts through the same
+    detectors and appears in the same dashboard as an attack on anything else
+    Shadowfax watches. There is no separate audit path to keep in sync, and no
+    privileged log a compromised admin could edit more quietly than the rest.
+
+    The attempted username is recorded as metadata, never as the actor id --
+    it is attacker-supplied text, and it is fenced as data accordingly.
+    """
+    if not SELF_MONITOR:
+        return
+    db.insert_event(conn, {
+        "timestamp": at.isoformat(),
+        "actor_id": SELF_ACTOR_ID,
+        "actor_type": SELF_ACTOR_TYPE,
+        "task": "platform_authentication",
+        "event_type": event_type,
+        "target": SELF_TARGET,
+        "metadata": {"attempted_username": username, "source": source, **detail},
+    })
+    _rescan_actor(conn, SELF_ACTOR_ID)
+    bus.publish({"type": "change", "reason": "auth", "actors": [SELF_ACTOR_ID]})
+
+
+def _charge_ingest(identity: dict[str, Any], cost: int, response: Response) -> None:
+    """Spend `cost` events from the caller's budget, or refuse the request whole
+    with 429 (v0.20). The first refusal of an episode is recorded as evidence."""
+    key, label = ratelimit.principal_of(identity)
+    decision = INGEST_LIMITER.spend(key, cost)
+    headers = {"X-RateLimit-Limit": str(INGEST_LIMITER.per_minute),
+               "X-RateLimit-Remaining": str(decision.remaining)}
+    if decision.allowed:
+        response.headers.update(headers)
+        return
+    if decision.new_episode and SELF_MONITOR:
+        with db.get_conn() as conn:
+            db.insert_event(conn, {
+                "timestamp": _naive_utc_now().isoformat(),
+                "actor_id": INGEST_ACTOR_ID,
+                "actor_type": SELF_ACTOR_TYPE,
+                "task": "platform_ingest",
+                "event_type": INGEST_THROTTLED,
+                "target": label,
+                "metadata": {"principal": label, "requested": cost,
+                             "budget_per_minute": INGEST_LIMITER.per_minute},
+            })
+            _rescan_actor(conn, INGEST_ACTOR_ID)
+            conn.commit()
+        bus.publish({"type": "change", "reason": "ingest_throttled", "actors": [INGEST_ACTOR_ID]})
+    raise HTTPException(
+        429, f"{label} is over its ingest budget of {INGEST_LIMITER.per_minute:,} events "
+             f"per minute; retry in {decision.retry_after_seconds}s "
+             f"(SHADOWFAX_INGEST_EVENTS_PER_MINUTE)",
+        headers={**headers, "Retry-After": str(decision.retry_after_seconds)})
+
+
+# Event endpoints
+
+@app.post("/events")
+def ingest_events(events: list[EventRequest], response: Response,
+                  identity: dict = Depends(allow_ingest)):
+    """Ingest one or more events and refresh alerts for the affected actors."""
+    if not events:
+        raise HTTPException(400, "no events provided")
+    reserved = sorted({ev.event_type for ev in events} & set(RESERVED_EVENT_TYPES))
+    if reserved:
+        # These event types carry a claim that a dedicated endpoint validates --
+        # a finding's category and emitter, a manifest's tool list. Accepting
+        # them raw skipped that validation: until v0.18 a raw "finding" event
+        # could raise a critical canary_triggered alert "reported by shadowfax"
+        # against anyone. Each now has exactly one way in.
+        raise HTTPException(400, f"event_type {reserved[0]!r} cannot be posted as a raw "
+                                 f"event; use {RESERVED_EVENT_TYPES[reserved[0]]}")
+    for ev in events:
+        _refuse_reserved_actor(ev.actor_id)
+    if len(events) > LIMITS.max_events_per_request:
+        # Each affected actor is rescanned, so the batch bounds the work one
+        # request can cause. 413 with the number, so a client can split.
+        raise HTTPException(413, f"{len(events):,} events in one request; the limit is "
+                                 f"{LIMITS.max_events_per_request:,} "
+                                 f"(SHADOWFAX_MAX_EVENTS_PER_REQUEST) -- split the batch")
+    _charge_ingest(identity, len(events), response)
+    with db.get_conn() as conn:
+        affected_actors: set[str] = set()
+        for ev in events:
+            db.insert_event(conn, ev.model_dump())
+            affected_actors.add(ev.actor_id)
+        new_alerts: list[dict[str, Any]] = []
+        for actor_id in affected_actors:
+            new_alerts.extend(_rescan_after_ingest(conn, actor_id, identity))
+        conn.commit()
+    bus.publish({"type": "change", "reason": "ingest", "actors": list(affected_actors)})
+    return {"ingested": len(events), "affected_actors": list(affected_actors),
+            "alerts": _alerts_for(identity, new_alerts)}
+
+
+@app.get("/findings")
+def export_findings(actor_id: str | None = None,
+                    identity: dict = Depends(require_role("viewer"))):
+    """Export Shadowfax's findings as envelopes (v0.15). See
+    `findings-envelope.md`.
+
+    v0.11 made Shadowfax a consumer of the shared format; this makes it a
+    producer, so the portfolio's other tools can read Shadowfax the way
+    Shadowfax reads them. Read-only.
+
+    One envelope per actor, because the format describes a single subject.
+    Without `actor_id` the response is a JSON array of them -- the array is
+    Shadowfax's own convenience and is **not** part of the format; each element
+    is a conformant envelope, and a consumer that wants one takes one.
+
+    Worth knowing: Shadowfax's own ingest will refuse these. A finding's key
+    becomes an alert category and `POST /findings` rejects any key that
+    collides with a native detector category -- which is every key in here.
+    That is not an oversight. It means Shadowfax cannot be fed its own output,
+    and the feedback loop is closed by construction rather than by a rule
+    somebody has to remember.
+    """
+    with db.get_conn() as conn:
+        if actor_id is not None:
+            if not db.get_events_for_actor(conn, actor_id):
+                raise HTTPException(404, f"no events for actor '{actor_id}'")
+            actors = [actor_id]
+        else:
+            actors = [a for a, _ in db.distinct_actors(conn)]
+
+        envelopes = []
+        for aid in actors:
+            alerts = db.query_alerts(conn, actor_id=aid, limit=1000)
+            events = db.get_events_for_actor(conn, aid)
+            envelopes.append(envelope.from_alerts(aid, alerts, events, VERSION))
+
+    return envelopes[0] if actor_id is not None else envelopes
+
+
+@app.post("/findings")
+def ingest_findings(doc: dict[str, Any], response: Response,
+                    identity: dict = Depends(allow_ingest)):
+    """Ingest a findings envelope (v0.11). See `findings-envelope.md`.
+
+    Shadowfax knows nothing about the emitter. Anything that writes the envelope
+    is ingestible, which is what makes
+    `maltriage sample.exe --envelope | shadowfax ingest` a pipe rather than an
+    integration.
+
+    Findings are stored as ordinary events and turned back into alerts by a
+    detector, so they obey the same invariant as everything else: alerts are a
+    pure function of (an actor's events, policy), recomputed on every rescan.
+    Writing alert rows directly would have been fewer lines and would have left
+    rows that quietly disappeared at the next rescan of that actor.
+    """
+    findings = doc.get("findings")
+    if isinstance(findings, list) and len(findings) > LIMITS.max_events_per_request:
+        raise HTTPException(413, f"{len(findings):,} findings in one envelope; the limit is "
+                                 f"{LIMITS.max_events_per_request:,} "
+                                 f"(SHADOWFAX_MAX_EVENTS_PER_REQUEST) -- split the envelope")
+    _charge_ingest(identity, len(findings) if isinstance(findings, list) else 1, response)
+    try:
+        envelope.validate(doc, detectors.NATIVE_CATEGORIES,
+                          reserved_tools=frozenset({detectors.TOOL_NAME}))
+    except envelope.EnvelopeError as err:
+        # Reject the whole document rather than keeping the findings we happen
+        # to like. A partially-accepted envelope hides an emitter's bug, and
+        # whoever is writing the next emitter deserves to be told exactly which
+        # field is wrong.
+        raise HTTPException(400, f"invalid findings envelope — {err.describe()}")
+
+    tool = doc["source"]["tool"]
+    actor_id = envelope.actor_for(doc["subject"])
+    _refuse_reserved_actor(actor_id)
+
+    with db.get_conn() as conn:
+        actor_types = dict(db.distinct_actors(conn))
+        events = envelope.to_events(doc, actor_types)
+
+        already = db.known_finding_ids(
+            conn, tool, [e["metadata"]["finding"]["id"] for e in events], actor_id)
+        fresh = [e for e in events if e["metadata"]["finding"]["id"] not in already]
+
+        for event in fresh:
+            db.insert_event(conn, event)
+        alerts = _rescan_actor(conn, actor_id) if fresh else []
+        conn.commit()
+
+    if fresh:
+        bus.publish({"type": "change", "reason": "findings", "actors": [actor_id]})
+
+    return {
+        "accepted": len(fresh),
+        "skipped": len(already),
+        "actor_id": actor_id,
+        "envelope": envelope.summarise(doc),
+        "alerts": _alerts_for(identity, alerts),
+    }
+
+
+@app.get("/events")
+def list_events(actor_id: str | None = None, identity: dict = Depends(require_role("viewer"))):
+    with db.get_conn() as conn:
+        if actor_id:
+            return db.get_events_for_actor(conn, actor_id)
+        return db.get_all_events(conn)
+
+
+# Alert endpoints
+
+@app.get("/alerts")
+def list_alerts(
+    severity: list[str] | None = Query(None),
+    actor_type: list[str] | None = Query(None),
+    actor_id: str | None = None,
+    category: list[str] | None = Query(None),
+    search: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 500,
+    identity: dict = Depends(require_role("viewer")),
+):
+    with db.get_conn() as conn:
+        return db.query_alerts(conn, severity, actor_type, actor_id, category,
+                               search, since, until, limit)
+
+
+@app.patch("/alerts/{alert_id}/state")
+def update_alert_state(alert_id: str, update: AlertStateUpdate,
+                       identity: dict = Depends(require_role("analyst"))):
+    """Acknowledge, assign or annotate a single alert.
+
+    State attaches to the alert's deterministic id and lives in its own table,
+    so it persists across the rescans that rebuild the alert on every new event
+    for that actor. `acknowledged_by` is taken from the signed-in analyst, not
+    from the request body.
+    """
+    with db.get_conn() as conn:
+        if db.get_alert(conn, alert_id) is None:
+            raise HTTPException(404, f"no alert with id '{alert_id}'")
+        state = db.set_alert_state(
+            conn,
+            alert_id,
+            acknowledged=update.acknowledged,
+            acknowledged_by=identity["username"] if update.acknowledged else None,
+            assigned_to=update.assigned_to,
+            note=update.note,
+        )
+        conn.commit()
+    bus.publish({"type": "change", "reason": "alert_state", "alert_id": alert_id})
+    return state
+
+
+@app.get("/alerts/{alert_id}/explain")
+def explain_alert(alert_id: str, identity: dict = Depends(require_role("viewer"))):
+    """A natural-language explanation of one alert, for an analyst.
+
+    Read-only: it assembles an evidence brief from the stored alert and its
+    actor's events and asks the investigation assistant to describe it. It
+    creates and changes nothing -- the assistant explains, it never decides.
+    With no model configured the narrative is generated deterministically from
+    the same brief.
+    """
+    with db.get_conn() as conn:
+        alert = db.get_alert(conn, alert_id)
+        if alert is None:
+            raise HTTPException(404, f"no alert with id '{alert_id}'")
+        events = db.get_events_for_actor(conn, alert["actor_id"])
+    brief = assistant.build_alert_brief(alert, events)
+    return assistant.explain(brief)
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness, for a container runtime. Unauthenticated by necessity and
+    deliberately uninteresting: a health check that needed a credential would be
+    useless to an orchestrator, and one that reported internals would be a free
+    reconnaissance endpoint. It says the process is up and which version is
+    running -- nothing about the data, the users or the configuration."""
+    return {"status": "ok", "service": APP_NAME, "version": VERSION}
+
+
+@app.get("/stats")
+def stats(identity: dict = Depends(require_role("viewer"))):
+    with db.get_conn() as conn:
+        return {
+            "alert_counts": db.alert_counts(conn),
+            "actor_count": len(db.distinct_actors(conn)),
+            "event_count": len(db.get_all_events(conn)),
+        }
+
+
+# Live stream
+
+@app.post("/stream/ticket")
+def stream_ticket(authorization: str | None = Header(None),
+                  identity: dict = Depends(require_user)):
+    """A single-use, 30-second ticket for opening the live stream (v0.17.1).
+
+    Asked for with the bearer token in a header, where it belongs. The ticket is
+    what then goes in the stream's URL -- because the browser's EventSource
+    cannot set headers -- and a URL is what access logs record. A logged ticket
+    has already been spent by the connection that logged it. See tickets.py.
+    """
+    token = authorization[7:].strip()  # require_user guarantees a bearer session
+    ticket = STREAM_TICKETS.issue(identity["id"], auth.token_fingerprint(token))
+    return {"ticket": ticket, "expires_in": int(tickets.TTL_SECONDS)}
+
+
+def _session_alive(session_fp: str) -> bool:
+    # A must-change session is not a live one for streaming (v0.21): the bearer
+    # path used to check only that the session existed.
+    with db.get_conn() as conn:
+        user = db.get_session_user(conn, session_fp)
+    return user is not None and not user["must_change_password"]
+
+
+@app.get("/stream")
+async def stream(ticket: str | None = None, token: str | None = None,
+                 authorization: str | None = Header(None)):
+    """Server-Sent Events: a `change` event is pushed whenever alerts change,
+    replacing the dashboard's poll loop.
+
+    A browser opens it with `?ticket=` from `POST /stream/ticket`. Other clients
+    may send `Authorization: Bearer` instead. Any signed-in user may stream;
+    service API keys may not.
+
+    `?token=` -- the session token itself in the URL -- was how the dashboard
+    connected until v0.17.1. It is refused outright, with a message saying
+    what to do instead, rather than kept working "for compatibility": every
+    request that still used it would be another session token in a log.
+    """
+    if token is not None:
+        raise HTTPException(401, "session tokens are not accepted in URLs, where "
+                                 "access logs record them; get a single-use ticket "
+                                 "from POST /stream/ticket and pass ?ticket=")
+    session_fp = None
+    if ticket is not None:
+        grant = STREAM_TICKETS.redeem(ticket)
+        if grant is not None:
+            session_fp = grant.session_fp
+    elif authorization and authorization.lower().startswith("bearer "):
+        session_fp = auth.token_fingerprint(authorization[7:].strip())
+    if session_fp is None or not await asyncio.to_thread(_session_alive, session_fp):
+        raise HTTPException(status_code=401, detail="authentication required")
+
+    queue = bus.subscribe()
+
+    async def gen():
+        try:
+            # An immediate hello confirms the connection is open.
+            yield "event: hello\ndata: {}\n\n"
+            while True:
+                try:
+                    message = await asyncio.wait_for(queue.get(),
+                                                     timeout=STREAM_KEEPALIVE_SECONDS)
+                    yield f"event: change\ndata: {json.dumps(message)}\n\n"
+                except asyncio.TimeoutError:
+                    # The stream outlives the moment it was authorised, so it
+                    # re-checks: sign out (or let the session expire) and every
+                    # stream that session opened ends at its next keepalive.
+                    if not await asyncio.to_thread(_session_alive, session_fp):
+                        yield "event: goodbye\ndata: {\"reason\": \"session ended\"}\n\n"
+                        return
+                    # A comment line keeps proxies and the browser from timing
+                    # the idle connection out.
+                    yield ": keepalive\n\n"
+        finally:
+            bus.unsubscribe(queue)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# Actor endpoints
+
+@app.get("/actors")
+def list_actors(identity: dict = Depends(require_role("viewer"))):
+    with db.get_conn() as conn:
+        actors = db.distinct_actors(conn)
+        risk = db.actor_risk_scores(conn)
+        out = []
+        for actor_id, actor_type in actors:
+            events = db.get_events_for_actor(conn, actor_id)
+            r = risk.get(actor_id, EMPTY_RISK)
+            out.append({
+                "actor_id": actor_id,
+                "actor_type": actor_type,
+                "event_count": len(events),
+                "risk_score": r["score"],
+                "critical": r["critical"], "high": r["high"], "medium": r["medium"],
+                "low": r["low"], "info": r["info"],
+            })
+        out.sort(key=lambda a: a["risk_score"], reverse=True)
+        return out
+
+
+@app.get("/actors/{actor_id}")
+def actor_detail(actor_id: str, identity: dict = Depends(require_role("viewer"))):
+    with db.get_conn() as conn:
+        events = db.get_events_for_actor(conn, actor_id)
+        if not events:
+            raise HTTPException(404, f"no events for actor '{actor_id}'")
+        alerts = db.query_alerts(conn, actor_id=actor_id, limit=1000)
+        risk = db.actor_risk_scores(conn).get(actor_id, EMPTY_RISK)
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        return {"actor_id": actor_id, "events": events, "alerts": alerts, "risk": risk,
+                "permissions": permissions.describe(actor_id, policy),
+                "manifest": manifest.describe(events, policy),
+                "subject_report": subjects.report(actor_id, events, alerts)}
+
+
+@app.get("/subjects")
+def list_subjects(identity: dict = Depends(require_role("viewer"))):
+    """Everything other tools have reported findings about (v0.26), worst first,
+    then most recently reported."""
+    with db.get_conn() as conn:
+        out = []
+        for actor_id in db.actors_with_findings(conn):
+            s = subjects.summary(actor_id, db.get_events_for_actor(conn, actor_id),
+                                 db.query_alerts(conn, actor_id=actor_id, limit=5000))
+            if s:
+                out.append(s)
+    out.sort(key=lambda s: s["last_reported"], reverse=True)
+    out.sort(key=lambda s: subjects.SEVERITY_RANK.get(s["worst"], 99))
+    return out
+
+
+@app.get("/subjects/{actor_id:path}")
+def subject_report(actor_id: str, identity: dict = Depends(require_role("viewer"))):
+    """One subject's findings, grouped by the tool that reported them (v0.26).
+    `actor_id` is the subject's Shadowfax id -- `file:sha256:...`,
+    `host:10.0.0.9`, or an actor's own id -- and may contain slashes."""
+    with db.get_conn() as conn:
+        r = subjects.report(actor_id, db.get_events_for_actor(conn, actor_id),
+                            db.query_alerts(conn, actor_id=actor_id, limit=5000))
+    if r is None:
+        raise HTTPException(404, f"no findings have been reported about '{actor_id}'")
+    return r
+
+
+@app.post("/agents/{agent_id}/manifest")
+def post_manifest(agent_id: str, doc: dict[str, Any], response: Response,
+                  identity: dict = Depends(allow_ingest)):
+    """Record what an agent is configured with -- its tools and MCP servers --
+    so Shadowfax can compare it with what the agent is allowed (v0.18).
+
+    Posted by whatever starts the agent, ideally every time it does. Several
+    shapes are accepted (see manifest.py); anything unrecognised rejects the
+    whole manifest, because silently dropping a tool would report it absent.
+    An unchanged manifest is acknowledged and not stored again.
+    """
+    if not agent_id.strip() or len(agent_id) > limits.FIELD_MAX_LENGTH["actor_id"]:
+        raise HTTPException(422, "agent id must be 1-256 characters")
+    _refuse_reserved_actor(agent_id)
+    _charge_ingest(identity, 1, response)
+    try:
+        parsed = manifest.parse(doc)
+    except manifest.ManifestError as err:
+        raise HTTPException(400, f"invalid manifest — {err.describe()}")
+
+    with db.get_conn() as conn:
+        actor_type = dict(db.distinct_actors(conn)).get(agent_id, permissions.GOVERNED_ACTOR_TYPE)
+        history = db.get_events_for_actor(conn, agent_id)
+        previous = [e for e in history if e["event_type"] == manifest.EVENT_TYPE]
+        latest_digest = ((previous[-1].get("metadata") or {}).get("digest")
+                         if previous else None)
+        changed = latest_digest != parsed.digest
+        alerts: list[dict[str, Any]] = []
+        if changed:
+            db.insert_event(conn, manifest.to_event(parsed, agent_id, actor_type))
+            alerts = _rescan_after_ingest(conn, agent_id, identity)
+        conn.commit()
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        resolution = permissions.resolve(agent_id, policy)
+
+    if changed:
+        bus.publish({"type": "change", "reason": "manifest", "actors": [agent_id]})
+    assessed = manifest.assess(parsed.tools, resolution.profile)
+    return {
+        "agent_id": agent_id,
+        "changed": changed,
+        "digest": parsed.digest,
+        "tools": len(parsed.tools),
+        "mcp_servers": list(parsed.servers),
+        "profile": resolution.name,
+        "excess": [t for t in assessed if t["severity"]],
+        "alerts": _alerts_for(identity, [a for a in alerts if a["category"] in
+                   ("excess_capability", "capability_drift", "undeclared_agent")]),
+    }
+
+
+@app.get("/actors/{actor_id}/permissions")
+def actor_permissions(
+    actor_id: str,
+    tool: str | None = Query(None, description="a tool the actor might call"),
+    target: str | None = Query(None, description="a target the actor might touch"),
+    actor_type: str = Query(permissions.GOVERNED_ACTOR_TYPE),
+    identity: dict = Depends(require_role("viewer")),
+):
+    """The permission profile that governs an actor, and -- given a tool, a
+    target, or both -- whether that action would be reported (v0.16).
+
+    This is the detector's own judgement asked in advance, for writing a profile
+    or for an agent runtime that wants to refuse before it acts. It deliberately
+    does not 404 for an actor with no events: the most useful time to ask what a
+    new agent may do is before it has done anything.
+    """
+    with db.get_conn() as conn:
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+    out = {"actor_id": actor_id, **permissions.describe(actor_id, policy)}
+    if tool is not None or target is not None:
+        out["check"] = {"tool": tool, "target": target,
+                        **permissions.check(actor_id, policy, tool, target, actor_type)}
+    return out
+
+
+# Incident endpoints (correlation)
+
+@app.get("/incidents")
+def list_incidents(identity: dict = Depends(require_role("viewer"))):
+    """Alerts correlated into incidents: a burst of one actor's alerts within
+    the policy's correlation window. Computed on read from stored alerts."""
+    with db.get_conn() as conn:
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        alerts = db.query_alerts(conn, limit=100_000)
+    window = policy.get("correlation_window_minutes", 30)
+    chain_min = policy.get("attack_chain_min_stages", 3)
+    return correlate.correlate(alerts, window, chain_min)
+
+
+@app.get("/incidents/{incident_id}")
+def incident_detail(incident_id: str, identity: dict = Depends(require_role("viewer"))):
+    with db.get_conn() as conn:
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        alerts = db.query_alerts(conn, limit=100_000)
+    window = policy.get("correlation_window_minutes", 30)
+    chain_min = policy.get("attack_chain_min_stages", 3)
+    incidents = correlate.correlate(alerts, window, chain_min)
+    incident = next((i for i in incidents if i["id"] == incident_id), None)
+    if incident is None:
+        raise HTTPException(404, f"no incident with id '{incident_id}'")
+    by_id = {a["id"]: a for a in alerts}
+    members = [by_id[aid] for aid in incident["alert_ids"] if aid in by_id]
+    return {**incident, "alerts": members, "report": correlate.render_report(incident, by_id)}
+
+
+@app.get("/incidents/{incident_id}/explain")
+def explain_incident(incident_id: str, identity: dict = Depends(require_role("viewer"))):
+    """A natural-language threat summary of one correlated incident.
+
+    Read-only, like /alerts/{id}/explain: correlation and detection have already
+    decided the facts; the assistant only turns the incident's evidence brief
+    into prose. Falls back to a deterministic narrative when no model is set.
+    """
+    with db.get_conn() as conn:
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        alerts = db.query_alerts(conn, limit=100_000)
+    window = policy.get("correlation_window_minutes", 30)
+    chain_min = policy.get("attack_chain_min_stages", 3)
+    incidents = correlate.correlate(alerts, window, chain_min)
+    incident = next((i for i in incidents if i["id"] == incident_id), None)
+    if incident is None:
+        raise HTTPException(404, f"no incident with id '{incident_id}'")
+    by_id = {a["id"]: a for a in alerts}
+    members = [by_id[aid] for aid in incident["alert_ids"] if aid in by_id]
+    brief = assistant.build_incident_brief(incident, members)
+    return assistant.explain(brief)
+
+
+@app.post("/search")
+def nl_search(req: SearchRequest, identity: dict = Depends(require_role("viewer"))):
+    """Natural-language alert search (v0.5.2). The assistant *translates* the
+    plain-English query into a Shadowfax alert filter; every proposed value is
+    validated against known enums, then the deterministic `query_alerts` runs
+    it. Read-only: it creates nothing and decides nothing -- it only chooses
+    which existing alerts to show, and returns how it read the query so the
+    analyst can see and adjust it."""
+    with db.get_conn() as conn:
+        categories = db.distinct_alert_categories(conn)
+        translated = assistant.translate_query(req.query, categories)
+        f = translated["filters"]
+        alerts = db.query_alerts(
+            conn,
+            severity=f.get("severity"),
+            actor_type=f.get("actor_type"),
+            actor_id=f.get("actor_id"),
+            category=f.get("category"),
+            search=f.get("search"),
+            since=f.get("since"),
+            until=f.get("until"),
+        )
+    return {**translated, "count": len(alerts), "alerts": alerts}
+
+
+@app.get("/digest")
+def triage_digest(limit: int = digest_mod.DEFAULT_LIMIT, narrative: bool = True,
+                  identity: dict = Depends(require_role("viewer"))):
+    """The triage queue (v0.8): the open incidents that most need an analyst.
+
+    Read-only. The ranking is computed deterministically by `digest.py` from
+    facts already on record -- severity, completed attack chains, unacknowledged
+    volume, age -- and every item carries the reasons behind its position. The
+    assistant may add a covering narrative, but it cannot re-order the queue and
+    nothing here acknowledges, closes or acts on anything: an incident leaves the
+    digest only when a human acknowledges its alerts.
+    """
+    with db.get_conn() as conn:
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+        alerts = db.query_alerts(conn, limit=100_000)
+    window = policy.get("correlation_window_minutes", 30)
+    chain_min = policy.get("attack_chain_min_stages", 3)
+    incidents = correlate.correlate(alerts, window, chain_min)
+    by_id = {a["id"]: a for a in alerts}
+    result = digest_mod.build_digest(incidents, by_id, limit=limit)
+    result["text"] = digest_mod.render_digest(result)
+    if narrative:
+        explained = assistant.explain(assistant.build_digest_brief(result))
+        result["narrative"] = explained.get("narrative")
+        result["source"] = explained.get("source")
+    return result
+
+
+@app.get("/ledger/verify")
+def verify_ledger(identity: dict = Depends(require_role("viewer"))):
+    """Verify the tamper-evident event ledger (v0.9).
+
+    Recomputes the hash chain over every stored event in insertion order and
+    compares it with the stored links and the recorded head. Reports the *first*
+    position where they diverge, so a break is located rather than merely
+    announced. Read-only, and safe to run on a schedule.
+    """
+    with db.get_conn() as conn:
+        entries = db.ledger_entries(conn)
+        head = db.get_ledger_head(conn)
+    report = ledger.verify_chain(entries, head["entry_count"], head["head_hash"])
+    report["summary"] = ledger.describe(report)
+    report["recorded_head"] = head
+    return report
+
+
+@app.get("/ledger/head")
+def ledger_head(identity: dict = Depends(require_role("viewer"))):
+    """The ledger's current head hash and entry count.
+
+    Export this somewhere outside the database's own trust boundary -- a log
+    server, a signed commit, a colleague's inbox. Anchoring the head off-box is
+    what turns "we can tell it changed" into something a third party can check.
+    """
+    with db.get_conn() as conn:
+        return db.get_ledger_head(conn)
+
+
+@app.get("/assistant/status")
+def assistant_status(identity: dict = Depends(require_role("viewer"))):
+    """Whether explanations come from a model or the deterministic fallback, so
+    the dashboard can label them honestly."""
+    return assistant.status()
+
+
+# Policy endpoints
+
+@app.get("/attack")
+def attack_registry(identity: dict = Depends(require_role("viewer"))):
+    """The shared MITRE ATT&CK technique registry (id -> name, tactic, url).
+    Alerts reference these ids; this is where the metadata lives."""
+    return attack.registry()
+
+
+@app.get("/policy")
+def get_policy(identity: dict = Depends(require_role("viewer"))):
+    with db.get_conn() as conn:
+        return db.get_policy(conn) or DEFAULT_POLICY
+
+
+@app.put("/policy")
+def update_policy(policy: dict[str, Any], identity: dict = Depends(require_role("analyst"))):
+    # Refused before it is stored, not after: a malformed permission profile
+    # does not fail loudly when it runs, it quietly grants more than it says.
+    problems = permissions.validate(policy)
+    if problems:
+        raise HTTPException(400, {"message": "policy refused", "problems": problems})
+    with db.get_conn() as conn:
+        db.set_policy(conn, policy)
+        _rescan_all(conn)
+        conn.commit()
+    bus.publish({"type": "change", "reason": "policy"})
+    return {"status": "policy updated, all actors rescanned"}
+
+
+# Administrative endpoints
+
+@app.post("/reset")
+def reset(identity: dict = Depends(require_role("admin"))):
+    with db.get_conn() as conn:
+        db.wipe_all(conn)
+        db.set_policy(conn, DEFAULT_POLICY)
+        _load_events(conn, SAMPLE_EVENTS)
+        conn.commit()
+    bus.publish({"type": "change", "reason": "reset"})
+    return {"status": "reset to bundled sample data"}
+
+
+# Two-factor sign-in (v0.25)
+
+def _second_factor(conn: sqlite3.Connection, user: dict, req: "LoginRequest", reserved: int,
+                   source: str, now: datetime) -> tuple[bool, dict, str]:
+    """Check the second factor once the password is known to be right.
+
+    With no code at all the reply asks for one and the reserved failure is
+    withdrawn -- the password was right, nothing has failed yet. A wrong code
+    is an ordinary failure: throttled, counted towards lockout, recorded. The
+    check runs under the write lock and re-reads the last accepted step, so
+    two requests racing with the same code cannot both get in.
+    """
+    if not req.totp_code and not req.recovery_code:
+        db.withdraw_login_attempt(conn, reserved)
+        conn.commit()
+        raise HTTPException(401, {"message": "enter the code from your authenticator app",
+                                  "mfa_required": True})
+    conn.execute("BEGIN IMMEDIATE")
+    fresh = db.get_user_by_username(conn, user["username"])
+    if req.recovery_code:
+        left = db.use_recovery_code(conn, fresh["id"], totp.recovery_fingerprint(req.recovery_code))
+        conn.commit()
+        if left is None:
+            return False, {"context": "recovery_code"}, "invalid recovery code"
+        _record_auth_event(conn, "recovery_code_used", user["username"], source, now,
+                           remaining=left)
+        return True, {}, ""
+    step = totp.verify(fresh["totp_secret"], req.totp_code, last_step=fresh["totp_last_step"])
+    if step is None:
+        conn.commit()
+        return False, {"context": "totp"}, "invalid code"
+    db.set_totp_last_step(conn, fresh["id"], step)
+    conn.commit()
+    return True, {}, ""
+
+
+# Authentication endpoints
+
+@app.post("/auth/login")
+def login(req: LoginRequest, request: Request):
+    """Sign in, subject to backoff and lockout (v0.10).
+
+    The order below is deliberate. The throttle is consulted *before* the
+    username is looked up, and a failure is recorded whether or not the account
+    exists, so a caller cannot tell real usernames from imaginary ones by how
+    the endpoint behaves. When there is no such user, `auth.dummy_verify` burns
+    the same PBKDF2 work a real check would, closing the timing side channel
+    that a straight early return leaves open.
+
+    Every refusal is recorded, and the security-relevant ones are written into
+    Shadowfax's own hash-chained ledger -- see `_record_auth_event`.
+    """
+    source = _client_source(request)
+    now = _naive_utc_now()
+    window_start = now - timedelta(minutes=LOGIN_THROTTLE.window_minutes)
+
+    with db.get_conn() as conn:
+        # Read the counts and reserve this attempt under one write lock (v0.21).
+        # The check used to read failures, then spend ~0.1s on PBKDF2, then
+        # write: forty concurrent guesses all read "0 failures" and all got a
+        # real password check against a policy of five. Now each attempt is
+        # counted -- as a failure, until proven otherwise -- before the slow
+        # part, so concurrent guesses see each other.
+        conn.execute("BEGIN IMMEDIATE")
+        failures = db.recent_login_failures(conn, req.username, source, window_start)
+        # Two scopes: this username from this source, and this source across
+        # every username it has tried. The second is what stops spraying, where
+        # no single scope ever reaches its own threshold.
+        source_failures = db.recent_source_failures(conn, source, window_start)
+        decision = throttle.strictest(
+            throttle.evaluate(failures, now, LOGIN_THROTTLE),
+            throttle.evaluate(source_failures, now, LOGIN_THROTTLE.for_source()),
+        )
+
+        if not decision.allowed:
+            # Refused before any credential work: a locked-out caller costs us
+            # a cheap index read, not a 200,000-round key derivation. That is
+            # the difference between a throttle and a self-inflicted DoS, and
+            # it is also why the refusal is not recorded as another row --
+            # a flood must not be able to grow our own tables.
+            conn.commit()
+            raise HTTPException(
+                429, decision.message(),
+                headers={"Retry-After": str(decision.retry_after_seconds)},
+            )
+
+        reserved = db.record_login_attempt(conn, req.username, source, "failure", now)
+        conn.commit()
+
+        user = db.get_user_by_username(conn, req.username)
+        if user is None:
+            ok = auth.dummy_verify(req.password)
+        else:
+            ok = auth.verify_password(req.password, user["salt"], user["password_hash"])
+        failure_context: dict[str, Any] = {}
+        refusal = "invalid username or password"
+
+        if ok and user["disabled"]:
+            # The right password for a switched-off account (v0.24). Saying so
+            # tells nothing to anyone who does not already hold the password,
+            # and the owner deserves a better answer than "wrong password".
+            # The reserved failure stands, so it is throttled like any other
+            # refusal, and the attempt is evidence: a disabled account being
+            # used is often the reason it was disabled.
+            _record_auth_event(conn, "auth_disabled_account", req.username, source, now)
+            conn.commit()
+            raise HTTPException(403, "this account is disabled; ask an administrator")
+
+        if ok and user["totp_enabled"]:
+            ok, failure_context, refusal = _second_factor(conn, user, req, reserved, source, now)
+
+        if not ok:
+            _record_auth_event(conn, "auth_failure", req.username, source, now,
+                               **failure_context)
+
+            # Re-evaluate including the failure just recorded, so the lockout
+            # event is emitted exactly once -- at the attempt that trips it,
+            # not on every refused attempt afterwards.
+            after = throttle.strictest(
+                throttle.evaluate(failures + [now], now, LOGIN_THROTTLE),
+                throttle.evaluate(source_failures + [now], now,
+                                  LOGIN_THROTTLE.for_source()),
+            )
+            if after.locked:
+                _record_auth_event(conn, "auth_lockout", req.username, source, now,
+                                   locked_for_seconds=after.retry_after_seconds,
+                                   failures=after.failures)
+                # Rare and bounded, so a good moment to take out the rubbish
+                # without putting a DELETE on every failed sign-in.
+                db.prune_login_attempts(
+                    conn, now - timedelta(hours=LOGIN_ATTEMPT_RETENTION_HOURS))
+            conn.commit()
+            # One message for both branches. "Invalid username or password" is
+            # the whole point: naming which half was wrong is a free gift to
+            # anyone enumerating accounts. (A wrong second factor says so: by
+            # then the caller has shown it holds the password.)
+            raise HTTPException(401, refusal)
+
+        token = auth.new_session_token()
+        expires = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
+        db.create_session(conn, auth.token_fingerprint(token), user["id"], expires.isoformat())
+        db.record_login_attempt(conn, req.username, source, "success", now)
+        # A successful sign-in clears the scope's failures, so a user who
+        # mistypes twice and then gets it right carries nothing forward.
+        db.clear_login_failures(conn, req.username, source)
+        db.prune_login_attempts(conn, now - timedelta(hours=LOGIN_ATTEMPT_RETENTION_HOURS))
+        conn.commit()
+
+    return {
+        "token": token,
+        "user": {"username": user["username"], "role": user["role"],
+                 "must_change_password": bool(user.get("must_change_password")),
+                 "totp_enabled": bool(user.get("totp_enabled"))},
+        "expires_at": expires.isoformat(),
+    }
+
+
+@app.get("/auth/lockouts")
+def list_lockouts(identity: dict = Depends(require_role("admin"))):
+    """Scopes currently locked out, and those partway there.
+
+    Read-only. The throttle decides what "locked" means here exactly as it does
+    on the sign-in path -- one implementation of the rule, so this view cannot
+    drift from the behaviour it describes.
+    """
+    now = _naive_utc_now()
+    window_start = now - timedelta(minutes=LOGIN_THROTTLE.window_minutes)
+    out = []
+    with db.get_conn() as conn:
+        for scope in db.login_failure_scopes(conn, window_start):
+            decision = throttle.evaluate(scope["failures"], now, LOGIN_THROTTLE)
+            out.append({
+                "username": scope["username"],
+                "source": scope["source"],
+                "failures": len(scope["failures"]),
+                "locked": decision.locked,
+                "locked_until": decision.locked_until.isoformat() if decision.locked_until else None,
+                "retry_after_seconds": decision.retry_after_seconds if not decision.allowed else 0,
+                "last_failure": max(scope["failures"]).isoformat() if scope["failures"] else None,
+            })
+    out.sort(key=lambda s: (not s["locked"], -s["failures"]))
+    return {
+        "now": now.isoformat(),
+        "settings": {
+            "window_minutes": LOGIN_THROTTLE.window_minutes,
+            "max_failures": LOGIN_THROTTLE.max_failures,
+            "lockout_minutes": LOGIN_THROTTLE.lockout_minutes,
+            "backoff_after": LOGIN_THROTTLE.backoff_after,
+        },
+        "scopes": out,
+    }
+
+
+@app.delete("/auth/lockouts/{username}")
+def clear_lockout(username: str, identity: dict = Depends(require_role("admin"))):
+    """Release a locked-out user (admin only).
+
+    Lockouts expire on their own, so this is for the case where a colleague is
+    locked out and needs back in now. It is an explicit, attributable action
+    rather than a side effect of something else -- and it is written into the
+    ledger, because "the lockout went away" is exactly the kind of event whose
+    absence from an audit trail would be suspicious.
+    """
+    now = _naive_utc_now()
+    with db.get_conn() as conn:
+        cleared = db.clear_login_failures(conn, username)
+        if cleared:
+            _record_auth_event(conn, "auth_lockout_cleared", username, "admin", now,
+                               cleared_by=identity["username"], cleared=cleared)
+        conn.commit()
+    return {"username": username, "cleared_failures": cleared}
+
+
+@app.post("/auth/logout")
+def logout(authorization: str | None = Header(None),
+           identity: dict = Depends(require_session)):
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        with db.get_conn() as conn:
+            db.delete_session(conn, auth.token_fingerprint(token))
+            conn.commit()
+    return {"status": "logged out"}
+
+
+@app.get("/auth/me")
+def whoami(identity: dict = Depends(require_session)):
+    with db.get_conn() as conn:
+        user = db.get_user_by_username(conn, identity["username"])
+    return {"username": identity["username"], "role": identity["role"],
+            "must_change_password": bool(identity.get("must_change_password")),
+            "totp_enabled": bool(user and user["totp_enabled"])}
+
+
+class TotpSetupRequest(BaseModel):
+    current_password: str = Field(max_length=1024)
+
+
+class TotpConfirmRequest(BaseModel):
+    code: str = Field(max_length=16)
+
+
+class TotpDisableRequest(BaseModel):
+    current_password: str = Field(max_length=1024)
+    code: str | None = Field(default=None, max_length=16)
+    recovery_code: str | None = Field(default=None, max_length=32)
+
+
+def _check_current_password(conn: sqlite3.Connection, username: str, password: str,
+                            source: str, now: datetime, context: str) -> dict:
+    """The current password, through the sign-in throttle (v0.25; the same
+    steps as POST /auth/password). A stolen session must not be enough to turn
+    two-factor on with the thief's phone, or off."""
+    window_start = now - timedelta(minutes=LOGIN_THROTTLE.window_minutes)
+    conn.execute("BEGIN IMMEDIATE")
+    decision = throttle.evaluate(db.recent_login_failures(conn, username, source, window_start),
+                                 now, LOGIN_THROTTLE)
+    if not decision.allowed:
+        conn.commit()
+        raise HTTPException(429, decision.message(),
+                            headers={"Retry-After": str(decision.retry_after_seconds)})
+    reserved = db.record_login_attempt(conn, username, source, "failure", now)
+    conn.commit()
+    user = db.get_user_by_username(conn, username)
+    if user is None or not auth.verify_password(password, user["salt"], user["password_hash"]):
+        _record_auth_event(conn, "auth_failure", username, source, now, context=context)
+        conn.commit()
+        raise HTTPException(401, "current password is incorrect")
+    # Only this attempt is withdrawn, not the scope's history: a right password
+    # followed by a wrong code must still count, or this endpoint would be a way
+    # to guess codes without ever being throttled.
+    db.withdraw_login_attempt(conn, reserved)
+    conn.commit()
+    return user
+
+
+@app.get("/auth/totp")
+def totp_status(identity: dict = Depends(require_user)):
+    with db.get_conn() as conn:
+        user = db.get_user_by_username(conn, identity["username"])
+        left = db.recovery_codes_left(conn, user["id"]) if user["totp_enabled"] else 0
+    return {"enabled": bool(user["totp_enabled"]), "recovery_codes_left": left,
+            "pending": bool(user["totp_pending_secret"])}
+
+
+@app.post("/auth/totp/setup")
+def totp_setup(req: TotpSetupRequest, request: Request, identity: dict = Depends(require_user)):
+    """Start turning two-factor on (v0.25). Returns a new secret and the
+    otpauth:// URI an authenticator app reads from a QR code. Nothing changes
+    for sign-in until a code from the app confirms it (POST /auth/totp/confirm),
+    so a mistyped secret cannot lock anyone out."""
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        user = _check_current_password(conn, identity["username"], req.current_password,
+                                       source, now, "totp_setup")
+        if user["totp_enabled"]:
+            raise HTTPException(409, "two-factor is already on; turn it off first to "
+                                     "move it to another device")
+        secret = totp.new_secret()
+        db.set_totp_pending(conn, user["id"], secret)
+        conn.commit()
+    return {"secret": secret, "uri": totp.provisioning_uri(secret, identity["username"]),
+            "digits": totp.DIGITS, "period": totp.STEP_SECONDS}
+
+
+@app.post("/auth/totp/confirm")
+def totp_confirm(req: TotpConfirmRequest, request: Request,
+                 identity: dict = Depends(require_user)):
+    """Finish turning two-factor on with a first code from the app. Returns the
+    recovery codes -- once."""
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        user = db.get_user_by_username(conn, identity["username"])
+        if not user["totp_pending_secret"]:
+            raise HTTPException(409, "start with POST /auth/totp/setup")
+        step = totp.verify(user["totp_pending_secret"], req.code)
+        if step is None:
+            raise HTTPException(400, "that code does not match; check the app's clock "
+                                     "and try the current code")
+        codes = totp.new_recovery_codes()
+        db.enable_totp(conn, user["id"], user["totp_pending_secret"], step,
+                       [totp.recovery_fingerprint(c) for c in codes])
+        _record_auth_event(conn, "totp_enabled", identity["username"], source, now)
+        conn.commit()
+    return {"status": "two-factor is on", "recovery_codes": codes,
+            "note": "each recovery code works once; keep them somewhere other than your phone"}
+
+
+@app.post("/auth/totp/disable")
+def totp_disable(req: TotpDisableRequest, request: Request,
+                 identity: dict = Depends(require_user)):
+    """Turn your own two-factor off: current password and a current code (or a
+    recovery code), so neither a stolen session nor a stolen password alone can."""
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        user = _check_current_password(conn, identity["username"], req.current_password,
+                                       source, now, "totp_disable")
+        if not user["totp_enabled"]:
+            raise HTTPException(409, "two-factor is not on")
+        conn.execute("BEGIN IMMEDIATE")
+        user = db.get_user_by_username(conn, identity["username"])
+        if req.recovery_code:
+            good = db.use_recovery_code(conn, user["id"],
+                                        totp.recovery_fingerprint(req.recovery_code)) is not None
+        else:
+            good = totp.verify(user["totp_secret"], req.code or "",
+                               last_step=user["totp_last_step"]) is not None
+        if not good:
+            db.record_login_attempt(conn, identity["username"], source, "failure", now)
+            _record_auth_event(conn, "auth_failure", identity["username"], source, now,
+                               context="totp_disable")
+            conn.commit()
+            raise HTTPException(401, "invalid code")
+        db.disable_totp(conn, user["id"])
+        _record_auth_event(conn, "totp_disabled", identity["username"], source, now,
+                           changed_by=identity["username"])
+        conn.commit()
+    return {"status": "two-factor is off"}
+
+
+def _password_refusal(problems: list[str]) -> HTTPException:
+    return HTTPException(400, {"message": "password refused", "problems": problems})
+
+
+@app.post("/auth/password")
+def change_password(req: ChangePasswordRequest, request: Request,
+                    identity: dict = Depends(require_session)):
+    """Change your own password (v0.19).
+
+    The current password is required even though the caller is signed in: a
+    session left open on someone else's screen must not be enough to take the
+    account over. Wrong guesses go through the same throttle as sign-in, against
+    the same (username, source) scope, and are recorded as `auth_failure` events
+    -- so this endpoint cannot be used as an unthrottled password oracle by
+    anyone holding a stolen session.
+
+    Every other session the user has is ended; the one making the change stays
+    signed in. Streams those sessions opened close at their next keepalive.
+    """
+    source = _client_source(request)
+    now = _naive_utc_now()
+    window_start = now - timedelta(minutes=LOGIN_THROTTLE.window_minutes)
+    username = identity["username"]
+
+    with db.get_conn() as conn:
+        # Counted before the slow check, under the write lock -- see login.
+        conn.execute("BEGIN IMMEDIATE")
+        failures = db.recent_login_failures(conn, username, source, window_start)
+        decision = throttle.evaluate(failures, now, LOGIN_THROTTLE)
+        if not decision.allowed:
+            conn.commit()
+            raise HTTPException(429, decision.message(),
+                                headers={"Retry-After": str(decision.retry_after_seconds)})
+        db.record_login_attempt(conn, username, source, "failure", now)
+        conn.commit()
+
+        user = db.get_user_by_username(conn, username)
+        if user is None or not auth.verify_password(req.current_password, user["salt"],
+                                                    user["password_hash"]):
+            _record_auth_event(conn, "auth_failure", username, source, now,
+                               context="password_change")
+            conn.commit()
+            raise HTTPException(401, "current password is incorrect")
+
+        # The current password was right: like a successful sign-in, that
+        # clears the scope -- including the attempt reserved above -- whether
+        # or not the new password is then acceptable.
+        db.clear_login_failures(conn, username, source)
+        conn.commit()
+
+        problems = auth.password_problems(req.new_password, username)
+        if auth.verify_password(req.new_password, user["salt"], user["password_hash"]):
+            problems.append("must differ from the current password")
+        if problems:
+            raise _password_refusal(problems)
+
+        pw_hash, salt = auth.hash_password(req.new_password)
+        db.set_password(conn, user["id"], pw_hash, salt, must_change=False)
+        ended = db.delete_sessions_for_user(conn, user["id"], keep_fp=identity["session_fp"])
+        db.clear_login_failures(conn, username, source)
+        _record_auth_event(conn, "password_changed", username, source, now,
+                           other_sessions_ended=ended)
+        conn.commit()
+    return {"status": "password changed", "other_sessions_ended": ended}
+
+
+# User management (admin only)
+
+@app.get("/users")
+def list_users(identity: dict = Depends(require_role("admin"))):
+    with db.get_conn() as conn:
+        return db.list_users(conn)
+
+
+@app.post("/users")
+def create_user(req: CreateUserRequest, request: Request,
+                identity: dict = Depends(require_role("admin"))):
+    """Create an account (admin only).
+
+    `generate: true` (v0.23) has Shadowfax choose the password and return it
+    once; the account is then must-change, because the admin has seen it --
+    the same reasoning as a reset. This is what the dashboard does. Every new
+    account is written into the ledger, and a new *admin* raises
+    `admin_account_created`: an extra administrator is the classic way to keep
+    a foothold.
+    """
+    if not auth.is_valid_role(req.role):
+        raise HTTPException(400, f"invalid role '{req.role}', expected one of {list(auth.ROLES)}")
+    if req.generate == (req.password is not None):
+        raise HTTPException(400, "give exactly one of password or generate: true")
+    password = auth.generate_password() if req.generate else req.password
+    problems = auth.password_problems(password, req.username)
+    if problems:
+        raise _password_refusal(problems)
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if db.get_user_by_username(conn, req.username):
+            raise HTTPException(409, f"user '{req.username}' already exists")
+        pw_hash, salt = auth.hash_password(password)
+        user = db.create_user(conn, req.username, pw_hash, salt, req.role,
+                              must_change=req.generate)
+        _record_auth_event(conn, "user_created", req.username, _client_source(request),
+                           _naive_utc_now(), role=req.role, created_by=identity["username"],
+                           generated=req.generate)
+        conn.commit()
+    if req.generate:
+        return {**user, "password": password,
+                "note": "shown once; give it to the user over a channel you trust"}
+    return user
+
+
+@app.post("/users/{username}/password")
+def reset_password(username: str, req: ResetPasswordRequest, request: Request,
+                   identity: dict = Depends(require_role("admin"))):
+    """An administrator sets someone else's password (v0.19).
+
+    The result is a password the admin has seen, so it is marked must-change:
+    the owner's next sign-in can do nothing but replace it. Every session the
+    user had is ended at once -- the usual reason for a reset is that the old
+    password, or a session, is no longer trusted. Recorded in the ledger as
+    `password_reset`, naming the admin who did it.
+
+    `generate: true` has Shadowfax choose the password and return it once, so
+    an admin never has to invent one (or reuse one).
+    """
+    if username == identity["username"]:
+        raise HTTPException(400, "to change your own password use POST /auth/password, "
+                                 "which asks for the current one")
+    if req.generate == (req.new_password is not None):
+        raise HTTPException(400, "give exactly one of new_password or generate: true")
+    new_password = auth.generate_password() if req.generate else req.new_password
+    problems = auth.password_problems(new_password, username)
+    if problems:
+        raise _password_refusal(problems)
+
+    now = _naive_utc_now()
+    with db.get_conn() as conn:
+        user = db.get_user_by_username(conn, username)
+        if user is None:
+            raise HTTPException(404, f"no user '{username}'")
+        pw_hash, salt = auth.hash_password(new_password)
+        db.set_password(conn, user["id"], pw_hash, salt, must_change=True)
+        ended = db.delete_sessions_for_user(conn, user["id"])
+        _record_auth_event(conn, "password_reset", username, _client_source(request), now,
+                           reset_by=identity["username"], sessions_ended=ended)
+        conn.commit()
+    out = {"status": "password reset; it must be changed at next sign-in",
+           "username": username, "sessions_ended": ended}
+    if req.generate:
+        out["password"] = new_password
+        out["note"] = "shown once; give it to the user over a channel you trust"
+    return out
+
+
+@app.post("/users/{username}/totp/reset")
+def reset_user_totp(username: str, request: Request,
+                    identity: dict = Depends(require_role("admin"))):
+    """Remove someone else's two-factor (v0.25) -- for the lost phone with the
+    recovery codes lost too. Their sessions end, and the removal raises
+    `mfa_removed`: taking a second factor off an account is also exactly what an
+    attacker with an admin session would do before using a stolen password."""
+    if username == identity["username"]:
+        raise HTTPException(400, "turn your own two-factor off with POST /auth/totp/disable")
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        user = db.get_user_by_username(conn, username)
+        if user is None:
+            raise HTTPException(404, f"no user '{username}'")
+        if not user["totp_enabled"]:
+            raise HTTPException(409, f"'{username}' does not have two-factor on")
+        db.disable_totp(conn, user["id"])
+        ended = db.delete_sessions_for_user(conn, user["id"])
+        _record_auth_event(conn, "totp_reset", username, source, now,
+                           changed_by=identity["username"], sessions_ended=ended)
+        conn.commit()
+    return {"username": username, "status": "two-factor removed", "sessions_ended": ended}
+
+
+@app.patch("/users/{username}")
+def update_user(username: str, req: UpdateUserRequest, request: Request,
+                identity: dict = Depends(require_role("admin"))):
+    """Change a user's role, or disable or re-enable the account (v0.24).
+
+    Disabling ends every session at once and refuses sign-in; nothing is
+    deleted, so everything the account did keeps a name attached. Two guards:
+    an admin cannot change their own role or disable themselves (ask another
+    admin -- a one-click way to lock yourself out is not a feature), and the
+    last enabled admin cannot be demoted or disabled, or nobody could manage
+    accounts at all. Each change is written into the ledger, and making
+    someone an admin raises `admin_role_granted`.
+    """
+    if req.role is None and req.disabled is None:
+        raise HTTPException(400, "give a role, disabled, or both")
+    if req.role is not None and not auth.is_valid_role(req.role):
+        raise HTTPException(400, f"invalid role '{req.role}', expected one of {list(auth.ROLES)}")
+    if username == identity["username"]:
+        raise HTTPException(400, "you cannot change your own role or disable your own "
+                                 "account; another admin has to")
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        user = db.get_user_by_username(conn, username)
+        if user is None:
+            raise HTTPException(404, f"no user '{username}'")
+        new_role = req.role if req.role is not None else user["role"]
+        new_disabled = bool(req.disabled) if req.disabled is not None else bool(user["disabled"])
+        is_active_admin = user["role"] == "admin" and not user["disabled"]
+        stays_active_admin = new_role == "admin" and not new_disabled
+        if is_active_admin and not stays_active_admin and db.count_active_admins(conn) <= 1:
+            raise HTTPException(409, f"'{username}' is the last enabled admin; make "
+                                     f"someone else an admin first")
+        ended = 0
+        changes = []
+        if new_role != user["role"]:
+            db.set_role(conn, user["id"], new_role)
+            _record_auth_event(conn, "user_role_changed", username, source, now,
+                               old_role=user["role"], new_role=new_role,
+                               changed_by=identity["username"])
+            changes.append(f"role {user['role']} -> {new_role}")
+        if new_disabled != bool(user["disabled"]):
+            db.set_disabled(conn, user["id"], new_disabled)
+            if new_disabled:
+                ended = db.delete_sessions_for_user(conn, user["id"])
+            _record_auth_event(conn, "user_disabled" if new_disabled else "user_enabled",
+                               username, source, now, changed_by=identity["username"],
+                               sessions_ended=ended)
+            changes.append("disabled" if new_disabled else "enabled")
+        conn.commit()
+    return {"username": username, "role": new_role, "disabled": new_disabled,
+            "changes": changes or ["nothing to change"], "sessions_ended": ended}
+
+
+# API keys for programmatic ingest (admin only)
+
+@app.get("/api-keys")
+def list_api_keys(identity: dict = Depends(require_role("admin"))):
+    with db.get_conn() as conn:
+        return db.list_api_keys(conn)
+
+
+@app.post("/api-keys")
+def create_api_key(req: CreateApiKeyRequest, request: Request,
+                   identity: dict = Depends(require_role("admin"))):
+    key = auth.new_api_key()
+    with db.get_conn() as conn:
+        rec = db.create_api_key(conn, auth.api_key_fingerprint(key),
+                                auth.api_key_display_prefix(key), req.label, "service")
+        # Issued and revoked keys are ledger events (v0.23): a key is a
+        # credential, and "who could ingest, and since when" is evidence.
+        _record_auth_event(conn, "api_key_created", identity["username"], _client_source(request),
+                           _naive_utc_now(), key_id=rec["id"], key_prefix=rec["prefix"],
+                           key_label=req.label)
+        conn.commit()
+    # The plaintext key is returned exactly once and never stored in the clear.
+    return {**rec, "api_key": key, "note": "store this now; it will not be shown again"}
+
+
+@app.delete("/api-keys/{key_id}")
+def delete_api_key(key_id: int, request: Request,
+                   identity: dict = Depends(require_role("admin"))):
+    with db.get_conn() as conn:
+        existing = next((k for k in db.list_api_keys(conn) if k["id"] == key_id), None)
+        if existing is None:
+            raise HTTPException(404, f"no API key with id {key_id}")
+        db.delete_api_key(conn, key_id)
+        _record_auth_event(conn, "api_key_revoked", identity["username"], _client_source(request),
+                           _naive_utc_now(), key_id=key_id, key_prefix=existing["prefix"],
+                           key_label=existing["label"])
+        conn.commit()
+    return {"status": "deleted"}
+
+
+# Serving the dashboard (v0.12)
+#
+# When a built dashboard is present, the API serves it from its own origin. This
+# is what makes the packaged container a single process on a single port: no
+# second web server, no CORS to configure, and no "works on my machine" gap
+# between the port the dashboard was built for and the port it ends up on.
+#
+# The mount is registered last, after every API route, because routes are
+# matched in order -- so /alerts, /docs and the rest keep winning and only
+# genuinely unclaimed paths fall through to a file. The dashboard has no
+# client-side router, so there are no deep links for this to mishandle.
+#
+# In development there is no dist/ directory and nothing is mounted: the Vite
+# dev server serves the dashboard on :5173 and talks to this API on :8000,
+# which is the CORS allowlist's reason for existing.
+_DASHBOARD_DIST = Path(__file__).parent / "frontend" / "dist"
+
+if _DASHBOARD_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(_DASHBOARD_DIST), html=True),
+              name="dashboard")

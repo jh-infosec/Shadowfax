@@ -1,0 +1,60 @@
+import React from "react";
+import LedgerBadge from "./LedgerBadge.jsx";
+
+export default function TopBar({ stats, connected, onReset, canReset, user, onLogout, onChangePassword,
+                                 onTwoFactor }) {
+  return (
+    <div className="topbar">
+      <div className="brand">
+        <div className="radar">
+          <div className="radar-ring" />
+          <div className="radar-sweep" />
+          <div className="radar-dot" />
+        </div>
+        <div>
+          <div className="brand-name">SHADOWFAX</div>
+          <div className="brand-sub">actor-agnostic intrusion detection</div>
+        </div>
+      </div>
+
+      <div className="conn-status">
+        <span className={`conn-dot ${connected ? "live" : "down"}`} />
+        {connected ? "connected to API" : "API unreachable"}
+      </div>
+
+      {/* Evidence integrity sits beside the connection state on purpose: both
+          answer "can I believe what I'm looking at right now". */}
+      <LedgerBadge eventCount={stats?.event_count} />
+
+      {canReset && (
+        <button className="btn" onClick={onReset}>
+          Reset to sample data
+        </button>
+      )}
+
+      <div className="stats">
+        <div className="stat crit">CRIT <b>{stats?.alert_counts?.critical ?? 0}</b></div>
+        <div className="stat high">HIGH <b>{stats?.alert_counts?.high ?? 0}</b></div>
+        <div className="stat med">MED <b>{stats?.alert_counts?.medium ?? 0}</b></div>
+        <div className="stat low">LOW <b>{stats?.alert_counts?.low ?? 0}</b></div>
+        {/* Only shown when there are any: info arrives over the findings
+            envelope, so an install with no emitters never sees an empty box. */}
+        {(stats?.alert_counts?.info ?? 0) > 0 && (
+          <div className="stat info">INFO <b>{stats.alert_counts.info}</b></div>
+        )}
+      </div>
+
+      {user && (
+        <div className="user-box">
+          <div className="user-id">
+            {user.username}
+            <span className="user-role">{user.role}</span>
+          </div>
+          <button className="btn" onClick={onChangePassword}>Change password</button>
+          <button className="btn" onClick={onTwoFactor}>Two-factor</button>
+          <button className="btn" onClick={onLogout}>Sign out</button>
+        </div>
+      )}
+    </div>
+  );
+}
