@@ -1,5 +1,61 @@
 # Changelog
 
+## Version 0.26.0
+
+Subject pages. Findings from other tools arrive about *subjects* — a file, a
+host, a log workspace, or an actor Shadowfax already watches (v0.11). They were
+shown the way an agent's tool calls are: as an event timeline. That is the right
+view of what an actor *did*, and the wrong one for what has been *found about*
+something, where the questions are who reported what, how bad, did anyone check
+it, and does more than one tool agree.
+
+### In the dashboard
+
+- A **Subjects** button lists everything findings were reported about, worst
+  first, then most recent: kind, name, worst severity, how many findings and how
+  many are still open, which tools, and how many findings tools agreed on.
+- A subject's drawer now leads with its **findings report**:
+  - grouped **by the tool that reported them**, each with its versions, runs and
+    when it last reported; tools and findings ordered worst first;
+  - each finding's evidence, ATT&CK reference and recommendation, an
+    `unvalidated` marker where the emitter did not check its own claim, and its
+    analyst state — acknowledged, assigned — from the finding's alert;
+  - **findings two tools agree on**, called out at the top: two scanners
+    independently reporting the same thing is worth more than either alone, and
+    the page should say so rather than leave the analyst to notice;
+  - a finding the detector refused to raise is shown, marked "not raised", not
+    hidden.
+- The timeline is still there underneath.
+
+### Elsewhere
+
+- `GET /subjects` and `GET /subjects/{id}` (viewer and up). Subject ids may
+  contain slashes (`log_workspace:tenant/ws-7`).
+- `GET /actors/{id}` includes the report, so the drawer needs one request.
+- `shadowfax subjects` lists them; `shadowfax subjects host:10.0.0.9` prints one
+  report, grouped by tool, with `[unvalidated]`, `[acknowledged]` and agreed
+  findings marked.
+- `subjects.py` is a pure function of a subject's events and alerts — no
+  database, no clock — so the same history always gives the same page.
+
+No new files on the server side besides `subjects.py`, no new dependencies, no
+new detector categories.
+
+### Verification
+
+- **751** API checks (from 733). Seven mutations, each caught by its own check:
+  every key counted as corroborated, tools in name order instead of worst first,
+  findings unsorted within a tool, acknowledged findings counted as open,
+  unvalidated findings not counted, the subject list unsorted, and the
+  corroborated finding's worst severity not tracked. Two ordering checks were
+  vacuous at first — the test data already happened to be in the order being
+  checked — and were fixed by reporting the findings and naming the tools so
+  that the right order and the naive one differ.
+- **53** dashboard checks (from 50): two tools report on a host; the Subjects
+  drawer lists it with both tools; its drawer shows the findings grouped by
+  tool, worst tool first, with the agreed finding called out.
+- Replay: all 12 assertions held.
+
 ## Version 0.25.0
 
 Two-factor sign-in. Throttling and lockout slow someone *guessing* a password;

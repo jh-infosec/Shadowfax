@@ -808,6 +808,12 @@ def recovery_codes_left(conn: sqlite3.Connection, user_id: int) -> int:
         (user_id,)).fetchone()[0]
 
 
+def actors_with_findings(conn: sqlite3.Connection) -> list[str]:
+    """Every actor at least one ingested finding is about (v0.26)."""
+    return [r[0] for r in conn.execute(
+        "SELECT DISTINCT actor_id FROM events WHERE event_type = 'finding' ORDER BY actor_id")]
+
+
 def count_active_admins(conn: sqlite3.Connection) -> int:
     return conn.execute(
         "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0").fetchone()[0]

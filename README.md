@@ -47,6 +47,7 @@ investigation and explainability.
 - Stable, deterministic alert identity that survives a rescan
 - Acknowledge and assign alerts, with analyst state that persists across rescans
 - Authentication with user accounts, roles (admin / analyst / viewer) and API keys
+- Subject pages — everything other tools reported about a file, host or workspace, grouped by tool, with findings two tools agree on called out
 - Two-factor sign-in — codes from any authenticator app (QR enrolment from the dashboard), single-use and throttled, with recovery codes; removing it raises an alert
 - Password changes and admin resets — the current password required and throttled, other sessions signed out, admin-reset passwords forced to change before anything else works
 - Dashboard sign-in, with the UI adapting to the signed-in user's role
@@ -260,6 +261,10 @@ Planned
 
 - Two-factor sign-in (TOTP) with recovery codes — shipped (v0.25.0)
 
+### v0.26
+
+- Subject pages: findings grouped by the tool that reported them — shipped (v0.26.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -403,7 +408,7 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Fifty checks, each one an assertion a person makes when they glance at the
+Fifty-three checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
@@ -957,6 +962,18 @@ ledger claims, and said out loud rather than implied.
 detector category, and ingest rejects those — so Shadowfax cannot be fed its own
 output. The loop is closed by the shape of the thing, not by a rule anyone has
 to remember.
+
+### Subject pages
+
+The **Subjects** button lists everything findings have been reported about —
+files, hosts, log workspaces and actors — worst first. A subject's drawer leads
+with its **findings report**: the tools that reported on it, each with the
+versions and runs it reported from, their findings worst first with evidence,
+ATT&CK reference and recommendation; which findings were `unvalidated`; which
+are acknowledged or assigned; and, called out at the top, any finding **two
+tools agree on** — two scanners reporting the same key is worth more than either
+alone. The same report is `GET /subjects/{id}` (`GET /subjects` for the list)
+and `shadowfax subjects [id]`.
 
 ### Subjects and the `info` level
 

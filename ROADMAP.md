@@ -241,9 +241,10 @@ Harden the platform's own front door, then point the engine at it.
       allowlist so a credential in an agent's tool arguments cannot ride along;
       and Shadowfax's own ingest refuses its own export, closing the feedback
       loop by construction. Shipped in `v0.15.0`.
-- [ ] Subject pages. A `file:` or `host:` actor is an actor only by convention,
-      and the actor drawer shows it an event timeline when what it wants is a
-      findings report grouped by emitter.
+- [x] Subject pages (`v0.26.0`): a Subjects drawer listing everything other
+      tools reported on, and a findings report in each subject's drawer --
+      grouped by tool, worst first, with findings two tools agree on called
+      out. `GET /subjects`, `GET /subjects/{id}`, `shadowfax subjects`.
 
 ---
 

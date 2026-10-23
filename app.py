@@ -49,6 +49,7 @@ import limits
 import manifest
 import permissions
 import ratelimit
+import subjects
 import throttle
 import totp
 import tickets
@@ -56,7 +57,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.25.0"
+VERSION = "0.26.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -909,7 +910,37 @@ def actor_detail(actor_id: str, identity: dict = Depends(require_role("viewer"))
         policy = db.get_policy(conn) or DEFAULT_POLICY
         return {"actor_id": actor_id, "events": events, "alerts": alerts, "risk": risk,
                 "permissions": permissions.describe(actor_id, policy),
-                "manifest": manifest.describe(events, policy)}
+                "manifest": manifest.describe(events, policy),
+                "subject_report": subjects.report(actor_id, events, alerts)}
+
+
+@app.get("/subjects")
+def list_subjects(identity: dict = Depends(require_role("viewer"))):
+    """Everything other tools have reported findings about (v0.26), worst first,
+    then most recently reported."""
+    with db.get_conn() as conn:
+        out = []
+        for actor_id in db.actors_with_findings(conn):
+            s = subjects.summary(actor_id, db.get_events_for_actor(conn, actor_id),
+                                 db.query_alerts(conn, actor_id=actor_id, limit=5000))
+            if s:
+                out.append(s)
+    out.sort(key=lambda s: s["last_reported"], reverse=True)
+    out.sort(key=lambda s: subjects.SEVERITY_RANK.get(s["worst"], 99))
+    return out
+
+
+@app.get("/subjects/{actor_id:path}")
+def subject_report(actor_id: str, identity: dict = Depends(require_role("viewer"))):
+    """One subject's findings, grouped by the tool that reported them (v0.26).
+    `actor_id` is the subject's Shadowfax id -- `file:sha256:...`,
+    `host:10.0.0.9`, or an actor's own id -- and may contain slashes."""
+    with db.get_conn() as conn:
+        r = subjects.report(actor_id, db.get_events_for_actor(conn, actor_id),
+                            db.query_alerts(conn, actor_id=actor_id, limit=5000))
+    if r is None:
+        raise HTTPException(404, f"no findings have been reported about '{actor_id}'")
+    return r
 
 
 @app.post("/agents/{agent_id}/manifest")

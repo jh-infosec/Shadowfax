@@ -1757,6 +1757,95 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== subject pages (v0.26) ==")
+import subjects as _subjects
+
+_subj = {"kind": "host", "id": "10.9.8.7", "label": "build-runner-7"}
+def _finding(fid, key, sev, title, validated=True, **extra):
+    return {"id": fid, "key": key, "severity": sev, "title": title,
+            "evidence": f"evidence for {fid}", "validated": validated, **extra}
+
+check("two tools report on one host",
+      client.post("/findings", json=_env(
+          subject=_subj, source={"tool": "portscout", "version": "1.2.0", "run_id": "r-1"},
+          findings=[_finding("ps-2", "self_signed_cert", "low", "Self-signed certificate",
+                             validated=False),
+                    _finding("ps-1", "open_admin_port", "high", "SSH open to the internet",
+                             recommendation="restrict 22/tcp")])).status_code == 200
+      and client.post("/findings", json=_env(
+          subject=_subj, source={"tool": "vulnscan", "version": "0.9.1", "run_id": "nightly"},
+          findings=[_finding("ha-2", "outdated_kernel", "medium", "Kernel 5.4 is end-of-life"),
+                    _finding("ha-1", "open_admin_port", "critical", "Admin port reachable",
+                             mitre="T1133 - External Remote Services")]
+          )).status_code == 200)
+_r = client.get("/subjects/host:10.9.8.7")
+_rep = _r.json()
+check("GET /subjects/{id} returns the findings report", _r.status_code == 200
+      and _rep["subject"] == {"kind": "host", "id": "10.9.8.7", "label": "build-runner-7"})
+check("grouped by the tool that reported them, worst tool first",
+      [m["tool"] for m in _rep["emitters"]] == ["vulnscan", "portscout"]
+      and _rep["emitters"][1]["versions"] == ["1.2.0"] and _rep["emitters"][1]["runs"] == ["r-1"])
+check("each tool's findings are worst first",
+      [f["finding_id"] for f in _rep["emitters"][0]["findings"]] == ["ha-1", "ha-2"]
+      and [f["finding_id"] for f in _rep["emitters"][1]["findings"]] == ["ps-1", "ps-2"])
+check("totals and the worst severity are counted across tools",
+      _rep["worst"] == "critical" and _rep["finding_count"] == 4
+      and _rep["totals"] == {"critical": 1, "high": 1, "medium": 1, "low": 1, "info": 0})
+check("a key reported by two tools is shown as corroborated, with both",
+      _rep["corroborated"] == [{"key": "open_admin_port", "tools": ["portscout", "vulnscan"],
+                                "worst": "critical",
+                                "titles": ["SSH open to the internet", "Admin port reachable"]}])
+check("unvalidated findings are counted and marked, not downgraded",
+      _rep["unvalidated"] == 1
+      and any(f["finding_id"] == "ps-2" and f["validated"] is False and f["severity"] == "low"
+              for f in _rep["emitters"][1]["findings"]))
+check("recommendations and ATT&CK references are carried",
+      any(f.get("recommendation") == "restrict 22/tcp" for f in _rep["emitters"][1]["findings"])
+      and any(f.get("mitre", "").startswith("T1133") for f in _rep["emitters"][0]["findings"]))
+_ha1 = next(f for f in _rep["emitters"][0]["findings"] if f["finding_id"] == "ha-1")
+client.patch(f"/alerts/{_ha1['alert_id']}/state", json={"acknowledged": True})
+_rep2 = client.get("/subjects/host:10.9.8.7").json()
+check("analyst state follows from the finding's alert",
+      _rep["open"] == 4 and _rep2["open"] == 3
+      and next(f for f in _rep2["emitters"][0]["findings"] if f["finding_id"] == "ha-1")["acknowledged"])
+check("the actor drawer carries the same report",
+      client.get("/actors/host:10.9.8.7").json()["subject_report"]["finding_count"] == 4)
+client.post("/events", json=[{"timestamp": "2026-10-19T09:00:00", "actor_id": "no-findings-agent",
+                              "actor_type": "ai_agent", "event_type": "file_access",
+                              "target": "x", "metadata": {}}])
+check("an actor nothing was reported about has no report",
+      client.get("/actors/no-findings-agent").json()["subject_report"] is None
+      and client.get("/subjects/no-findings-agent").status_code == 404)
+_list = client.get("/subjects").json()
+_row = next((s for s in _list if s["actor_id"] == "host:10.9.8.7"), None)
+check("GET /subjects lists every subject with a summary, worst first",
+      _row is not None and _row["tools"] == ["vulnscan", "portscout"] and _row["corroborated"] == 1
+      and [_subjects.SEVERITY_RANK[s["worst"]] for s in _list]
+      == sorted(_subjects.SEVERITY_RANK[s["worst"]] for s in _list))
+check("subject ids with slashes are addressable",
+      client.post("/findings", json=_env(subject={"kind": "log_workspace", "id": "tenant/ws-7"},
+                                         source={"tool": "logwatch", "version": "1.0"},
+                                         findings=[_finding("lw-1", "noisy_rule", "info",
+                                                            "Rule fires 4,000 times a day")])
+                  ).status_code == 200
+      and client.get("/subjects/log_workspace:tenant/ws-7").json()["finding_count"] == 1)
+_code_rc, _cout, _cerr = run_cli(["subjects", "host:10.9.8.7"])
+check("`shadowfax subjects <id>` prints the report grouped by tool",
+      _code_rc == 0 and "via vulnscan" in _cout and "via portscout" in _cout
+      and "agreed: open_admin_port" in _cout and "[unvalidated]" in _cout)
+_code_rc, _cout, _cerr = run_cli(["subjects"])
+check("and `shadowfax subjects` lists them", _code_rc == 0 and "host:10.9.8.7" in _cout)
+check("viewers can read subject pages",
+      as_user("viewer1", TEST_PW).get("/subjects").status_code == 200)
+check("a finding the detector did not raise is shown, marked",
+      _subjects.report("x", [{"id": 1, "timestamp": "2026-10-19T09:00:00", "event_type": "finding",
+                              "metadata": {"source": {"tool": "t"}, "subject": {"kind": "file", "id": "x"},
+                                           "finding": {"id": "f", "key": "k", "severity": "high",
+                                                       "title": "T", "validated": True}}}],
+                       [])["not_raised"] == 1)
+check("events that are not findings make no report",
+      _subjects.report("x", [{"id": 1, "timestamp": "t", "event_type": "file_access"}], []) is None)
+
 print("\n== two-factor sign-in (v0.25) ==")
 import totp as _totp
 import tempfile as _tf

@@ -2,10 +2,11 @@ import React from "react";
 import { SEVERITY_COLOUR, SEVERITY_ORDER } from "../constants.js";
 import PermissionsPanel from "./PermissionsPanel.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
+import SubjectReport from "./SubjectReport.jsx";
 
 export default function ActorDrawer({ detail, onClose }) {
   if (!detail) return null;
-  const { actor_id, events, alerts, risk, permissions, manifest } = detail;
+  const { actor_id, events, alerts, risk, permissions, manifest, subject_report } = detail;
 
   const flaggedByEvent = {};
   alerts.forEach((a) => {
@@ -42,6 +43,7 @@ export default function ActorDrawer({ detail, onClose }) {
 
         <PermissionsPanel permissions={permissions} actorType={events[0]?.actor_type} />
         <CapabilitiesPanel manifest={manifest} />
+        <SubjectReport report={subject_report} />
 
         <div className="timeline-title">Full activity timeline</div>
         {events.map((e) => {

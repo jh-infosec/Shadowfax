@@ -525,6 +525,44 @@ def cmd_lockouts(client: Client, args, out) -> int:
     return EXIT_FAIL if any(s["locked"] for s in report["scopes"]) else EXIT_OK
 
 
+def cmd_subjects(client: Client, args, out) -> int:
+    """What other tools have reported findings about (v0.26), or one subject's
+    findings report, grouped by the tool that reported them."""
+    if args.subject:
+        path = "/subjects/" + urllib.parse.quote(args.subject, safe=":/")
+        emit(out, client.call("GET", path), args.json, human_subject)
+    else:
+        emit(out, client.call("GET", "/subjects"), args.json, human_subjects)
+    return EXIT_OK
+
+
+def human_subjects(out, rows) -> None:
+    if not rows:
+        print("no findings have been ingested", file=out)
+        return
+    for r in rows:
+        print(f"{_col(r['worst'], 9)}{_col(r['finding_count'], 4)}{_col(', '.join(r['tools']), 28)}"
+              f"{r['actor_id']}", file=out)
+
+
+def human_subject(out, r) -> None:
+    s = r["subject"]
+    print(f"{s['kind']} {s.get('label') or s['id']}  ({r['actor_id']})", file=out)
+    levels = ", ".join(f"{n} {lvl}" for lvl, n in r["totals"].items() if n)
+    print(f"{r['finding_count']} finding(s): {levels}; {r['open']} open"
+          + (f"; {r['unvalidated']} unvalidated" if r["unvalidated"] else ""), file=out)
+    for c in r["corroborated"]:
+        print(f"  agreed: {c['key']} ({c['worst']}) -- {', '.join(c['tools'])}", file=out)
+    for em in r["emitters"]:
+        print(f"\nvia {em['tool']} {', '.join(em['versions'])}  last {_short_time(em['last_reported'])}",
+              file=out)
+        for f in em["findings"]:
+            flags = "".join([" [unvalidated]" if f["validated"] is False else "",
+                             " [acknowledged]" if f["acknowledged"] else "",
+                             " [not raised]" if not f["raised"] else ""])
+            print(f"  {_col((f['severity'] or '').upper(), 9)}{f['title']}{flags}", file=out)
+
+
 def human_lockouts(out, report) -> None:
     s = report["settings"]
     print(f"sign-in throttle: lock after {s['max_failures']} failures in "
@@ -782,6 +820,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="sign-in lockouts (non-zero while any scope is locked)")
     sp.add_argument("--unlock", metavar="USERNAME",
                     help="clear a username's recorded failures (admin)")
+    sp = sub.add_parser("subjects",
+                        help="what other tools reported findings about, or one subject's report")
+    sp.add_argument("subject", nargs="?", help="e.g. host:10.0.0.9 or file:sha256:...")
     sp = sub.add_parser("permissions",
                         help="an actor's declared permissions; with --tool/--target, "
                              "non-zero if that action would be reported")
@@ -816,7 +857,7 @@ COMMANDS = {
     "status": cmd_status, "login": cmd_login, "ingest": cmd_ingest,
     "alerts": cmd_alerts, "check": cmd_check, "incidents": cmd_incidents,
     "explain": cmd_explain, "search": cmd_search, "actors": cmd_actors,
-    "digest": cmd_digest, "verify": cmd_verify, "lockouts": cmd_lockouts,
+    "digest": cmd_digest, "verify": cmd_verify, "lockouts": cmd_lockouts, "subjects": cmd_subjects,
     "export": cmd_export, "permissions": cmd_permissions,
     "manifest": cmd_manifest, "passwd": cmd_passwd,
     "stats": cmd_stats, "policy": cmd_policy,

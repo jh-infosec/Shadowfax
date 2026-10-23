@@ -10,6 +10,7 @@ import DigestDrawer from "./components/DigestDrawer.jsx";
 import LockoutsDrawer from "./components/LockoutsDrawer.jsx";
 import AccountsDrawer from "./components/AccountsDrawer.jsx";
 import TwoFactorModal from "./components/TwoFactorModal.jsx";
+import SubjectsDrawer from "./components/SubjectsDrawer.jsx";
 import ExplanationModal from "./components/ExplanationModal.jsx";
 import NLSearch from "./components/NLSearch.jsx";
 import Login from "./components/Login.jsx";
@@ -68,6 +69,7 @@ export default function App() {
   const [lockoutsOpen, setLockoutsOpen] = useState(false);
   const [accountsOpen, setAccountsOpen] = useState(false);
   const [twoFactorOpen, setTwoFactorOpen] = useState(false);
+  const [subjectsOpen, setSubjectsOpen] = useState(false);
   // The alert whose explanation modal is open, or null.
   const [explainAlert, setExplainAlert] = useState(null);
   // Active natural-language search result (snapshot), or null for the normal
@@ -235,6 +237,7 @@ export default function App() {
       if (passwordOpen || policyOpen || twoFactorOpen) return;
       if (explainAlert) setExplainAlert(null);
       else if (accountsOpen) setAccountsOpen(false);
+      else if (subjectsOpen) setSubjectsOpen(false);
       else if (lockoutsOpen) setLockoutsOpen(false);
       else if (digestOpen) setDigestOpen(false);
       else if (incidentsOpen) setIncidentsOpen(false);
@@ -244,7 +247,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [passwordOpen, policyOpen, twoFactorOpen, explainAlert, accountsOpen, lockoutsOpen, digestOpen,
+  }, [passwordOpen, policyOpen, twoFactorOpen, explainAlert, accountsOpen, subjectsOpen, lockoutsOpen, digestOpen,
       incidentsOpen, selectedActorId]);
 
   const handleLogout = async () => {
@@ -359,6 +362,7 @@ export default function App() {
           canEditPolicy={canAnalyst}
           onOpenIncidents={() => setIncidentsOpen(true)}
           onOpenDigest={() => setDigestOpen(true)}
+          onOpenSubjects={() => setSubjectsOpen(true)}
           onOpenLockouts={() => setLockoutsOpen(true)}
           onOpenAccounts={() => setAccountsOpen(true)}
           canSeeLockouts={canAdmin}
@@ -396,6 +400,13 @@ export default function App() {
       )}
 
       {lockoutsOpen && <LockoutsDrawer onClose={() => setLockoutsOpen(false)} />}
+
+      {subjectsOpen && (
+        <SubjectsDrawer
+          onClose={() => setSubjectsOpen(false)}
+          onSelectActor={(a) => { setSubjectsOpen(false); setSelectedActorId(a); }}
+        />
+      )}
 
       {accountsOpen && (
         <AccountsDrawer me={user.username} onClose={() => setAccountsOpen(false)} />

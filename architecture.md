@@ -387,6 +387,17 @@ manifest event, like a finding, skips the behavioural heuristics and the
 permission target check -- it is a declaration, not an action. Excess tools are
 reported once each across manifests; unlisted calls once per tool per manifest.
 
+#### subjects.py
+
+Subject pages (v0.26), a pure function of a subject's events and alerts:
+`report()` groups `finding` events by the emitting tool (versions, runs, first
+and last reported), sorts tools and findings worst first, takes each finding's
+severity and analyst state from the alert the detector raised on it (a finding
+with no alert is shown as not raised, not hidden), and lists keys reported by
+more than one tool as corroborated. `summary()` is the same without the
+findings, for `GET /subjects`. `actor_detail` includes the report, so the drawer
+needs no second request.
+
 #### totp.py
 
 Two-factor (v0.25), standard library only: RFC 6238 with the parameters every
@@ -1085,7 +1096,7 @@ cli.py                  digest.py               ledger.py
 throttle.py             envelope.py             permissions.py
 tickets.py              limits.py               manifest.py
 ratelimit.py            timeutil.py             recover.py
-totp.py
+totp.py                 subjects.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml
@@ -1117,4 +1128,6 @@ frontend/src/components/CapabilitiesPanel.jsx
 frontend/src/components/PasswordModal.jsx
 frontend/src/components/AccountsDrawer.jsx
 frontend/src/components/TwoFactorModal.jsx
+frontend/src/components/SubjectReport.jsx
+frontend/src/components/SubjectsDrawer.jsx
 ```

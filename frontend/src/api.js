@@ -135,6 +135,11 @@ export function getAlerts(filters = {}) {
   return request(`/alerts${qs ? `?${qs}` : ""}`);
 }
 
+// Subjects (v0.26): what other tools reported findings about.
+export function getSubjects() {
+  return request("/subjects");
+}
+
 export function getIncidents() {
   return request("/incidents");
 }

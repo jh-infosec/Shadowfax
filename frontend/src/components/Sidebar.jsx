@@ -2,7 +2,7 @@ import React from "react";
 import { SEVERITIES, ACTOR_TYPES, SEVERITY_COLOUR } from "../constants.js";
 
 export default function Sidebar({ filters, onFiltersChange, categories, onOpenPolicy,
-                                  canEditPolicy, onOpenIncidents, onOpenDigest,
+                                  canEditPolicy, onOpenIncidents, onOpenDigest, onOpenSubjects,
                                   onOpenLockouts, canSeeLockouts, onOpenAccounts }) {
   const toggle = (group, value) => {
     const set = new Set(filters[group]);
@@ -94,6 +94,9 @@ export default function Sidebar({ filters, onFiltersChange, categories, onOpenPo
         </button>
         <button className="btn" style={{ width: "100%" }} onClick={onOpenIncidents}>
           Incidents
+        </button>
+        <button className="btn" style={{ width: "100%" }} onClick={onOpenSubjects}>
+          Subjects
         </button>
       </div>
 

@@ -404,6 +404,35 @@ def _run_checks(page, url: str, requested: list[str]) -> None:
     check("with nothing secret on screen, Escape closes the accounts drawer",
           page.locator(".accounts-drawer").count() == 0)
 
+    # -- subject pages (v0.26) ---------------------------------------------
+    # Two tools report on one host; the Subjects drawer lists it, and its own
+    # drawer leads with the findings grouped by tool, the shared one called out.
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    host = f"10.77.{int(stamp) % 250}.{int(stamp[-2:]) % 250}"
+    for tool, fid, sev in (("portscout", "p1", "high"), ("vulnscan", "v1", "critical")):
+        _api(url, "POST", "/findings", {
+            "envelope_version": "1.0", "generated": "2026-10-19T09:00:00Z",
+            "source": {"tool": tool, "version": "1.0"},
+            "subject": {"kind": "host", "id": host, "label": f"dash-host-{stamp}"},
+            "findings": [{"id": f"{fid}-{stamp}", "key": "open_admin_port", "severity": sev,
+                          "title": f"Admin port open ({tool})", "evidence": "22/tcp",
+                          "validated": True}]}, admin)
+    page.get_by_role("button", name="Subjects", exact=True).click()
+    page.wait_for_selector(".subjects-table", timeout=10000)
+    row = page.locator(".subjects-table tr", has_text=f"dash-host-{stamp}")
+    check("the Subjects drawer lists what tools reported on, with the tools",
+          row.count() == 1 and "portscout" in row.inner_text() and "vulnscan" in row.inner_text())
+    row.click()
+    page.wait_for_selector(".subject-report", timeout=10000)
+    report = page.inner_text(".subject-report")
+    check("a subject's drawer leads with its findings, grouped by tool, worst tool first",
+          page.locator(".subject-emitter").count() == 2
+          and page.locator(".subject-emitter").first.inner_text().startswith("via vulnscan"))
+    check("a finding two tools agree on is called out",
+          "reported by more than one tool" in report.lower() and "open_admin_port" in report)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+
 
 def _api(url: str, method: str, path: str, body=None, token: str | None = None):
     req = urllib.request.Request(
