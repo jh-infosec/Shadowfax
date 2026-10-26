@@ -416,6 +416,14 @@ against a freshly read `totp_last_step`, so two requests racing with one code
 cannot both succeed. Enrolment is pending until a first code confirms it.
 `_check_current_password()` guards setup and disable with the same throttle.
 
+v0.27: `_session_restriction()` is the one place that decides whether a
+signed-in session may do anything yet -- a must-change password, or an admin
+who must turn two-factor on when `SHADOWFAX_REQUIRE_ADMIN_2FA` is set.
+`require_user`, `allow_ingest` and the stream's `_session_alive` all ask it, so
+they cannot disagree. The two-factor endpoints use `require_enrolling`, which
+admits that second kind of session. `POST /auth/totp/recovery-codes` replaces
+the codes (password and a current code; the code's step is spent).
+
 #### recover.py
 
 Console recovery (v0.22), run beside the database rather than through the API:

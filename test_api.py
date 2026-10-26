@@ -1757,6 +1757,95 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== two-factor required for admins (v0.27) ==")
+import totp as _totp27
+from datetime import datetime as _dt27, timedelta as _td27, timezone as _tz27
+
+def _code27(secret, ahead=0):
+    return _totp27.code_at(secret, _totp27.current_step() + ahead)
+
+def _fails27(u):
+    with db_module.get_conn() as _c:
+        return len(db_module.recent_login_failures(
+            _c, u, "testclient", _dt27.now(_tz27.utc).replace(tzinfo=None) - _td27(hours=1)))
+
+for _u, _role in (("req-admin", "admin"), ("req-admin2", "admin"), ("req-viewer", "viewer")):
+    client.post("/users", json={"username": _u, "password": TEST_PW, "role": _role})
+_key27 = client.post("/api-keys", json={"label": "v027"}).json()["api_key"]
+check("the requirement is off unless switched on", app_module.REQUIRE_ADMIN_2FA is False
+      and as_user("req-admin", TEST_PW).get("/alerts").status_code == 200)
+
+app_module.REQUIRE_ADMIN_2FA = True
+try:
+    _r = client.post("/auth/login", json={"username": "req-admin", "password": TEST_PW})
+    _tok = _r.json()["token"]
+    _ra = TestClient(app); _ra.headers.update({"Authorization": f"Bearer {_tok}"})
+    check("with it on, an admin without two-factor signs in and is told to turn it on",
+          _r.status_code == 200 and _r.json()["user"]["must_enrol_2fa"] is True
+          and _ra.get("/auth/me").json()["must_enrol_2fa"] is True)
+    _r = _ra.get("/alerts")
+    check("and can do nothing else", _r.status_code == 403 and "two-factor required" in _r.json()["detail"])
+    check("not even ingest", _ra.post("/events", json=[{
+        "timestamp": "2026-10-23T09:00:00", "actor_id": "v027-probe", "actor_type": "ai_agent",
+        "event_type": "file_access", "target": "x", "metadata": {}}]).status_code == 403)
+    check("nor keep a live stream", app_module._session_alive(_auth.token_fingerprint(_tok)) is False)
+    check("the admin this suite runs as is held too", client.get("/users").status_code == 403)
+    check("other roles are not affected",
+          as_user("req-viewer", TEST_PW).get("/alerts").status_code == 200)
+    _svc27 = TestClient(app); _svc27.headers.update({"X-API-Key": _key27})
+    check("nor are API keys", _svc27.post("/events", json=[{
+        "timestamp": "2026-10-23T09:00:00", "actor_id": "v027-probe", "actor_type": "ai_agent",
+        "event_type": "file_access", "target": "x", "metadata": {}}]).status_code == 200)
+    check("the status says it is required", _ra.get("/auth/totp").json()["required"] is True)
+    _r = _ra.post("/auth/totp/setup", json={"current_password": TEST_PW})
+    check("but can still start turning it on", _r.status_code == 200 and "secret" in _r.json())
+    _sec27 = _r.json().get("secret", "A" * 32)
+    _codes27 = _ra.post("/auth/totp/confirm", json={"code": _code27(_sec27)}).json()["recovery_codes"]
+    check("turning it on lifts the restriction for that session at once",
+          _ra.get("/alerts").status_code == 200 and _ra.get("/auth/me").json()["must_enrol_2fa"] is False)
+    _r = _ra.post("/auth/totp/disable", json={"current_password": TEST_PW, "recovery_code": _codes27[0]})
+    check("an admin cannot then turn their own two-factor off", _r.status_code == 409
+          and _ra.get("/auth/totp").json()["recovery_codes_left"] == 10)
+    _ra2 = as_user("req-admin2", TEST_PW)
+    check("another admin without it is held", _ra2.get("/alerts").status_code == 403)
+    _ra.patch("/users/req-admin2", json={"role": "analyst"})
+    check("until made an analyst, when the requirement no longer applies",
+          _ra2.get("/alerts").status_code == 200)
+finally:
+    app_module.REQUIRE_ADMIN_2FA = False
+check("switched off, everything is back", client.get("/users").status_code == 200)
+
+# New recovery codes.
+with db_module.get_conn() as _c:
+    db_module.clear_login_failures(_c, "req-admin"); _c.commit()
+_f27 = _fails27("req-admin")
+check("new recovery codes need the password",
+      _ra.post("/auth/totp/recovery-codes", json={"current_password": "wrong-password-xx",
+                                                   "code": _code27(_sec27, 1)}).status_code == 401)
+with db_module.get_conn() as _c:
+    db_module.clear_login_failures(_c, "req-admin"); _c.commit()
+_bad27 = "000000" if _code27(_sec27, 1) != "000000" else "111111"
+_r = _ra.post("/auth/totp/recovery-codes", json={"current_password": TEST_PW, "code": _bad27})
+check("and a current code; a wrong one is counted",
+      _r.status_code == 401 and _fails27("req-admin") == 1)
+with db_module.get_conn() as _c:
+    db_module.clear_login_failures(_c, "req-admin"); _c.commit()
+_r = _ra.post("/auth/totp/recovery-codes", json={"current_password": TEST_PW, "code": _code27(_sec27, 1)})
+_new27 = _r.json().get("recovery_codes", [])
+check("then returns ten new codes", _r.status_code == 200 and len(set(_new27)) == 10
+      and not set(_new27) & set(_codes27))
+check("the old ones stop working",
+      client.post("/auth/login", json={"username": "req-admin", "password": TEST_PW,
+                                       "recovery_code": _codes27[1]}).status_code == 401)
+check("and the new ones work",
+      client.post("/auth/login", json={"username": "req-admin", "password": TEST_PW,
+                                       "recovery_code": _new27[0]}).status_code == 200)
+check("the code used cannot be used again for another set",
+      _ra.post("/auth/totp/recovery-codes", json={"current_password": TEST_PW,
+                                                   "code": _code27(_sec27, 1)}).status_code == 401)
+with db_module.get_conn() as _c:
+    db_module.clear_login_failures(_c, "req-admin"); _c.commit()
+
 print("\n== subject pages (v0.26) ==")
 import subjects as _subjects
 
@@ -1892,7 +1981,8 @@ check("a wrong first code does not turn it on",
 _conf = _mu.post("/auth/totp/confirm", json={"code": _now_code(_sec)}).json()
 _codes = _conf.get("recovery_codes", [])
 check("a right code turns it on and returns ten recovery codes, once",
-      _mu.get("/auth/totp").json() == {"enabled": True, "recovery_codes_left": 10, "pending": False}
+      _mu.get("/auth/totp").json() == {"enabled": True, "recovery_codes_left": 10, "pending": False,
+                                       "required": False}
       and len(set(_codes)) == 10)
 with db_module.get_conn() as _c:
     _stored = [r[0] for r in _c.execute("SELECT code_fp FROM recovery_codes").fetchall()]

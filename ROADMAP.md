@@ -217,8 +217,8 @@ Harden the platform's own front door, then point the engine at it.
       dashboard (QR code or key, confirmed by a first code); codes are
       single-use and throttled like passwords; ten single-use recovery codes;
       admins can remove it for a lost phone, which raises `mfa_removed`.
-- [ ] Require two-factor for admins (a policy switch), and regenerate recovery
-      codes without turning two-factor off and on.
+- [x] Require two-factor for admins (`v0.27.0`, `SHADOWFAX_REQUIRE_ADMIN_2FA`),
+      and new recovery codes without turning two-factor off and on.
 - [ ] Update the dashboard's build toolchain: `npm audit` flags the Vite dev
       server's esbuild and `source-map-js` (development only; nothing in the
       shipped dashboard).

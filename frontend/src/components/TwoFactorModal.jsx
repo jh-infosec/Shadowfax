@@ -12,10 +12,16 @@ import * as api from "../api.js";
 // the window will not close while they are shown.
 //
 // Turning it off takes the password and a current code (or a recovery code).
+//
+// v0.27: `forced` is the whole screen, for an admin on a server that requires
+// two-factor for administrators -- the server refuses everything else until it
+// is on, so there is nothing behind it to show and no way out but signing out.
+// New recovery codes take the password and a current code.
 
-export default function TwoFactorModal({ onClose }) {
+export default function TwoFactorModal({ onClose, forced = false, onEnrolled, onLogout }) {
   const [status, setStatus] = useState(null);
-  const [step, setStep] = useState("status"); // status | password | scan | codes | disable
+  // status | password | scan | codes | disable | regen
+  const [step, setStep] = useState(forced ? "password" : "status");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [setup, setSetup] = useState(null);
@@ -34,7 +40,7 @@ export default function TwoFactorModal({ onClose }) {
 
   // Escape never closes this window (App.jsx leaves forms that hold typed
   // input alone); a click outside does, except while recovery codes are shown.
-  const close = () => { if (!codes) onClose(); };
+  const close = () => { if (!codes && !forced) onClose(); };
 
   const attempt = async (fn) => {
     setBusy(true);
@@ -70,6 +76,24 @@ export default function TwoFactorModal({ onClose }) {
     });
   };
 
+  const regenerate = (e) => {
+    e.preventDefault();
+    attempt(async () => {
+      const r = await api.newRecoveryCodes(password, code.replace(/\s/g, ""));
+      setPassword("");
+      setCode("");
+      setCodes(r.recovery_codes);
+      setStep("codes");
+      load();
+    });
+  };
+
+  const stored = () => {
+    setCodes(null);
+    if (forced && onEnrolled) onEnrolled();
+    else setStep("status");
+  };
+
   const turnOff = (e) => {
     e.preventDefault();
     attempt(async () => {
@@ -84,14 +108,21 @@ export default function TwoFactorModal({ onClose }) {
   const formatKey = (k) => k.replace(/(.{4})/g, "$1 ").trim();
 
   return (
-    <div className="policy-modal-overlay" onClick={close}>
+    <div className={forced ? "password-screen" : "policy-modal-overlay"} onClick={close}>
       <div className="policy-modal password-modal twofactor-modal" onClick={(e) => e.stopPropagation()}>
         <div className="policy-modal-head">
           <div className="policy-modal-title">Two-factor sign-in</div>
-          <button className="drawer-close" onClick={close} disabled={!!codes}>&times;</button>
+          {!forced && <button className="drawer-close" onClick={close} disabled={!!codes}>&times;</button>}
         </div>
         <div className="password-body">
           {error && <ul className="policy-problems password-problems"><li>{error}</li></ul>}
+
+          {forced && step === "password" && (
+            <p className="password-note forced tf-forced">
+              This server requires two-factor sign-in for administrators. Turn it on to
+              continue — it takes a minute and an authenticator app on your phone.
+            </p>
+          )}
 
           {step === "status" && status && (
             <>
@@ -102,9 +133,22 @@ export default function TwoFactorModal({ onClose }) {
                   : <>Two-factor is <b>off</b>. With it on, a stolen password is not enough to
                       sign in as you.</>}
               </p>
+              {status.enabled && status.required && (
+                <p className="password-note">
+                  Required for administrators on this server, so it cannot be turned off
+                  here. To move it to a new phone, ask another admin to remove it, then
+                  turn it on again.
+                </p>
+              )}
               <div className="policy-modal-foot tf-foot">
+                {status.enabled && (
+                  <button className="btn" onClick={() => { setStep("regen"); setError(null); }}>
+                    New recovery codes
+                  </button>
+                )}
                 {status.enabled
-                  ? <button className="btn" onClick={() => { setStep("disable"); setError(null); }}>Turn off</button>
+                  ? !status.required && (
+                      <button className="btn" onClick={() => { setStep("disable"); setError(null); }}>Turn off</button>)
                   : <button className="btn primary" onClick={() => { setStep("password"); setError(null); }}>Turn on</button>}
               </div>
             </>
@@ -118,7 +162,9 @@ export default function TwoFactorModal({ onClose }) {
                        onChange={(e) => setPassword(e.target.value)} required />
               </label>
               <div className="policy-modal-foot tf-foot">
-                <button type="button" className="btn" onClick={() => setStep("status")}>Back</button>
+                {forced
+                  ? <button type="button" className="btn" onClick={onLogout}>Sign out</button>
+                  : <button type="button" className="btn" onClick={() => setStep("status")}>Back</button>}
                 <button type="submit" className="btn primary" disabled={busy}>Continue</button>
               </div>
             </form>
@@ -141,7 +187,8 @@ export default function TwoFactorModal({ onClose }) {
                        autoFocus value={code} onChange={(e) => setCode(e.target.value)} required />
               </label>
               <div className="policy-modal-foot tf-foot">
-                <button type="button" className="btn" onClick={() => { setSetup(null); setStep("status"); }}>Cancel</button>
+                <button type="button" className="btn"
+                        onClick={() => { setSetup(null); setStep(forced ? "password" : "status"); }}>Cancel</button>
                 <button type="submit" className="btn primary" disabled={busy}>Turn on</button>
               </div>
             </form>
@@ -159,11 +206,33 @@ export default function TwoFactorModal({ onClose }) {
               </div>
               <div className="secret-actions">
                 <button className="btn" onClick={() => navigator.clipboard?.writeText(codes.join("\n"))}>Copy</button>
-                <button className="btn primary" onClick={() => { setCodes(null); setStep("status"); }}>
+                <button className="btn primary" onClick={stored}>
                   I have stored them
                 </button>
               </div>
             </div>
+          )}
+
+          {step === "regen" && (
+            <form onSubmit={regenerate}>
+              <p className="password-note">
+                Replaces your recovery codes. Every old code stops working.
+              </p>
+              <label>
+                Current password
+                <input type="password" autoComplete="current-password" autoFocus value={password}
+                       onChange={(e) => setPassword(e.target.value)} required />
+              </label>
+              <label>
+                A current code from your app
+                <input className="tf-code" type="text" inputMode="numeric" autoComplete="one-time-code"
+                       value={code} onChange={(e) => setCode(e.target.value)} required />
+              </label>
+              <div className="policy-modal-foot tf-foot">
+                <button type="button" className="btn" onClick={() => setStep("status")}>Back</button>
+                <button type="submit" className="btn primary" disabled={busy}>Replace codes</button>
+              </div>
+            </form>
           )}
 
           {step === "disable" && (

@@ -1,5 +1,55 @@
 # Changelog
 
+## Version 0.27.0
+
+Finishing two-factor: making it **required** for administrators, and replacing
+recovery codes without turning it off and on.
+
+### `SHADOWFAX_REQUIRE_ADMIN_2FA=1`
+
+- An admin without two-factor signs in to the **enrolment screen and nothing
+  else**: the whole screen, no close button, only "turn it on" or "sign out".
+  Behind it the server refuses that session everything else — the API, ingest,
+  the live stream — exactly as it does a must-change password, from the same
+  single check (`_session_restriction`), so no endpoint can disagree with
+  another. Once the first code is confirmed the same session carries on, with
+  no second sign-in.
+- While it is required, an admin **cannot turn their own two-factor off** (409).
+  The lost-phone path is unchanged: another admin removes it (which raises
+  `mfa_removed`), and the next sign-in leads straight back to enrolment.
+- Demoting an admin to analyst lifts the requirement for them at once.
+- Viewers, analysts and API keys are not affected.
+- An environment setting, not detection policy: `PUT /policy` is open to
+  analysts, and this guards the admins — the same reasoning as the sign-in
+  throttle. Off by default.
+
+### New recovery codes
+
+**New recovery codes** in the Two-factor window (`POST /auth/totp/recovery-codes`):
+the password and a current code from the app — a fresh set of codes is as good
+as a second factor, so it costs as much as one. Every old code stops working,
+the ten new ones are shown once, and the code used is spent like any sign-in
+code. Wrong codes count towards lockout. Recorded as
+`recovery_codes_regenerated`.
+
+### Verification
+
+- **772** API checks (from 751). Six mutations, each caught: the requirement
+  ignored, enrolment endpoints closed to the held admin, the admin allowed to
+  turn their own off, old recovery codes left working, the code that bought new
+  ones left reusable, and the live stream ignoring the requirement. One check
+  first caught its mutation by crashing rather than failing; it is now a named
+  check.
+- **54** dashboard checks (from 53): new recovery codes issued from the
+  dashboard with a fresh code (the test waits out the 30-second step the
+  sign-in code used, because a code works once).
+- `test_dashboard.py --required-2fa`, a new mode for a server started with the
+  switch on: the admin gets the enrolment screen and nothing else, cannot
+  dismiss it, enrols, reaches a dashboard with data, and finds no "Turn off".
+  5 checks, run here against such a server; removing the dashboard's gate fails
+  it. Not part of CI, which would need a second server and a ci.yml change.
+- Replay: all 12 assertions held.
+
 ## Version 0.26.0
 
 Subject pages. Findings from other tools arrive about *subjects* — a file, a

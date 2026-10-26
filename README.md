@@ -265,6 +265,10 @@ Planned
 
 - Subject pages: findings grouped by the tool that reported them — shipped (v0.26.0)
 
+### v0.27
+
+- Two-factor required for admins (a switch); new recovery codes — shipped (v0.27.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -408,7 +412,7 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Fifty-three checks, each one an assertion a person makes when they glance at the
+Fifty-four checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
@@ -816,6 +820,7 @@ are untouched; nothing is discarded.
 | `SHADOWFAX_LOGIN_SOURCE_BACKOFF_AFTER` | 10 | failures from one source before it is slowed |
 | `SHADOWFAX_LOGIN_SOURCE_BACKOFF_CAP_SECONDS` | 60 | longest per-source wait |
 | `SHADOWFAX_SELF_MONITOR` | on | ingest front-door events into the log |
+| `SHADOWFAX_REQUIRE_ADMIN_2FA` | off | admins must turn on two-factor before anything else works |
 
 These live in the environment, **not** in the detection policy. The policy
 governs detection; this is enforcement of the platform's own door, and putting
@@ -1036,6 +1041,15 @@ remove it from someone else's account (their sessions end), which raises
 as it must be readable to check a code — whoever can read the database file can
 read it. `shadowfax login` prompts for the code; `recover.py` keeps two-factor
 unless given `--remove-2fa`.
+
+Set `SHADOWFAX_REQUIRE_ADMIN_2FA=1` to **require** it for administrators: an
+admin without it signs in to the enrolment screen and nothing else — the API,
+ingest and the live stream all refuse that session until two-factor is on — and
+an admin cannot turn their own off while it is required (another admin removes
+it for a lost phone). Other roles and API keys are unaffected. It is an
+environment setting rather than policy because analysts can edit the policy.
+**New recovery codes** (the password and a current code) replace the old list
+at once.
 
 A lost admin password is recovered with `recover.py` on the server itself (see
 Locked out of your own Shadowfax above), never over the API; the recovery is

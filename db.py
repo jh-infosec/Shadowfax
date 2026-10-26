@@ -716,7 +716,8 @@ def get_session_user(conn: sqlite3.Connection, token_fp: str) -> dict[str, Any] 
     accumulate dead tokens over time.
     """
     row = conn.execute(
-        """SELECT s.expires_at, u.id, u.username, u.role, u.must_change_password
+        """SELECT s.expires_at, u.id, u.username, u.role, u.must_change_password,
+                  u.totp_enabled
            FROM sessions s JOIN users u ON u.id = s.user_id
            WHERE s.token_fp = ? AND u.disabled = 0""",
         (token_fp,),
@@ -732,7 +733,8 @@ def get_session_user(conn: sqlite3.Connection, token_fp: str) -> dict[str, Any] 
         conn.commit()
         return None
     return {"id": row["id"], "username": row["username"], "role": row["role"],
-            "must_change_password": bool(row["must_change_password"])}
+            "must_change_password": bool(row["must_change_password"]),
+            "totp_enabled": bool(row["totp_enabled"])}
 
 
 def delete_session(conn: sqlite3.Connection, token_fp: str) -> None:
@@ -772,6 +774,13 @@ def enable_totp(conn: sqlite3.Connection, user_id: int, secret: str, step: int,
         """UPDATE users SET totp_enabled = 1, totp_secret = ?, totp_pending_secret = NULL,
                             totp_last_step = ?, totp_enabled_at = ? WHERE id = ?""",
         (secret, step, _iso(_utc_now()), user_id))
+    conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user_id,))
+    conn.executemany("INSERT INTO recovery_codes (user_id, code_fp) VALUES (?, ?)",
+                     [(user_id, fp) for fp in recovery_fps])
+
+
+def replace_recovery_codes(conn: sqlite3.Connection, user_id: int,
+                           recovery_fps: list[str]) -> None:
     conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user_id,))
     conn.executemany("INSERT INTO recovery_codes (user_id, code_fp) VALUES (?, ?)",
                      [(user_id, fp) for fp in recovery_fps])

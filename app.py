@@ -57,7 +57,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.26.0"
+VERSION = "0.27.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -141,6 +141,30 @@ def _alerts_for(identity: dict[str, Any], alerts: list[dict[str, Any]]) -> Any:
 # a scope can log at most `max_failures` failures before it is locked out, so
 # the thing that stops the brute force is also what stops the audit trail from
 # becoming an unauthenticated write amplifier.
+# v0.27: when on, an admin without two-factor can do nothing but turn it on.
+# An environment setting, not policy, for the same reason as the sign-in
+# throttle: PUT /policy is open to analysts, and this guards the admins.
+REQUIRE_ADMIN_2FA = os.environ.get("SHADOWFAX_REQUIRE_ADMIN_2FA", "").strip().lower() in (
+    "1", "true", "yes", "on")
+
+
+def _needs_2fa_enrolment(user: dict[str, Any]) -> bool:
+    return (REQUIRE_ADMIN_2FA and user.get("role") == "admin"
+            and not user.get("totp_enabled"))
+
+
+def _session_restriction(user: dict[str, Any]) -> str | None:
+    """Why a signed-in session may do nothing yet but fix its own account, or
+    None. One place, so the API, ingest and the live stream cannot disagree."""
+    if user.get("must_change_password"):
+        return ("password change required: an administrator reset this password; "
+                "choose your own with POST /auth/password")
+    if _needs_2fa_enrolment(user):
+        return ("two-factor required: this server requires it for administrators; "
+                "turn it on with POST /auth/totp/setup")
+    return None
+
+
 SELF_MONITOR = os.environ.get("SHADOWFAX_SELF_MONITOR", "1").strip().lower() not in (
     "0", "false", "no", "off")
 
@@ -379,6 +403,7 @@ def _identity(
                 return {"kind": "user", "id": user["id"],
                         "username": user["username"], "role": user["role"],
                         "must_change_password": user["must_change_password"],
+                        "totp_enabled": user["totp_enabled"],
                         "session_fp": auth.token_fingerprint(token)}
     raise HTTPException(status_code=401, detail="authentication required",
                         headers={"WWW-Authenticate": "Bearer"})
@@ -393,14 +418,22 @@ def require_session(identity: dict[str, Any] = Depends(_identity)) -> dict[str, 
     return identity
 
 
+def require_enrolling(identity: dict[str, Any] = Depends(require_session)) -> dict[str, Any]:
+    """A signed-in user whose password is their own (v0.27). The two-factor
+    endpoints use this, so an admin who must turn two-factor on can."""
+    if identity.get("must_change_password"):
+        raise HTTPException(403, _session_restriction({"must_change_password": True}))
+    return identity
+
+
 def require_user(identity: dict[str, Any] = Depends(require_session)) -> dict[str, Any]:
     # v0.19: after an admin reset, the password is one someone else has seen.
     # Until the owner replaces it, the session can change it and nothing else --
     # enforced here, on the server, so a client that skips the prompt gains
-    # nothing.
-    if identity.get("must_change_password"):
-        raise HTTPException(403, "password change required: an administrator reset this "
-                                 "password; choose your own with POST /auth/password")
+    # nothing. v0.27: the same for an admin without two-factor, when required.
+    reason = _session_restriction(identity)
+    if reason:
+        raise HTTPException(403, reason)
     return identity
 
 
@@ -416,11 +449,12 @@ def allow_ingest(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any
     """Ingestion is open to a service API key or to an analyst-or-higher user."""
     if identity["kind"] == "service":
         return identity
-    if identity.get("must_change_password"):
+    reason = _session_restriction(identity)
+    if reason:
         # v0.21: a session that must change its password could still ingest,
-        # because this dependency bypassed require_user. It can't now.
-        raise HTTPException(403, "password change required: choose your own with "
-                                 "POST /auth/password")
+        # because this dependency bypassed require_user. It can't now; nor (v0.27)
+        # an admin who must turn two-factor on.
+        raise HTTPException(403, reason)
     if auth.role_at_least(identity.get("role"), "analyst"):
         return identity
     raise HTTPException(403, "ingest requires a service API key or an analyst (or higher) user")
@@ -817,7 +851,7 @@ def _session_alive(session_fp: str) -> bool:
     # path used to check only that the session existed.
     with db.get_conn() as conn:
         user = db.get_session_user(conn, session_fp)
-    return user is not None and not user["must_change_password"]
+    return user is not None and _session_restriction(user) is None
 
 
 @app.get("/stream")
@@ -1357,7 +1391,8 @@ def login(req: LoginRequest, request: Request):
         "token": token,
         "user": {"username": user["username"], "role": user["role"],
                  "must_change_password": bool(user.get("must_change_password")),
-                 "totp_enabled": bool(user.get("totp_enabled"))},
+                 "totp_enabled": bool(user.get("totp_enabled")),
+                 "must_enrol_2fa": _needs_2fa_enrolment(user)},
         "expires_at": expires.isoformat(),
     }
 
@@ -1435,7 +1470,8 @@ def whoami(identity: dict = Depends(require_session)):
         user = db.get_user_by_username(conn, identity["username"])
     return {"username": identity["username"], "role": identity["role"],
             "must_change_password": bool(identity.get("must_change_password")),
-            "totp_enabled": bool(user and user["totp_enabled"])}
+            "totp_enabled": bool(user and user["totp_enabled"]),
+            "must_enrol_2fa": bool(user) and _needs_2fa_enrolment(user)}
 
 
 class TotpSetupRequest(BaseModel):
@@ -1481,16 +1517,18 @@ def _check_current_password(conn: sqlite3.Connection, username: str, password: s
 
 
 @app.get("/auth/totp")
-def totp_status(identity: dict = Depends(require_user)):
+def totp_status(identity: dict = Depends(require_enrolling)):
     with db.get_conn() as conn:
         user = db.get_user_by_username(conn, identity["username"])
         left = db.recovery_codes_left(conn, user["id"]) if user["totp_enabled"] else 0
     return {"enabled": bool(user["totp_enabled"]), "recovery_codes_left": left,
-            "pending": bool(user["totp_pending_secret"])}
+            "pending": bool(user["totp_pending_secret"]),
+            "required": REQUIRE_ADMIN_2FA and user["role"] == "admin"}
 
 
 @app.post("/auth/totp/setup")
-def totp_setup(req: TotpSetupRequest, request: Request, identity: dict = Depends(require_user)):
+def totp_setup(req: TotpSetupRequest, request: Request,
+               identity: dict = Depends(require_enrolling)):
     """Start turning two-factor on (v0.25). Returns a new secret and the
     otpauth:// URI an authenticator app reads from a QR code. Nothing changes
     for sign-in until a code from the app confirms it (POST /auth/totp/confirm),
@@ -1511,7 +1549,7 @@ def totp_setup(req: TotpSetupRequest, request: Request, identity: dict = Depends
 
 @app.post("/auth/totp/confirm")
 def totp_confirm(req: TotpConfirmRequest, request: Request,
-                 identity: dict = Depends(require_user)):
+                 identity: dict = Depends(require_enrolling)):
     """Finish turning two-factor on with a first code from the app. Returns the
     recovery codes -- once."""
     source, now = _client_source(request), _naive_utc_now()
@@ -1544,6 +1582,10 @@ def totp_disable(req: TotpDisableRequest, request: Request,
                                        source, now, "totp_disable")
         if not user["totp_enabled"]:
             raise HTTPException(409, "two-factor is not on")
+        if REQUIRE_ADMIN_2FA and user["role"] == "admin":
+            raise HTTPException(409, "this server requires two-factor for administrators; "
+                                     "to move it to a new phone, ask another admin to "
+                                     "remove it, then turn it on again")
         conn.execute("BEGIN IMMEDIATE")
         user = db.get_user_by_username(conn, identity["username"])
         if req.recovery_code:
@@ -1717,6 +1759,42 @@ def reset_password(username: str, req: ResetPasswordRequest, request: Request,
         out["password"] = new_password
         out["note"] = "shown once; give it to the user over a channel you trust"
     return out
+
+
+class RecoveryCodesRequest(BaseModel):
+    current_password: str = Field(max_length=1024)
+    code: str = Field(max_length=16)
+
+
+@app.post("/auth/totp/recovery-codes")
+def totp_new_recovery_codes(req: RecoveryCodesRequest, request: Request,
+                            identity: dict = Depends(require_user)):
+    """Replace your recovery codes (v0.27) -- after using some, or if the old
+    list may have been seen. The password and a current code from the app, both:
+    a fresh set of codes is as good as a second factor. Every old code stops
+    working; the new ones are returned once."""
+    source, now = _client_source(request), _naive_utc_now()
+    with db.get_conn() as conn:
+        user = _check_current_password(conn, identity["username"], req.current_password,
+                                       source, now, "recovery_codes")
+        if not user["totp_enabled"]:
+            raise HTTPException(409, "two-factor is not on")
+        conn.execute("BEGIN IMMEDIATE")
+        user = db.get_user_by_username(conn, identity["username"])
+        step = totp.verify(user["totp_secret"], req.code, last_step=user["totp_last_step"])
+        if step is None:
+            db.record_login_attempt(conn, identity["username"], source, "failure", now)
+            _record_auth_event(conn, "auth_failure", identity["username"], source, now,
+                               context="recovery_codes")
+            conn.commit()
+            raise HTTPException(401, "invalid code")
+        db.set_totp_last_step(conn, user["id"], step)
+        codes = totp.new_recovery_codes()
+        db.replace_recovery_codes(conn, user["id"], [totp.recovery_fingerprint(c) for c in codes])
+        _record_auth_event(conn, "recovery_codes_regenerated", identity["username"], source, now)
+        conn.commit()
+    return {"recovery_codes": codes,
+            "note": "the previous codes no longer work; each new one works once"}
 
 
 @app.post("/users/{username}/totp/reset")

@@ -255,6 +255,14 @@ export function disableTotp(currentPassword, code) {
   });
 }
 
+// v0.27: replace the recovery codes. Password and a current code, both.
+export function newRecoveryCodes(currentPassword, code) {
+  return request("/auth/totp/recovery-codes", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, code }),
+  });
+}
+
 export function resetUserTotp(username) {
   return request(`/users/${encodeURIComponent(username)}/totp/reset`, { method: "POST" });
 }

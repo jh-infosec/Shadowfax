@@ -500,13 +500,84 @@ def _run_two_factor_checks(browser, url: str) -> None:
     page.wait_for_selector(".login-error", timeout=10000)
     check("a wrong code is refused on screen",
           "did not work" in page.inner_text(".login-error") and page.locator(".topbar").count() == 0)
-    page.fill(".login-code", totp.code_at(secret, totp.current_step() + 1))
+    used_step = totp.current_step() + 1
+    page.fill(".login-code", totp.code_at(secret, used_step))
     page.click('button[type="submit"]')
     page.wait_for_selector(".topbar", timeout=15000)
     check("the right code signs in", page.locator(".topbar").count() == 1)
     listed = next(u for u in _api(url, "GET", "/users", None, admin) if u["username"] == name)
     check("and the server agrees two-factor is on", bool(listed["totp_enabled"]))
+    # v0.27: new recovery codes, with the password and a fresh code.
+    page.click("button:has-text('Two-factor')")
+    page.click(".twofactor-modal button:has-text('New recovery codes')")
+    page.fill(".twofactor-modal input[type='password']", pw)
+    # A code works once, so wait for a step after the one used to sign in.
+    while totp.current_step() < used_step:
+        page.wait_for_timeout(1000)
+    page.fill(".twofactor-modal .tf-code", totp.code_at(secret, used_step + 1))
+    page.click(".twofactor-modal button:has-text('Replace codes')")
+    page.wait_for_selector(".tf-recovery", timeout=10000)
+    check("new recovery codes can be issued from the dashboard",
+          page.locator(".tf-recovery li").count() == 10)
+    page.click("button:has-text('I have stored them')")
     context.close()
+
+
+def run_required_2fa(url: str, headed: bool) -> int:
+    """v0.27, against a server that requires two-factor for admins: the admin
+    signs in, gets the enrolment screen and nothing else, turns it on, and only
+    then reaches the dashboard. A separate mode because the requirement holds
+    the very admin the main checks sign in as."""
+    from playwright.sync_api import sync_playwright
+    import totp
+    print(f"\n== two-factor required for admins ({url}) ==")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=not headed)
+        page = browser.new_page(viewport={"width": 1300, "height": 900})
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e).splitlines()[0]))
+        try:
+            page.goto(url, wait_until="networkidle")
+            page.fill('input[autocomplete="username"]', USERNAME)
+            page.fill('input[type="password"]', PASSWORD)
+            page.click('button[type="submit"]')
+            page.wait_for_selector(".password-screen .twofactor-modal", timeout=15000)
+            check("an admin without two-factor gets the enrolment screen and nothing else",
+                  page.locator(".topbar").count() == 0
+                  and "requires two-factor" in page.inner_text(".password-screen"))
+            check("it cannot be dismissed, only completed or signed out of",
+                  page.locator(".password-screen .drawer-close").count() == 0
+                  and page.locator(".password-screen button:has-text('Sign out')").count() == 1)
+            page.fill(".twofactor-modal input[type='password']", PASSWORD)
+            page.click(".twofactor-modal button:has-text('Continue')")
+            page.wait_for_selector(".tf-key", timeout=10000)
+            secret = page.inner_text(".tf-key").replace(" ", "").strip()
+            page.fill(".tf-code", totp.code_at(secret, totp.current_step()))
+            page.click(".twofactor-modal button[type='submit']")
+            page.wait_for_selector(".tf-recovery", timeout=10000)
+            page.click("button:has-text('I have stored them')")
+            page.wait_for_selector(".topbar", timeout=15000)
+            page.wait_for_timeout(1500)
+            check("once it is on, the dashboard loads with data",
+                  page.locator(".table-wrap tbody tr").count() > 0)
+            page.click("button:has-text('Two-factor')")
+            page.wait_for_selector(".twofactor-modal .tf-on", timeout=10000)
+            body = page.inner_text(".twofactor-modal")
+            check("and it cannot be turned off from the dashboard while required",
+                  "Required for administrators" in body
+                  and page.locator(".twofactor-modal button:has-text('Turn off')").count() == 0)
+        except Exception as exc:
+            check("the enrolment flow completed", False,
+                  f"{type(exc).__name__}: {str(exc).strip().splitlines()[0]}")
+        finally:
+            check("no page errors", not errors, "; ".join(errors[:3]))
+            browser.close()
+    print()
+    if failures:
+        print(f"{len(failures)} check(s) failed")
+        return 1
+    print(f"All {passed} checks passed.")
+    return 0
 
 
 def _role_of(url: str, username: str) -> str | None:
@@ -567,10 +638,16 @@ def main(argv: list[str] | None = None) -> int:
                         "$SHADOWFAX_ADMIN_PASSWORD, else admin)")
     parser.add_argument("--headed", action="store_true",
                         help="show the browser, for watching or debugging")
+    parser.add_argument("--required-2fa", action="store_true",
+                        help="only the checks for a server started with "
+                             "SHADOWFAX_REQUIRE_ADMIN_2FA=1 (v0.27); the admin "
+                             "signing in must not have two-factor on yet")
     args = parser.parse_args(argv)
     global USERNAME, PASSWORD
     USERNAME = args.username or USERNAME
     PASSWORD = args.password or PASSWORD
+    if args.required_2fa:
+        return run_required_2fa(args.url, args.headed)
     return run(args.url, args.headed)
 
 

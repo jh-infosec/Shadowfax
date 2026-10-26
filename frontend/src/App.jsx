@@ -32,7 +32,9 @@ export default function App() {
   const [passwordOpen, setPasswordOpen] = useState(false);
   // After an admin reset the server refuses everything but a password change
   // (v0.19), so the dashboard does not try to load anything until it is done.
-  const ready = Boolean(user) && !user.must_change_password;
+  // v0.27: an admin who must turn two-factor on is held like a must-change
+  // password: the server refuses everything else, so nothing else is fetched.
+  const ready = Boolean(user) && !user.must_change_password && !user.must_enrol_2fa;
   const [authChecked, setAuthChecked] = useState(false);
 
   const [stats, setStats] = useState(null);
@@ -318,6 +320,16 @@ export default function App() {
 
   if (!user) {
     return <Login onAuthenticated={setUser} />;
+  }
+
+  if (!user.must_change_password && user.must_enrol_2fa) {
+    return (
+      <TwoFactorModal
+        forced
+        onEnrolled={() => setUser({ ...user, must_enrol_2fa: false, totp_enabled: true })}
+        onLogout={handleLogout}
+      />
+    );
   }
 
   if (user.must_change_password) {
