@@ -219,9 +219,12 @@ Harden the platform's own front door, then point the engine at it.
       admins can remove it for a lost phone, which raises `mfa_removed`.
 - [x] Require two-factor for admins (`v0.27.0`, `SHADOWFAX_REQUIRE_ADMIN_2FA`),
       and new recovery codes without turning two-factor off and on.
-- [ ] Update the dashboard's build toolchain: `npm audit` flags the Vite dev
-      server's esbuild and `source-map-js` (development only; nothing in the
-      shipped dashboard).
+- [x] Update the dashboard's build toolchain (`v0.28.0`): Vite 8 and
+      @vitejs/plugin-react 6; `npm audit` reports 0 vulnerabilities; the image's
+      build stage on Node 22.
+- [ ] Move CI's `checks` job to Node 22 and the actions to their Node 24
+      releases (`actions/checkout@v5` etc.) -- a ci.yml change, best batched
+      with the next one.
 
 ---
 

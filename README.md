@@ -269,6 +269,10 @@ Planned
 
 - Two-factor required for admins (a switch); new recovery codes — shipped (v0.27.0)
 
+### v0.28
+
+- Dashboard build toolchain updated (Vite 8, Node 22); npm audit clean — shipped (v0.28.0)
+
 ### v1.0
 
 - Electron Desktop Application

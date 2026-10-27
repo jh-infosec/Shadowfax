@@ -1,5 +1,44 @@
 # Changelog
 
+## Version 0.28.0
+
+Housekeeping: the dashboard's build toolchain.
+
+`npm audit` had been reporting three issues since v0.25 (one moderate, two
+high) — all in the **development** toolchain, none in what ships: Vite 5's
+bundled esbuild let any website read responses from the local dev server, and
+`source-map-js` had a denial-of-service bug. The fix the audit offered was a
+major-version jump, which is why it waited for a release of its own.
+
+- **Vite 5 → 8** (8.3.5) and **@vitejs/plugin-react 4 → 6** (6.1.2), both
+  pinned exactly. Vite 8 builds with Rolldown instead of esbuild + Rollup.
+  `npm audit`: **0 vulnerabilities**, runtime and development alike.
+- The configuration needed no change — the dashboard uses nothing Vite 8
+  removed. The comment in `vite.config.js` claiming the API sends "permissive
+  CORS headers" had been wrong since v0.3.1 locked CORS down to the dashboard
+  origin, and is corrected.
+- **The image's build stage moves to Node 22.** Node 20 left long-term support
+  in April 2026, and Vite 8 needs 20.19+ or 22.12+. Only that stage uses Node;
+  nothing of it is in the image that runs.
+- CI's `checks` job still builds on Node 20 (20.19+, which Vite 8 accepts).
+  Moving it, and the actions GitHub is warning about, is a ci.yml change; it is
+  on the roadmap to batch with the next one rather than ask for another paste.
+
+Nothing changes in the dashboard itself: same bundle size to within a kilobyte,
+same screens.
+
+### Verification
+
+- Clean `npm ci` and production build under **Node 20.20** and **Node 22.23**.
+  The lockfile carries Rolldown's and Lightning CSS's native bindings for every
+  platform, including `linux-x64-musl` (the Alpine build stage) and
+  `win32-x64-msvc` (a Windows checkout). The Alpine image itself could not be
+  built here (Docker Hub is unreachable from the build sandbox); the CI
+  `container` job is the first build of it.
+- The Vite 8 dev server starts and serves the app with React refresh.
+- **772** API checks, **54** dashboard checks and the **5** `--required-2fa`
+  checks all pass against the Vite 8 build; replay: all 12 assertions held.
+
 ## Version 0.27.0
 
 Finishing two-factor: making it **required** for administrators, and replacing

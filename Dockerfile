@@ -10,7 +10,9 @@
 # match whatever port the dashboard ended up on.
 
 # ---- stage 1: build the dashboard ----------------------------------------
-FROM node:20-alpine AS dashboard
+# Node 22 (v0.28): Node 20 left long-term support in April 2026, and Vite 8
+# needs 20.19+ or 22.12+. Only this build stage uses Node; nothing of it ships.
+FROM node:22-alpine AS dashboard
 
 WORKDIR /build
 
