@@ -387,6 +387,18 @@ manifest event, like a finding, skips the behavioural heuristics and the
 permission target check -- it is a declaration, not an action. Excess tools are
 reported once each across manifests; unlisted calls once per tool per manifest.
 
+#### profile_draft.py
+
+Profile drafts (v0.29), pure: `draft(actor_id, events, policy)` counts the
+agent's `tool_call` events by tool, grants the ones not on `RISKY_TOOLS`, denies
+the risky ones found in its calls or its latest manifest, adds default denied
+targets, lists configured-but-never-called tools (not granted), runs
+`permissions.evaluate` over the agent's history with the draft to show what it
+would flag, and offers the exact id and `family_pattern()` (`recon-agent-3` ->
+`recon-agent-*`) as keys. `GET /agents/{id}/profile-draft` (analyst) returns it;
+nothing is written. The dashboard inserts it into a copy of the policy for the
+editor, so saving goes through `PUT /policy` and `permissions.validate`.
+
 #### subjects.py
 
 Subject pages (v0.26), a pure function of a subject's events and alerts:
@@ -1104,7 +1116,7 @@ cli.py                  digest.py               ledger.py
 throttle.py             envelope.py             permissions.py
 tickets.py              limits.py               manifest.py
 ratelimit.py            timeutil.py             recover.py
-totp.py                 subjects.py
+totp.py                 subjects.py             profile_draft.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml
@@ -1138,4 +1150,5 @@ frontend/src/components/AccountsDrawer.jsx
 frontend/src/components/TwoFactorModal.jsx
 frontend/src/components/SubjectReport.jsx
 frontend/src/components/SubjectsDrawer.jsx
+frontend/src/components/ProfileDraftModal.jsx
 ```

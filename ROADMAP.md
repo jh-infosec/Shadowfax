@@ -313,6 +313,9 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       at `PUT /policy`. `GET /actors/{id}/permissions` and `shadowfax
       permissions` ask the detector's question ahead of time; the actor drawer
       shows the profile beside the timeline. Shipped in `v0.16.0`.
+- [x] Draft profiles from what an agent did (`v0.29.0`): its tool calls, not its
+      manifest; risky tools denied; never-called tools not granted; previews
+      what it would flag; opens in the policy editor unsaved.
 - [x] Close drawers with Escape (`v0.22.0`): one layer per press, topmost
       first. The policy editor and the password form ignore it -- both hold
       typed input that a stray keypress should not discard.

@@ -11,6 +11,7 @@ import LockoutsDrawer from "./components/LockoutsDrawer.jsx";
 import AccountsDrawer from "./components/AccountsDrawer.jsx";
 import TwoFactorModal from "./components/TwoFactorModal.jsx";
 import SubjectsDrawer from "./components/SubjectsDrawer.jsx";
+import ProfileDraftModal from "./components/ProfileDraftModal.jsx";
 import ExplanationModal from "./components/ExplanationModal.jsx";
 import NLSearch from "./components/NLSearch.jsx";
 import Login from "./components/Login.jsx";
@@ -72,6 +73,7 @@ export default function App() {
   const [accountsOpen, setAccountsOpen] = useState(false);
   const [twoFactorOpen, setTwoFactorOpen] = useState(false);
   const [subjectsOpen, setSubjectsOpen] = useState(false);
+  const [draftAgent, setDraftAgent] = useState(null);
   // The alert whose explanation modal is open, or null.
   const [explainAlert, setExplainAlert] = useState(null);
   // Active natural-language search result (snapshot), or null for the normal
@@ -237,7 +239,8 @@ export default function App() {
     const onKey = (e) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       if (passwordOpen || policyOpen || twoFactorOpen) return;
-      if (explainAlert) setExplainAlert(null);
+      if (draftAgent) setDraftAgent(null);
+      else if (explainAlert) setExplainAlert(null);
       else if (accountsOpen) setAccountsOpen(false);
       else if (subjectsOpen) setSubjectsOpen(false);
       else if (lockoutsOpen) setLockoutsOpen(false);
@@ -249,7 +252,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [passwordOpen, policyOpen, twoFactorOpen, explainAlert, accountsOpen, subjectsOpen, lockoutsOpen, digestOpen,
+  }, [passwordOpen, policyOpen, twoFactorOpen, draftAgent, explainAlert, accountsOpen, subjectsOpen, lockoutsOpen, digestOpen,
       incidentsOpen, selectedActorId]);
 
   const handleLogout = async () => {
@@ -266,6 +269,20 @@ export default function App() {
   const handleOpenPolicy = async () => {
     const current = await api.getPolicy();
     setPolicy(current);
+    setPolicyOpen(true);
+  };
+
+  // v0.29: open the policy editor with a drafted profile already in it. Nothing
+  // is saved until the analyst presses Save, which validates it server-side.
+  const openPolicyWithDraft = async (key, profile) => {
+    const current = await api.getPolicy();
+    const copy = JSON.parse(JSON.stringify(current));
+    const section = copy.agent_permissions || { enabled: true, unprofiled_agents: "alert", profiles: {} };
+    section.profiles = { ...(section.profiles || {}), [key]: profile };
+    copy.agent_permissions = section;
+    setDraftAgent(null);
+    setSelectedActorId(null);
+    setPolicy(copy);
     setPolicyOpen(true);
   };
 
@@ -399,7 +416,8 @@ export default function App() {
       </div>
 
       {actorDetail && (
-        <ActorDrawer detail={actorDetail} onClose={() => setSelectedActorId(null)} />
+        <ActorDrawer detail={actorDetail} onClose={() => setSelectedActorId(null)}
+                     onDraftProfile={canAnalyst ? setDraftAgent : undefined} />
       )}
 
       {incidentsOpen && <IncidentsDrawer onClose={() => setIncidentsOpen(false)} />}
@@ -412,6 +430,11 @@ export default function App() {
       )}
 
       {lockoutsOpen && <LockoutsDrawer onClose={() => setLockoutsOpen(false)} />}
+
+      {draftAgent && (
+        <ProfileDraftModal agentId={draftAgent} onClose={() => setDraftAgent(null)}
+                           onOpenInEditor={openPolicyWithDraft} />
+      )}
 
       {subjectsOpen && (
         <SubjectsDrawer

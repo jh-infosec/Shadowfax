@@ -273,6 +273,10 @@ Planned
 
 - Dashboard build toolchain updated (Vite 8, Node 22); npm audit clean — shipped (v0.28.0)
 
+### v0.29
+
+- Draft a permission profile from what an agent did — shipped (v0.29.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -416,7 +420,7 @@ python demo.py --fast          # put something on the dashboard first
 python test_dashboard.py
 ```
 
-Fifty-four checks, each one an assertion a person makes when they glance at the
+Fifty-seven checks, each one an assertion a person makes when they glance at the
 dashboard and believe it: that the alerts the engine found are rendered as rows,
 that rows carry a severity and an ATT&CK technique, that an ingested finding
 names the tool that reported it, that the ledger badge reads verified, that a
@@ -680,6 +684,27 @@ shows every configured tool marked against the profile, and what changed since
 the previous manifest.
 
 ---
+
+### Drafting a profile
+
+Writing a profile by hand means knowing every tool an agent needs. **Draft a
+profile from what it did** (in an agent's drawer, for analysts; `GET
+/agents/{id}/profile-draft`; `shadowfax permissions <agent> --draft`) builds a
+first draft from the agent's **tool calls** — not from its manifest. A profile
+copied from the configuration would grant whatever the agent was given, which is
+exactly what `excess_capability` is there to question.
+
+- the tools it called are granted, except shells and raw sockets (`bash`, `sh`,
+  `powershell`, `nc`…), which are denied wherever the agent has them;
+- configured tools it never called are not granted — saved, they become
+  `excess_capability`, candidates to remove from its configuration;
+- the usual secrets (`~/.ssh/*`, `~/.aws/*`, `/etc/*`, `*.pem`) are denied, and
+  no target allow-list is guessed;
+- it shows every past event the draft would have flagged.
+
+Nothing is saved: **Open in policy editor** puts the draft into the policy text
+under the agent's id or its family pattern (`recon-agent-*`), and it takes effect
+only when an analyst saves it.
 
 ## Evidence integrity
 

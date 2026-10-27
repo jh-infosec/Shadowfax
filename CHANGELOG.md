@@ -1,5 +1,65 @@
 # Changelog
 
+## Version 0.29.0
+
+Drafting permission profiles. A profile (v0.16) is the strongest thing Shadowfax
+knows about an agent — the one alert that needs no baseline — and the slowest to
+write, because it means knowing every tool the agent needs.
+
+### From what the agent did, not what it was given
+
+The obvious shortcut is to copy the agent's capability manifest into its
+profile. v0.18 decided against that, and this release keeps the decision: a
+profile written from the configuration grants whatever the agent was given, and
+"was it given more than it should have been?" is exactly the question
+`excess_capability` asks. Copying the manifest would answer "no" by definition.
+
+So **Draft a profile from what it did** (in an AI agent's drawer, analysts and
+up) builds the draft from the agent's **tool calls**:
+
+- **Granted:** the tools it called — except shells and raw sockets (`bash`,
+  `sh`, `zsh`, `cmd`, `powershell`, `nc`, `ncat`, `socat`, `telnet`…).
+- **Denied:** those risky tools, wherever the agent has them, called or merely
+  configured. One it actually used is called out as a decision to make on
+  purpose, not quietly granted.
+- **Not granted:** configured tools it never called. Once the profile is saved
+  they become `excess_capability` alerts — candidates to remove from the agent's
+  configuration. The draft says so.
+- **Targets:** the usual secrets denied (`~/.ssh/*`, `~/.aws/*`, `/etc/*`,
+  `*.pem`); no allow-list guessed — targets vary too much, and a wrong guess
+  either breaks the agent or grants too much. The draft says that too.
+- **What it would have flagged:** the draft is run over the agent's own history,
+  and every event it would report is counted by severity, so nobody saves a
+  profile that would light up the agent's past without knowing.
+- **Where to save it:** under the agent's own id, or its family pattern
+  (`recon-agent-3` → `recon-agent-*`, governing every numbered instance). The
+  narrower key is the default; if a profile already governs the agent, that key
+  is preselected and marked "replaces the existing profile".
+
+**Nothing is saved by drafting.** "Open in policy editor" puts the draft into the
+policy text, and it takes effect only when an analyst presses Save — through
+`PUT /policy` and the same validation as any hand-written profile.
+
+Also: `GET /agents/{id}/profile-draft` and `shadowfax permissions <agent>
+--draft`, which prints the JSON ready to paste, what it is based on and the
+notes.
+
+### Verification
+
+- **790** API checks (from 772), including a round trip: a new agent is drafted,
+  the draft is saved unedited and accepted by the policy validator, and it then
+  raises exactly the alerts the draft said it would — two critical
+  `permission_violation`s — plus `excess_capability` for the configured tool it
+  never used. Six mutations, each caught: the manifest copied into the profile,
+  risky tools granted, risky tools that were only configured ignored, the
+  preview skipping targets, viewers allowed to draft, and the family pattern
+  accepting ids with no separator. Two of them passed at first — the test data
+  could not tell them apart — and the data was extended until it could.
+- **57** dashboard checks (from 54): drafting from the drawer shows the evidence,
+  the draft opens in the policy editor under the chosen key, and closing the
+  editor without saving leaves the server's policy unchanged.
+- Replay: all 12 assertions held.
+
 ## Version 0.28.0
 
 Housekeeping: the dashboard's build toolchain.

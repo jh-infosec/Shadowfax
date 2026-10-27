@@ -279,6 +279,11 @@ export function revokeApiKey(id) {
   return request(`/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
+// v0.29: a draft permission profile from what the agent has done. Read-only.
+export function getProfileDraft(agentId) {
+  return request(`/agents/${encodeURIComponent(agentId)}/profile-draft`);
+}
+
 export function getPolicy() {
   return request("/policy");
 }

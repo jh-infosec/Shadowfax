@@ -1757,6 +1757,75 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== profile drafts (v0.29) ==")
+import profile_draft as _pd
+
+check("instance numbers make a family pattern",
+      _pd.family_pattern("recon-agent-3") == "recon-agent-*"
+      and _pd.family_pattern("build_17") == "build_*" and _pd.family_pattern("solo") is None
+      and _pd.family_pattern("agent7") is None)
+_policy_before = client.get("/policy").json()
+_d = client.get("/agents/recon-agent-3/profile-draft").json()
+check("the draft grants the tools the agent called, minus shells and raw sockets",
+      _d["profile"]["allowed_tools"] == ["curl", "nmap"])
+check("and denies the risky tools it has, whether configured or called",
+      _d["profile"]["denied_tools"] == ["bash", "nc"])
+check("a configured tool it never called is not granted -- the manifest is not the profile",
+      _d["evidence"]["configured"] == ["bash", "curl", "dig", "nmap"]
+      and _d["evidence"]["never_called"] == ["dig"] and "dig" not in _d["profile"]["allowed_tools"])
+check("sensitive targets are denied, and no allow-list is guessed",
+      "~/.ssh/*" in _d["profile"]["denied_targets"] and "allowed_targets" not in _d["profile"])
+check("it offers the exact id and the family pattern, and names the profile it would replace",
+      _d["keys"] == ["recon-agent-3", "recon-agent-*"] and _d["existing_profile"] == "recon-agent-*"
+      and any("replaces it" in n for n in _d["notes"]))
+check("it says what it would have flagged in the agent's own history",
+      len(_d["would_flag"]) >= 3 and all(f["severity"] == "critical" for f in _d["would_flag"]
+                                          if "bash" in f["reason"] or "'nc'" in f["reason"]))
+check("drafting saves nothing", client.get("/policy").json() == _policy_before)
+check("viewers cannot draft", as_user("viewer1", TEST_PW).get(
+      "/agents/recon-agent-3/profile-draft").status_code == 403)
+check("analysts can", as_user("analyst1", TEST_PW).get(
+      "/agents/recon-agent-3/profile-draft").status_code == 200)
+client.post("/events", json=[{"timestamp": "2026-10-23T09:00:00", "actor_id": "quiet-agent-1",
+                              "actor_type": "ai_agent", "event_type": "file_access",
+                              "target": "x", "metadata": {}}])
+check("an agent with no tool calls and no manifest has nothing to draft from",
+      client.get("/agents/quiet-agent-1/profile-draft").status_code == 404)
+
+# Round trip: a new agent, drafted, saved, and judged by its own draft.
+client.post("/agents/draft-agent-1/manifest", json={"tools": ["python", "curl", "bash", "ftp", "nc"]})
+_calls = [("python", "/srv/data/a.csv"), ("python", "/srv/data/b.csv"), ("curl", "https://api.example"),
+          ("bash", "/srv/data"), ("python", "~/.ssh/id_rsa")]
+client.post("/events", json=[{"timestamp": f"2026-10-23T10:0{i}:00", "actor_id": "draft-agent-1",
+                              "actor_type": "ai_agent", "event_type": "tool_call", "target": tgt,
+                              "metadata": {"tool": tool}} for i, (tool, tgt) in enumerate(_calls)])
+_d = client.get("/agents/draft-agent-1/profile-draft").json()
+check("a new agent's draft: python and curl granted, bash denied, ftp left out",
+      _d["profile"]["allowed_tools"] == ["curl", "python"] and "bash" in _d["profile"]["denied_tools"]
+      and "ftp" in _d["evidence"]["never_called"] and _d["existing_profile"] is None)
+check("a risky tool it was configured with but never called is denied too",
+      _d["profile"]["denied_tools"] == ["bash", "nc"] and "nc" in _d["evidence"]["never_called"])
+check("it warns that the agent used a tool the draft denies",
+      any("It used bash" in n for n in _d["notes"]))
+_pol = client.get("/policy").json()
+_pol["agent_permissions"]["profiles"]["draft-agent-1"] = _d["profile"]
+_r = client.put("/policy", json=_pol)
+check("the draft is a valid profile: the policy accepts it as is", _r.status_code == 200)
+_pv = [a for a in client.get("/alerts", params={"category": ["permission_violation"]}).json()
+       if a["actor_id"] == "draft-agent-1"]
+check("saved, it flags exactly what it said it would",
+      len(_pv) == len(_d["would_flag"]) == 2
+      and {a["severity"] for a in _pv} == {"critical"})
+_ex = [a for a in client.get("/alerts", params={"category": ["excess_capability"]}).json()
+       if a["actor_id"] == "draft-agent-1"]
+check("and the configured-but-unused tool becomes excess_capability, as the note said",
+      any("ftp" in a["message"] for a in _ex))
+_code_rc, _cout, _cerr = run_cli(["permissions", "draft-agent-1", "--draft"])
+check("`shadowfax permissions <agent> --draft` prints the profile and what it is based on",
+      _code_rc == 0 and '"draft-agent-1"' in _cout and "allowed_tools" in _cout
+      and "based on 5 tool call(s)" in _cout)
+client.put("/policy", json=_policy_before)
+
 print("\n== two-factor required for admins (v0.27) ==")
 import totp as _totp27
 from datetime import datetime as _dt27, timedelta as _td27, timezone as _tz27

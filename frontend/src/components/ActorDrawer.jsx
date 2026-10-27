@@ -4,7 +4,7 @@ import PermissionsPanel from "./PermissionsPanel.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
 import SubjectReport from "./SubjectReport.jsx";
 
-export default function ActorDrawer({ detail, onClose }) {
+export default function ActorDrawer({ detail, onClose, onDraftProfile }) {
   if (!detail) return null;
   const { actor_id, events, alerts, risk, permissions, manifest, subject_report } = detail;
 
@@ -42,6 +42,11 @@ export default function ActorDrawer({ detail, onClose }) {
         </div>
 
         <PermissionsPanel permissions={permissions} actorType={events[0]?.actor_type} />
+        {onDraftProfile && events[0]?.actor_type === "ai_agent" && (
+          <button className="btn draft-btn" onClick={() => onDraftProfile(actor_id)}>
+            Draft a profile from what it did
+          </button>
+        )}
         <CapabilitiesPanel manifest={manifest} />
         <SubjectReport report={subject_report} />
 

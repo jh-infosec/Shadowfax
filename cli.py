@@ -593,6 +593,11 @@ def cmd_permissions(client: Client, args, out) -> int:
 
         shadowfax permissions build-agent-2 --tool bash || refuse_the_call
     """
+    if args.draft:
+        path = "/agents/" + urllib.parse.quote(args.actor, safe="") + "/profile-draft"
+        d = client.call("GET", path)
+        emit(out, d, args.json, human_profile_draft)
+        return EXIT_OK
     params = {"actor_type": args.actor_type}
     if args.tool is not None:
         params["tool"] = args.tool
@@ -603,6 +608,22 @@ def cmd_permissions(client: Client, args, out) -> int:
     emit(out, report, args.json, human_permissions)
     verdict = report.get("check")
     return EXIT_FAIL if verdict and not verdict["within_permissions"] else EXIT_OK
+
+
+def human_profile_draft(out, d) -> None:
+    """The draft as the JSON to paste under policy.agent_permissions.profiles,
+    then what it is based on and what it would have flagged (v0.29)."""
+    # The narrower key unless a profile already governs the agent under one of them.
+    key = d["existing_profile"] if d["existing_profile"] in d["keys"] else d["keys"][0]
+    print(f"# draft profile for {d['actor_id']} -- review, then add under "
+          f"agent_permissions.profiles", file=out)
+    print(json.dumps({key: d["profile"]}, indent=2), file=out)
+    ev = d["evidence"]
+    used = ", ".join(f"{u['tool']} x{u['calls']}" for u in ev["used"]) or "none"
+    print(f"\nbased on {ev['tool_calls']} tool call(s): {used}", file=out)
+    print(f"would have flagged {len(d['would_flag'])} past event(s)", file=out)
+    for note in d["notes"]:
+        print(f"  - {note}", file=out)
 
 
 def human_permissions(out, report) -> None:
@@ -829,6 +850,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("actor", metavar="ACTOR_ID")
     sp.add_argument("--tool", help="a tool the actor might call")
     sp.add_argument("--target", help="a target the actor might touch")
+    sp.add_argument("--draft", action="store_true",
+                    help="draft a profile from what the agent has done (analyst; "
+                         "prints it, saves nothing)")
     sp.add_argument("--actor-type", dest="actor_type", default="ai_agent",
                     choices=["human", "ai_agent", "service_account"],
                     help="judged as this kind of actor (default ai_agent)")

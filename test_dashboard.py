@@ -433,6 +433,34 @@ def _run_checks(page, url: str, requested: list[str]) -> None:
     page.keyboard.press("Escape")
     page.wait_for_timeout(300)
 
+    # -- a profile drafted from what the agent did (v0.29) ------------------
+    # recon-agent-3 is in the sample data. The draft goes into the policy
+    # editor; closing the editor without saving must leave the policy alone.
+    before_desc = _api(url, "GET", "/policy", None, admin)["agent_permissions"]["profiles"][
+        "recon-agent-*"]["description"]
+    search = page.locator('input[placeholder*="actor"]')
+    search.fill("recon-agent-3")
+    page.wait_for_timeout(1500)
+    page.locator(".table-wrap tbody tr").first.click()
+    page.click("button:has-text('Draft a profile')")
+    page.wait_for_selector(".draft-modal .draft-json", timeout=10000)
+    body = page.inner_text(".draft-modal")
+    check("a profile can be drafted from what the agent did, with its evidence",
+          "nmap" in body and "dig (unused)" in body and "would have flagged" in body)
+    page.locator(".draft-key", has_text="recon-agent-*").locator("input").check()
+    page.click("button:has-text('Open in policy editor')")
+    page.wait_for_selector(".policy-modal .policy-textarea", timeout=10000)
+    text = page.input_value(".policy-textarea")
+    check("it opens in the policy editor under the chosen key, unsaved",
+          "Drafted from recon-agent-3" in text and '"recon-agent-*"' in text)
+    page.click(".policy-modal button:has-text('Cancel')")
+    page.wait_for_timeout(500)
+    after_desc = _api(url, "GET", "/policy", None, admin)["agent_permissions"]["profiles"][
+        "recon-agent-*"]["description"]
+    check("closing the editor without saving leaves the policy as it was", after_desc == before_desc)
+    search.fill("")
+    page.wait_for_timeout(800)
+
 
 def _api(url: str, method: str, path: str, body=None, token: str | None = None):
     req = urllib.request.Request(

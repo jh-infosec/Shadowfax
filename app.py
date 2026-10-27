@@ -48,6 +48,7 @@ import ledger
 import limits
 import manifest
 import permissions
+import profile_draft
 import ratelimit
 import subjects
 import throttle
@@ -57,7 +58,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.28.0"
+VERSION = "0.29.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -1026,6 +1027,21 @@ def post_manifest(agent_id: str, doc: dict[str, Any], response: Response,
         "alerts": _alerts_for(identity, [a for a in alerts if a["category"] in
                    ("excess_capability", "capability_drift", "undeclared_agent")]),
     }
+
+
+@app.get("/agents/{agent_id}/profile-draft")
+def agent_profile_draft(agent_id: str, identity: dict = Depends(require_role("analyst"))):
+    """A first draft of a permission profile for this agent, from what it has
+    actually done (v0.29) -- see profile_draft.py for why not from its manifest.
+    Read-only: nothing is saved until an analyst puts it in the policy."""
+    with db.get_conn() as conn:
+        events = db.get_events_for_actor(conn, agent_id)
+        policy = db.get_policy(conn) or DEFAULT_POLICY
+    result = profile_draft.draft(agent_id, events, policy)
+    if result is None:
+        raise HTTPException(404, f"'{agent_id}' has made no tool calls and declared no "
+                                 f"manifest, so there is nothing to draft from")
+    return result
 
 
 @app.get("/actors/{actor_id}/permissions")
