@@ -4,6 +4,8 @@
 
 > AI Security Operations Platform for Monitoring Autonomous AI Agents
 
+![The Shadowfax dashboard after the scripted attack: alerts worst first, each with its ATT&CK technique, live over Server-Sent Events](docs/screenshots/dashboard.png)
+
 ---
 
 ## Why Shadowfax?
@@ -82,6 +84,43 @@ investigation and explainability.
 - Ingest budgets — each API key and user gets events per minute; a credential that floods is refused whole and raises an alert about itself
 - Dashboard checked in a real browser — building a bundle proves it compiles, not that anything reaches the screen
 - Automated API testing
+
+---
+
+## Screenshots
+
+Every image here is produced by `screenshots.py` against a real instance after
+the scripted attack (`demo.py`), so they show the product as it is.
+
+**An incident, with the kill chain it completed.** Related alerts grouped into
+one incident; the ATT&CK tactics it advanced through, in order; escalated to
+critical because the chain reached exfiltration.
+
+![Incident drawer showing a completed kill chain from reconnaissance to exfiltration](docs/screenshots/incident-kill-chain.png)
+
+**An agent beside what it was allowed and what it was given.** The permission
+profile that governs it, the tools its configuration declares (one of them
+outside the profile), and its timeline with the breaches marked.
+
+![Agent drawer with declared permissions, capability manifest and timeline](docs/screenshots/agent-permissions.png)
+
+**A profile drafted from what the agent did** — not from its configuration —
+with what it would have flagged in the agent's own history.
+
+![Profile draft built from observed tool calls](docs/screenshots/profile-draft.png)
+
+**Everything other tools reported about one host,** grouped by the tool that
+reported it, with the finding two scanners agree on called out.
+
+![Subject page for a host, findings grouped by tool](docs/screenshots/subject-report.png)
+
+**Accounts and API keys,** managed from the dashboard; every change in the ledger.
+
+![Accounts drawer with users, roles, status and API keys](docs/screenshots/accounts.png)
+
+**Two-factor sign-in.**
+
+![Sign-in asking for the authenticator code](docs/screenshots/two-factor-sign-in.png)
 
 ---
 
@@ -498,6 +537,20 @@ make it public once under **your profile → Packages → shadowfax → Package
 settings → Change visibility**.
 
 ---
+
+
+### Updating the screenshots
+
+```bash
+python demo.py --fast        # against a throwaway instance
+python screenshots.py        # rewrites docs/screenshots/*.png
+```
+
+The script adds a little data of its own (two scanners reporting on one host, a
+few accounts, a user with two-factor on) so that every screen it shows has
+something on it — use an instance whose data you can lose. `test_api.py` checks
+that every image the README shows exists, so a screenshot that never got
+uploaded fails CI rather than showing a broken image.
 
 ## Command line
 

@@ -270,8 +270,10 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       detection as well as the throttle. Shipped in `v0.12.0`.
 - [x] Publish the image, so `docker run ghcr.io/jh-infosec/shadowfax` needs no
       clone at all. Shipped in `v0.17.0`; signed since `v0.20.0`.
-- [ ] A recorded terminal/dashboard capture of the replay in the README, for
-      people who will not run anything.
+- [x] Screenshots in the README (`v0.30.0`), for people who will not run
+      anything: seven, all produced by `screenshots.py` from a real instance
+      after the replay, so they are regenerated rather than redrawn.
+- [ ] An animated capture of the replay itself, alerts arriving live.
 
 ---
 

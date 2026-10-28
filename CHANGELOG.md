@@ -1,5 +1,35 @@
 # Changelog
 
+## Version 0.30.0
+
+Screenshots. The README described a kill chain forming, a profile drafted from
+behaviour, a host two scanners agree about — in words. Most people looking at a
+repository will not run anything, so it now shows them.
+
+- **Seven screenshots in the README:** the dashboard (worst first) at the top,
+  and a gallery after Current Features: an incident with its completed kill
+  chain, an agent beside its profile and its manifest, a drafted profile, a
+  subject page, the Accounts drawer, and two-factor sign-in. Each has alt text.
+- **`screenshots.py` makes all of them**, from a real instance after the
+  scripted attack (`demo.py --fast`), so they are regenerated after a UI change
+  rather than redrawn, and they never show a mock-up. It adds a little data of
+  its own (two scanners on one host, a few accounts and keys, a user with
+  two-factor on) so no screen is empty. The images live in `docs/screenshots/`.
+- **CI checks them:** every image the README references must exist, be a real
+  PNG, and have alt text, and no screenshot may sit unused. A folder that didn't
+  get uploaded fails the build rather than showing a broken image.
+- Taking them showed one rough edge: the Incidents drawer squeezed an actor's
+  name beside its alert count until `demo-agent-1` wrapped one character per
+  line. The name now has its own line, with the count beneath.
+- `docs/` is excluded from the Docker build context.
+
+### Verification
+
+- **796** API checks (from 790), including the six for the screenshots;
+  **57** dashboard checks (the incident checks pass on the new layout); replay:
+  all 12 assertions held.
+- Every screenshot was looked at after capture.
+
 ## Version 0.29.0
 
 Drafting permission profiles. A profile (v0.16) is the strongest thing Shadowfax

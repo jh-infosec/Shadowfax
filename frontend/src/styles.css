@@ -185,8 +185,14 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 }
 .incident-row:hover { background: var(--panel-2); }
 .incident-row.active { background: var(--panel-2); border-color: var(--border); }
-.incident-actor { font-family: var(--mono); font-size: 12px; }
-.incident-meta { font-size: 10.5px; color: var(--muted-2); margin-left: auto; white-space: nowrap; }
+/* v0.30: name on its own line, details beneath -- an actor id squeezed beside
+   the meta wrapped one character per line. */
+.incident-row { flex-wrap: wrap; row-gap: 2px; }
+.incident-actor {
+  font-family: var(--mono); font-size: 12px; flex: 1 1 0; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.incident-meta { font-size: 10.5px; color: var(--muted-2); flex-basis: 100%; padding-left: 16px; white-space: nowrap; }
 .incident-detail { min-width: 0; }
 .incident-title { font-family: var(--mono); font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 8px; }
 .incident-sub { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-top: 4px; }

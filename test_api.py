@@ -1757,6 +1757,26 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== README screenshots (v0.30) ==")
+import re as _re30
+from pathlib import Path as _P30
+_root30 = _P30(__file__).parent
+_readme30 = (_root30 / "README.md").read_text(encoding="utf-8")
+_imgs30 = _re30.findall(r"!\[[^\]]*\]\((?!https?://)([^)\s]+)\)", _readme30)
+check("the README shows screenshots", len(_imgs30) >= 7)
+_missing30 = [p for p in _imgs30 if not (_root30 / p).is_file()]
+check("every image the README shows is in the repository", not _missing30)
+check("and each is a real PNG, not an empty or renamed file",
+      all((_root30 / p).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n" and (_root30 / p).stat().st_size > 5000
+          for p in _imgs30 if (_root30 / p).is_file()))
+_shots30 = sorted(p.name for p in (_root30 / "docs" / "screenshots").glob("*.png"))
+check("and no screenshot sits unused", sorted(_P30(p).name for p in _imgs30) == _shots30)
+check("every image has alt text, for screen readers and broken connections",
+      all(alt.strip() for alt in _re30.findall(r"!\[([^\]]*)\]\((?!https?://)", _readme30)))
+import py_compile as _pc30
+_pc30.compile(str(_root30 / "screenshots.py"), doraise=True)
+check("the script that makes them compiles", True)
+
 print("\n== profile drafts (v0.29) ==")
 import profile_draft as _pd
 
