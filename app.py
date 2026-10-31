@@ -60,7 +60,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.31.0"
+VERSION = "0.32.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -781,7 +781,7 @@ def ingest_findings(doc: dict[str, Any], response: Response,
         # to like. A partially-accepted envelope hides an emitter's bug, and
         # whoever is writing the next emitter deserves to be told exactly which
         # field is wrong.
-        raise HTTPException(400, f"invalid findings envelope — {err.describe()}")
+        raise HTTPException(400, f"invalid findings envelope: {err.describe()}")
 
     tool = doc["source"]["tool"]
     actor_id = envelope.actor_for(doc["subject"])

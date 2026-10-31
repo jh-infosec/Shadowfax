@@ -135,7 +135,7 @@ def verify_chain(entries: list[dict[str, Any]],
         recomputed = entry_hash(prev, row)
         if recomputed != stored_entry:
             return _broken(position, row, len(entries),
-                           "the entry's content does not match its hash -- "
+                           "the entry's content does not match its hash, so "
                            "this event was modified after it was recorded")
 
         prev = stored_entry
@@ -194,7 +194,7 @@ def _broken(position: int, row: dict[str, Any], total: int,
 def describe(report: dict[str, Any]) -> str:
     """One human line for a verification report -- what the CLI prints."""
     if report["ok"]:
-        return (f"ledger intact — {report['entries']} entries verified, "
+        return (f"ledger intact: {report['entries']} entries verified, "
                 f"head {report['head'][:16]}…")
     where = report.get("broken_at")
     if where:

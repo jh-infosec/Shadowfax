@@ -323,7 +323,7 @@ class Demo:
 
         self.narrate("A patient attacker guesses at a Shadowfax account, "
                      "waiting out each refusal.",
-                     "401s, then 429s — and Shadowfax alerting on the attempt",
+                     "401s, then 429s, and Shadowfax alerting on the attempt",
                      "shadowfax-auth:brute_force_auth")
         self.brute_force("j.bartlett")
         self.pause(1)
@@ -358,7 +358,7 @@ class Demo:
             if category not in self.raised:
                 where = category.replace(":", " / ")
                 self.failures.append(
-                    f"step {step}: expected {where} ({described}) — not raised")
+                    f"step {step}: expected {where} ({described}), not raised")
 
         # The chain is the claim that matters most, and it is the one no single
         # alert can establish: it exists only in the relationship between them.
@@ -452,7 +452,7 @@ class Demo:
         print()
         print(f"{indent}{self._c('⛓ KILL CHAIN', BOLD + RED)}  {stages}")
         if chain.get("escalated"):
-            esc = f"  escalated to CRITICAL — the chain reached {chain['terminal_tactic']}"
+            esc = f"  escalated to CRITICAL: the chain reached {chain['terminal_tactic']}"
             print(f"{indent}{self._c(esc, RED)}")
         corr = (f"  correlated from {len(detail['alerts'])} separate alerts, "
                 f"deterministically")

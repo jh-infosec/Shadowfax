@@ -32,6 +32,8 @@ from typing import Any, Iterator
 # The tests reassign this module attribute directly rather than setting the
 # variable, so it stays a plain module-level value and not a function call.
 DB_PATH = Path(os.environ.get("SHADOWFAX_DB") or (Path(__file__).parent / "shadowfax.db"))
+# v0.32: PostgreSQL instead, when set (see pgcompat.py). SQLite stays the default.
+DATABASE_URL = (os.environ.get("SHADOWFAX_DATABASE_URL") or "").strip() or None
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -259,8 +261,20 @@ def _migrate_legacy_alerts(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE alerts")
 
 
+def backend() -> str:
+    return "postgresql" if DATABASE_URL else "sqlite"
+
+
 @contextmanager
 def get_conn(path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    if path is None and DATABASE_URL:
+        import pgcompat
+        conn = pgcompat.Connection(DATABASE_URL, pgcompat.serial_tables(SCHEMA))
+        try:
+            yield conn
+        finally:
+            conn.close()
+        return
     # A generous busy timeout: writers now queue for the ledger head (v0.21)
     # rather than racing past each other.
     conn = sqlite3.connect(path or DB_PATH, timeout=30)
@@ -406,7 +420,7 @@ def known_finding_ids(conn: sqlite3.Connection, tool: str,
                 FROM events
                 WHERE event_type = 'finding'
                   AND json_extract(metadata, '$.source.tool') = ?
-                  AND (? IS NULL OR actor_id = ?)
+                  AND (CAST(? AS TEXT) IS NULL OR actor_id = ?)
                   AND json_extract(metadata, '$.finding.id') IN ({placeholders})""",
             (tool, actor_id, actor_id, *chunk),
         ).fetchall()
@@ -619,7 +633,8 @@ def actor_risk_scores(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     # out-score one critical. This is the only change the ladder forces on
     # Shadowfax's scoring, and it is spelled out in findings-envelope.md.
     weight = {"critical": 10, "high": 5, "medium": 2, "low": 1, "info": 0}
-    rows = conn.execute("SELECT actor_id, actor_type, severity, COUNT(*) as n FROM alerts GROUP BY actor_id, severity").fetchall()
+    rows = conn.execute("SELECT actor_id, MIN(actor_type) AS actor_type, severity, COUNT(*) AS n "
+                        "FROM alerts GROUP BY actor_id, severity").fetchall()
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
         d = out.setdefault(r["actor_id"], {"actor_type": r["actor_type"], "score": 0,

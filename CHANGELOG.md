@@ -1,5 +1,46 @@
 # Changelog
 
+## Version 0.32.0
+
+PostgreSQL support. SQLite is still the default and still needs nothing set up,
+but it only lets one process write at a time. Set `SHADOWFAX_DATABASE_URL` to a
+PostgreSQL database and Shadowfax runs there instead, with nothing else changed.
+
+```bash
+SHADOWFAX_DATABASE_URL=postgresql://shadowfax:secret@db-host:5432/shadowfax
+```
+
+### How it works
+
+- **One set of queries.** I didn't want two copies of every query to keep in
+  step, so `db.py` keeps its SQL and a new module, `pgcompat.py`, gives it a
+  connection that behaves like the sqlite3 one. It translates the handful of
+  SQLite-only pieces on the way through (`?` placeholders, `datetime('now')`,
+  `INSERT OR IGNORE`, `json_extract`, `PRAGMA table_info`). Two queries were
+  changed so they mean the same thing on both databases.
+- **The write lock.** The ledger, sign-in failure counts, the last-admin guard
+  and the two-factor step all depend on SQLite's `BEGIN IMMEDIATE` so that two
+  requests can't act on the same read (v0.21). On PostgreSQL the same code takes
+  a transaction-scoped advisory lock. Tested by removing it: 32 parallel
+  ingests then fork the ledger and the suite fails.
+- **Same answers on both.** Text columns use byte-order collation, so sorting
+  and comparisons match SQLite even on a server set to `en_US`. Free-text search
+  still ignores case (SQLite's `LIKE` does, PostgreSQL's doesn't, so it becomes
+  `ILIKE`). A new check covers the search.
+- `psycopg[binary]` is added to `requirements.txt`, so the Docker image can talk
+  to PostgreSQL out of the box.
+
+### Tested
+
+- All 833 API checks pass on SQLite and on PostgreSQL 16 (with an `en-US`
+  locale, the awkward case). CI runs the suite against a PostgreSQL service as
+  well as SQLite.
+- The scripted attack (`demo.py --assert`, 12 of 12) and the 57 browser checks
+  pass against a live server on PostgreSQL.
+- Found along the way: a two-factor test computed the same code twice, and on
+  the slower run the 30-second step could roll over in between. It now reuses
+  one code.
+
 ## Version 0.31.0
 
 Sending alerts to a SIEM. A detection that only appears on Shadowfax's own

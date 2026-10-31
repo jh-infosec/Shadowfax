@@ -2,120 +2,107 @@
 
 [![CI](https://github.com/jh-infosec/Shadowfax/actions/workflows/ci.yml/badge.svg)](https://github.com/jh-infosec/Shadowfax/actions/workflows/ci.yml)
 
-> AI Security Operations Platform for Monitoring Autonomous AI Agents
+> A security operations platform for monitoring autonomous AI agents.
 
-![The Shadowfax dashboard after the scripted attack: alerts worst first, each with its ATT&CK technique, live over Server-Sent Events](docs/screenshots/dashboard.png)
+![The Shadowfax dashboard after the scripted attack, with alerts sorted worst first and each tagged with its ATT&CK technique](docs/screenshots/dashboard.png)
 
----
+## Why I built this
 
-## Why Shadowfax?
+AI agents are being trusted with more and more: writing code, running tools,
+calling APIs and making decisions with very little supervision. Most security
+tooling was built to watch people, service accounts and servers. It doesn't
+really have a concept of an agent that decides for itself what to do next.
 
-As autonomous AI agents become more capable, they are increasingly being
-trusted to write code, use tools, access APIs and make decisions with minimal
-human supervision.
+Shadowfax is my attempt at what a security operations platform could look like
+if AI agents were treated as identities in their own right. I'm building it
+alongside my studies in offensive security and AI, and it's the main project in
+my portfolio.
 
-Traditional security tooling was designed to monitor human users, service
-accounts and infrastructure, not autonomous AI systems.
+It tries to answer three questions about any agent:
 
-Shadowfax explores what a modern security operations platform might look like
-if AI agents became first-class identities inside an organisation.
-
-The project is being developed alongside my studies in offensive security and
-artificial intelligence, with the goal of combining practical cybersecurity
-engineering with modern AI workflows.
-
----
-
-## Project Goals
-
-Shadowfax is designed to answer three questions:
-
-- What is this agent doing?
+- What is it doing?
 - Why is it doing it?
-- Should this behaviour be trusted?
+- Should that behaviour be trusted?
 
-Rather than acting as a security boundary, Shadowfax focuses on visibility,
-investigation and explainability.
+It is a monitoring and investigation tool. It watches, explains and alerts. It
+is not a security boundary and doesn't block anything.
 
----
+## What it does
 
-## Current Features
+**Detection**
 
-- REST API built with FastAPI
-- SQLite event database
-- Rule-based detection engine across twenty-eight alert categories, including AI-agent tool-call analysis
-- Policy management with full rescan on change
-- Actor risk scoring
-- Stable, deterministic alert identity that survives a rescan
-- Acknowledge and assign alerts, with analyst state that persists across rescans
-- Authentication with user accounts, roles (admin / analyst / viewer) and API keys
-- Subject pages — everything other tools reported about a file, host or workspace, grouped by tool, with findings two tools agree on called out
-- SIEM forwarding — each new alert sent once to a webhook (signed) or syslog (CEF or JSON), with retries, and an alert if the SIEM stops receiving
-- Two-factor sign-in — codes from any authenticator app (QR enrolment from the dashboard), single-use and throttled, with recovery codes; removing it raises an alert
-- Password changes and admin resets — the current password required and throttled, other sessions signed out, admin-reset passwords forced to change before anything else works
-- Dashboard sign-in, with the UI adapting to the signed-in user's role
-- Live push over Server-Sent Events — the dashboard updates the instant data changes
-- Agent-trace ingest — flags destructive tool calls and out-of-scope actions by AI agents
-- Agent permissions — declare which tools and targets each agent was given; the first step outside its profile is reported, with no baseline needed, and undeclared agents are flagged
-- Capability manifests — the tools an agent is configured with, compared with what it is allowed (excess tools flagged before they are used) and with what it calls (tools its own configuration does not list)
-- MITRE ATT&CK mapping — every alert tagged with technique IDs from a shared registry
-- Alert correlation — related alerts grouped into incidents, each with a generated report
-- Attack-chain detection — incidents whose alerts advance through the ATT&CK kill chain in order are flagged, and completed chains escalate to critical
-- Completion-fraud detection — flags agents that claim more coverage than their trace shows
-- Token-spend anomaly — flags spend spikes against an actor's own baseline
-- AI investigation assistant — explains an alert or incident in plain English for an analyst; it explains, never decides, and works without an API key (deterministic fallback)
-- Natural-language alert search — ask in plain English; the assistant translates the query into a validated filter and shows how it read it (detection stays deterministic)
-- React dashboard with a live alert table
-- Actor timelines, showing alerts attached to the events that produced them
-- Filtering by severity, actor type, category and free-text search
-- Policy editing from the dashboard
-- Triage digest — the open incidents that most need an analyst, ranked deterministically with the reasons shown
-- Command-line interface — ingest, query, explain and gate on alerts from a shell; `--json` everywhere for agents
-- Tamper-evident event ledger — every event hash-chained to the one before it, so an edit, deletion or reordering breaks the chain at a locatable point
-- Sign-in throttling and lockout — backoff then lockout on the platform's own login, with no enumeration oracle and no sleeping
-- Accounts screen — admins add users, change roles, disable and re-enable accounts, and issue or revoke API keys from the dashboard; passwords and keys are generated, shown once, and every change is in the ledger
-- Console recovery — a lost admin password is reset from the server's own shell, never over the network, and raises an alert
-- History that cannot be quietly rewritten — when a new upload makes alerts disappear, Shadowfax records which ones and who sent it, and raises `history_rewritten`
-- Self-monitoring — attacks on Shadowfax's own front door become ordinary events and raise ordinary alerts, through the same detectors as everything else
-- Findings-envelope ingest — any tool that writes the shared envelope can post findings, and Shadowfax needs to know nothing about it
-- Findings-envelope export — Shadowfax speaks the format as well as reads it, so the portfolio's other tools can consume it in turn
-- One-command packaging — `docker compose up`, plus a scripted attack replay that makes the engine demonstrate itself
-- CI that builds the image and replays the attack against it, so every commit proves the detections still happen
-- Published image — every GitHub release ships `ghcr.io/jh-infosec/shadowfax`, only after the tests and the replay pass, with provenance and an SBOM, signed with Sigstore cosign, and never with a known password
-- Ingest budgets — each API key and user gets events per minute; a credential that floods is refused whole and raises an alert about itself
-- Dashboard checked in a real browser — building a bundle proves it compiles, not that anything reaches the screen
-- Automated API testing
+- 28 deterministic detectors, including AI agent tool call analysis (destructive
+  commands, out of scope actions, privilege escalation, data exfiltration)
+- Alerts are rebuilt from the event history whenever the policy changes, and
+  each alert keeps a stable id across rescans
+- Every alert is mapped to MITRE ATT&CK techniques
+- Related alerts are grouped into incidents, and incidents that move through the
+  kill chain in order are flagged (and escalated to critical if they reach
+  exfiltration)
+- Agent permission profiles: say which tools and targets an agent was given, and
+  the first step outside that is reported with no baseline needed
+- Capability manifests: compare the tools an agent was configured with against
+  what it's allowed and what it actually calls
+- Draft a permission profile from what an agent actually did
+- Completion fraud (an agent claiming more work than its trace shows) and token
+  spend spikes against an agent's own baseline
+- Ingest findings from other tools through a shared JSON format, and export
+  Shadowfax's own findings in the same format
 
----
+**Investigation**
+
+- React dashboard with a live alert table (Server-Sent Events, no refreshing)
+- Actor timelines that show each alert next to the event that caused it
+- Subject pages for files and hosts, grouping what each tool reported
+- A triage digest that ranks open incidents and shows why
+- An optional AI assistant that explains alerts and incidents in plain English
+  and turns plain English searches into filters. It never decides anything.
+- A command line tool with `--json` output and exit codes for scripts
+
+**Platform**
+
+- Runs on SQLite with no setup, or on PostgreSQL for multiple writers
+- Users with admin, analyst and viewer roles, plus API keys for agents
+- Two-factor sign-in (TOTP) with recovery codes, optionally required for admins
+- Sign-in throttling and lockout that doesn't reveal which usernames exist
+- A hash-chained event ledger, so edits, deletions and reordering are detectable
+- Shadowfax monitors its own sign-in page and raises normal alerts about attacks
+  on itself
+- Sends alerts to a SIEM over a signed webhook or syslog (CEF or JSON)
+- Per-credential ingest budgets and request size limits
+- One command Docker setup, plus a signed image published to ghcr.io
+- CI that runs the tests on both databases, builds the image and replays a
+  scripted attack against it
 
 ## Screenshots
 
-Every image here is produced by `screenshots.py` against a real instance after
-the scripted attack (`demo.py`), so they show the product as it is.
+These are generated by `screenshots.py` against a real instance after the
+scripted attack (`demo.py`), so they show the product as it actually is.
 
-**An incident, with the kill chain it completed.** Related alerts grouped into
-one incident; the ATT&CK tactics it advanced through, in order; escalated to
-critical because the chain reached exfiltration.
+**An incident and the kill chain it completed.** Related alerts are grouped
+into one incident, the ATT&CK tactics are shown in order, and the incident is
+escalated to critical because the chain reached exfiltration.
 
 ![Incident drawer showing a completed kill chain from reconnaissance to exfiltration](docs/screenshots/incident-kill-chain.png)
 
-**An agent beside what it was allowed and what it was given.** The permission
-profile that governs it, the tools its configuration declares (one of them
+**An agent next to what it was allowed and what it was given.** The permission
+profile that applies to it, the tools its configuration declares (one of them
 outside the profile), and its timeline with the breaches marked.
 
 ![Agent drawer with declared permissions, capability manifest and timeline](docs/screenshots/agent-permissions.png)
 
-**A profile drafted from what the agent did** — not from its configuration —
-with what it would have flagged in the agent's own history.
+**A profile drafted from what the agent actually did,** along with what it would
+have flagged in that agent's history.
 
 ![Profile draft built from observed tool calls](docs/screenshots/profile-draft.png)
 
-**Everything other tools reported about one host,** grouped by the tool that
-reported it, with the finding two scanners agree on called out.
+**Everything other tools reported about one host,** grouped by tool, with the
+finding that two scanners agree on called out at the top.
 
 ![Subject page for a host, findings grouped by tool](docs/screenshots/subject-report.png)
 
-**Accounts and API keys,** managed from the dashboard; every change in the ledger.
+**Accounts and API keys,** managed from the dashboard. Every change goes into
+the ledger.
 
 ![Accounts drawer with users, roles, status and API keys](docs/screenshots/accounts.png)
 
@@ -123,237 +110,53 @@ reported it, with the finding two scanners agree on called out.
 
 ![Sign-in asking for the authenticator code](docs/screenshots/two-factor-sign-in.png)
 
----
-
 ## Architecture
 
 ```
-                        Browser
-                           │
-                           ▼
-                Dashboard (React)
-                           │
-                           ▼
-                   Shadowfax API
-                           │
-              ┌────────────┴────────────┐
-              ▼                         ▼
-           SQLite                  Detection Engine
+                 Browser
+                    │
+                    ▼
+            Dashboard (React)
+                    │
+                    ▼
+              Shadowfax API
+                    │
+         ┌──────────┴──────────┐
+         ▼                     ▼
+ SQLite or PostgreSQL    Detection engine
 ```
 
-Every event enters through the API.
+Every event comes in through the API. The detection engine checks the actor's
+behaviour against the current policy and produces alerts. The dashboard only
+talks to the API and never touches the database, so it decides how an alert
+looks but never whether it exists.
 
-The detection engine evaluates the actor's behaviour against the active
-policy and generates alerts.
+The full design is in [architecture.md](architecture.md).
 
-The dashboard communicates only with the API and never accesses the database
-directly. It decides how an alert looks, never whether it exists.
+**Stack:** Python, FastAPI, SQLite or PostgreSQL, React and Vite, Docker.
 
-See `architecture.md` for the full design.
+## Getting started
 
----
+### Using the published image
 
-## Technology
-
-Current stack
-
-- Python
-- FastAPI
-- SQLite
-- React
-- Vite
-
-Also
-
-- Docker (one-command packaging)
-
-Planned
-
-- PostgreSQL
-- Electron desktop client
-
----
-
-## Roadmap
-
-### v0.1
-
-- Backend API
-- SQLite
-- Detection Engine
-- REST Endpoints
-
-### v0.2
-
-- Dashboard
-- Timeline View
-- Alert Filtering
-- Policy Editor
-
-### v0.3 — shipped
-
-- Stable Alert Identity
-- Acknowledge & Assign
-- Authentication, roles and API keys
-- Live push (Server-Sent Events), replacing the poll loop
-
-### v0.4
-
-- MITRE ATT&CK Mapping — shipped (v0.4.6)
-- Correlation Engine — shipped (v0.4.7)
-- Incident Reports — shipped (v0.4.7)
-
-### v0.4.5 — shipped
-
-- Agent-trace ingest (`tool_call` events)
-- Destructive-action detectors
-- Engagement scope in policy (`out_of_scope_action`)
-
-### v0.5
-
-- Completion-fraud detector — shipped (v0.5)
-- Token-spend anomaly — shipped (v0.5)
-- AI Investigation Assistant — shipped (v0.5.1)
-- Threat Summaries — shipped (v0.5.1)
-- Natural Language Search — shipped (v0.5.2)
-
-### v0.6
-
-- Attack-Chain Correlation — shipped (v0.6.0)
-
-### v0.7
-
-- Command-Line Interface — shipped (v0.7.0)
-
-### v0.8
-
-- Triage Digest — shipped (v0.8.0)
-
-### v0.9
-
-- Tamper-Evident Event Ledger — shipped (v0.9.0)
-
-### v0.10
-
-- Sign-in Throttling & Lockout — shipped (v0.10.0)
-- Platform Self-Monitoring — shipped (v0.10.0)
-
-### v0.11
-
-- Findings-Envelope Ingest — shipped (v0.11.0)
-- The `info` severity level — shipped (v0.11.0)
-
-### v0.12
-
-- Docker packaging, one command — shipped (v0.12.0)
-- Scripted attack replay — shipped (v0.12.0)
-
-### v0.13
-
-- CI: test suite, image build, and the replay asserted end to end — shipped (v0.13.0)
-
-### v0.14
-
-- Dashboard tests in a real browser — shipped (v0.14.0)
-
-### v0.15
-
-- Findings-Envelope Export — shipped (v0.15.0)
-
-### v0.16
-
-- Agent permission profiles — shipped (v0.16.0)
-
-### v0.17
-
-- Published image on ghcr.io, released from CI — shipped (v0.17.0)
-- No session tokens in URLs; request size limits — shipped (v0.17.1)
-
-### v0.18
-
-- Capability manifests: configured tools vs. permitted vs. used — shipped (v0.18.0)
-
-### v0.19
-
-- Change and reset passwords — shipped (v0.19.0)
-
-### v0.20
-
-- Ingest budgets per credential; signed images — shipped (v0.20.0)
-
-### v0.21
-
-- Fixes from an independent security review — shipped (v0.21.0)
-
-### v0.22
-
-- Console recovery of a lost admin password; Escape closes drawers — shipped (v0.22.0)
-
-### v0.23
-
-- Users and API keys managed from the dashboard — shipped (v0.23.0)
-
-### v0.24
-
-- Change roles; disable and re-enable accounts — shipped (v0.24.0)
-
-### v0.25
-
-- Two-factor sign-in (TOTP) with recovery codes — shipped (v0.25.0)
-
-### v0.26
-
-- Subject pages: findings grouped by the tool that reported them — shipped (v0.26.0)
-
-### v0.27
-
-- Two-factor required for admins (a switch); new recovery codes — shipped (v0.27.0)
-
-### v0.28
-
-- Dashboard build toolchain updated (Vite 8, Node 22); npm audit clean — shipped (v0.28.0)
-
-### v0.29
-
-- Draft a permission profile from what an agent did — shipped (v0.29.0)
-
-### v0.30
-
-- Screenshots in the README — shipped (v0.30.0)
-
-### v0.31
-
-- Forward alerts to a SIEM (webhook, syslog/CEF) — shipped (v0.31.0)
-
-### v1.0
-
-- Electron Desktop Application
-- PostgreSQL
-- Multi-user Support
-- Docker Deployment
-
----
-
-## Running Shadowfax
-
-The quickest way, with nothing to clone or build — the published image:
+The quickest way, with nothing to clone or build:
 
 ```bash
 docker run -d --name shadowfax -p 8000:8000 -v shadowfax-data:/data \
   ghcr.io/jh-infosec/shadowfax
-docker logs shadowfax        # the admin password, generated on first start
+docker logs shadowfax        # shows the admin password generated on first start
 ```
 
-Open `http://localhost:8000` and sign in as `admin` with the password from the
-log, then change it with **Change password** in the top bar. The published
-image never starts with a password everyone knows: without
-`SHADOWFAX_ADMIN_PASSWORD` it generates one, prints it once, and keeps only its
-hash. To choose your own, add `-e SHADOWFAX_ADMIN_PASSWORD=...` to the first
-`docker run`. Each release is also tagged by version (`:0.17.0`, `:0.17`), and
-carries build provenance and an SBOM.
+Open `http://localhost:8000`, sign in as `admin` with the password from the log,
+and change it with **Change password** in the top bar. The image never starts
+with a well known password. If you don't set `SHADOWFAX_ADMIN_PASSWORD` it
+generates one, prints it once and only keeps the hash. To pick your own, add
+`-e SHADOWFAX_ADMIN_PASSWORD=...` to the first `docker run`.
 
-Every release is signed by this repository's CI. To check the image you pulled
-really came from it ([cosign](https://docs.sigstore.dev/cosign/system_config/installation/)):
+Releases are also tagged by version (for example `:0.32.0` and `:0.32`) and come
+with build provenance and an SBOM. Every release is signed by this repository's
+CI, and you can check that the image you pulled really came from it with
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/):
 
 ```bash
 cosign verify ghcr.io/jh-infosec/shadowfax:latest \
@@ -361,63 +164,23 @@ cosign verify ghcr.io/jh-infosec/shadowfax:latest \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-From the source in front of you instead:
+### From source with Docker Compose
 
 ```bash
 docker compose up --build
 ```
 
-Open `http://localhost:8000` and sign in as `admin` / `admin` — compose sets
-these for local use, and Shadowfax warns about them on startup. One process, one
-port: the API serves the dashboard from its own origin, so there is no second
-server to start and no CORS allowlist to reconcile with whichever port the
-dashboard ended up on.
+Open `http://localhost:8000` and sign in as `admin` / `admin`. Compose sets
+those for local use and Shadowfax warns about them when it starts. The API
+serves the dashboard itself, so there's one process, one port and no CORS to
+configure.
 
-### Watch it work
-
-Reading that a tool detects a kill chain is not the same as seeing one form.
-Leave the dashboard open and run:
-
-```bash
-docker compose exec shadowfax python demo.py
-# or, with the published image:
-docker exec shadowfax python demo.py --password <the password from the log>
-```
-
-A scripted attack unfolds against the running instance, in three acts. Because
-the dashboard is live over Server-Sent Events, the alerts appear as the attack
-does — nothing needs refreshing.
-
-```
-━━ ACT 1 · An agent exceeds its brief
-
-   2. It grants itself root, with no approval marker.
-      expect → privilege_escalation (T1548)
-      ▸ HIGH    privilege_escalation  T1548
-   ...
-  ⛓ KILL CHAIN  Privilege Escalation → Credential Access → Lateral Movement → Exfiltration
-    escalated to CRITICAL — the chain reached Exfiltration
-    correlated from 9 separate alerts, deterministically
-```
-
-Act 2 has another tool post findings over the shared envelope, which attach to
-the same actor and push the chain back a stage to Reconnaissance. Act 3 turns
-the attack on Shadowfax itself, and Shadowfax raises an ordinary brute-force
-alert about it.
-
-Every step prints what the attacker did *and* what Shadowfax should make of it,
-so the detection can be judged against the behaviour rather than taken on trust
-— and a step that does not fire is visible rather than quietly absent.
-
-`--fast` drops the pauses; `--speed 3` slows them down for talking over.
-
-`docker compose down` keeps the event store; `down -v` discards it.
+`docker compose down` keeps your data. `docker compose down -v` deletes it.
 
 ### Without Docker
 
-The backend and the dashboard run as two processes.
-
-Backend, from the repository root:
+The backend and dashboard run as two processes. Backend, from the repository
+root:
 
 ```bash
 pip install -r requirements.txt
@@ -432,139 +195,89 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` and sign in. Interactive API documentation is at
-`http://127.0.0.1:8000/docs`, and `GET /healthz` answers without a credential.
+Open `http://localhost:5173` and sign in. The interactive API docs are at
+`http://127.0.0.1:8000/docs`, and `GET /healthz` works without signing in.
 
-The dashboard reads `VITE_API_BASE` for the backend URL, defaulting to
-`http://127.0.0.1:8000`. Setting it to the **empty** string means "same origin",
-which is how the container serves it. If you serve the dashboard from another
-origin, add that origin to `SHADOWFAX_CORS_ORIGINS` on the backend.
+The dashboard reads `VITE_API_BASE` for the backend URL (default
+`http://127.0.0.1:8000`). Setting it to an empty string means "same origin",
+which is how the container serves it. If you host the dashboard somewhere else,
+add that origin to `SHADOWFAX_CORS_ORIGINS`.
 
-`SHADOWFAX_DB` chooses where the database lives; it defaults to beside the code.
+### Watch it work
 
----
-
-## Testing
-
-Run the backend test suite:
+Leave the dashboard open and run the scripted attack:
 
 ```bash
-pip install -r requirements-dev.txt
-python test_api.py
+docker compose exec shadowfax python demo.py
+# or, with the published image:
+docker exec shadowfax python demo.py --password <the password from the log>
 ```
 
-`requirements-dev.txt` adds what only the suite needs (`httpx`, which
-`fastapi.testclient` imports internally). A deployment still needs nothing
-beyond `requirements.txt` — the shipped container carries no test client.
+The attack plays out in three acts against the running instance, and the alerts
+show up on the dashboard as it happens.
 
-### The dashboard, in a real browser
+```
+━━ ACT 1 · An agent exceeds its brief
 
-Building the dashboard proves it compiles, not that it works. Vite exits 0 on a
-page that renders nothing — a component throwing on mount, an API field quietly
-renamed, a filter that drops every row all ship green.
+   2. It grants itself root, with no approval marker.
+      expect → privilege_escalation (T1548)
+      ▸ HIGH    privilege_escalation  T1548
+   ...
+  ⛓ KILL CHAIN  Privilege Escalation → Credential Access → Lateral Movement → Exfiltration
+    escalated to CRITICAL: the chain reached Exfiltration
+    correlated from 9 separate alerts, deterministically
+```
+
+In act 2 another tool posts findings about the same actor, which pushes the
+chain back a stage to Reconnaissance. In act 3 the attack turns on Shadowfax's
+own sign-in page, and Shadowfax raises an ordinary brute force alert about it.
+
+Each step prints what the attacker did and what Shadowfax should make of it, so
+you can judge the detection for yourself, and a detection that doesn't fire is
+obvious. Use `--fast` to skip the pauses or `--speed 3` to slow it down if
+you're presenting.
+
+## Using PostgreSQL
+
+SQLite is the default because it needs no setup, but it only allows one writer
+at a time. For anything bigger, point Shadowfax at a PostgreSQL database:
 
 ```bash
-python demo.py --fast          # put something on the dashboard first
-python test_dashboard.py
+export SHADOWFAX_DATABASE_URL=postgresql://shadowfax:secret@db-host:5432/shadowfax
+uvicorn app:app --port 8000
 ```
 
-Fifty-seven checks, each one an assertion a person makes when they glance at the
-dashboard and believe it: that the alerts the engine found are rendered as rows,
-that rows carry a severity and an ATT&CK technique, that an ingested finding
-names the tool that reported it, that the ledger badge reads verified, that a
-correlated kill chain is *drawn* with its tactics and its escalation, that
-filtering actually filters, that an agent's declared permissions are shown
-beside the breaches of them along with the tools it was configured with, and
-that the live stream connects without the session token appearing in any URL
-the page requests, and that a user whose password an admin reset must choose a
-new one before the dashboard shows anything — and that an admin can add a user
-and issue and revoke an API key from the Accounts drawer, with the password shown
-on screen being the one that signs in.
-
-They refuse to run against an empty instance, because a test that passes on a
-dashboard rendering nothing is worse than no test. `--headed` shows the browser.
-
-Playwright is a developer dependency (`requirements-dev.txt`), not a runtime
-one: the shipped container has neither it nor a browser, and should not.
-
-### The replay is also a test
-
-`demo.py` prints what each step expects before it happens. With `--assert`,
-those claims are checked and the run exits non-zero naming any that failed:
+or with Docker:
 
 ```bash
-python demo.py --fast --assert
+docker run -d -p 8000:8000 \
+  -e SHADOWFAX_DATABASE_URL=postgresql://shadowfax:secret@db-host:5432/shadowfax \
+  ghcr.io/jh-infosec/shadowfax
 ```
 
-```
-━━ ASSERTIONS FAILED
+The tables are created on first start. The database needs to exist already and
+the user needs permission to create tables in it. Everything works the same way
+on both databases, and the full API test suite runs against each of them in CI.
 
-  ✗ step 8: expected shadowfax-auth / brute_force_auth — not raised
-```
+A few notes on how it works:
 
-That turns the demo into an end-to-end check of the whole stack — ingest,
-twenty-eight detectors, correlation, kill-chain ordering, findings-envelope ingest,
-the front door and the ledger — against a real server over real HTTP. It is a
-different kind of evidence from the unit suite, which never leaves the process.
+- There's one set of queries. `pgcompat.py` gives `db.py` a connection that
+  behaves like the SQLite one and translates the handful of SQLite-only bits of
+  SQL as they go through.
+- Anywhere Shadowfax relied on SQLite's database-wide write lock (the ledger,
+  sign-in failure counts, the last-admin check, the two-factor code step) it now
+  takes a PostgreSQL advisory lock instead, so two requests still can't act on
+  the same read. This holds across multiple Shadowfax processes too.
+- Text is compared and sorted by byte, the way SQLite does it, whatever locale
+  the server uses.
 
-Expectations are recorded qualified by actor as well as category: Act 1 and
-Act 3 both raise `brute_force_auth`, and an unqualified check would pass on
-Act 1's alert and never notice that self-monitoring had stopped working.
-
-Without `--assert` it is still a demo and still returns 0 whatever happens.
-
-### Continuous integration
-
-Every push runs two jobs. **checks** runs the test suite and builds the
-dashboard. **container** builds the Docker image, starts it, and replays the
-attack against it — proving that the image builds, runs as a non-root user,
-serves the dashboard from the API's own origin, does not let the static mount
-shadow an API route, raises the detections the README claims, and that
-`shadowfax check` still exits non-zero when alerts match.
-
-A README that says `docker compose up` and a Dockerfile nobody builds is a
-promise with nothing behind it. Since v0.17 it also checks a fresh container
-started without credentials: `admin/admin` must be refused, and the generated
-password from its log must work.
-
-### Releasing
-
-Publishing a release on github.com (**Releases → Draft a new release**, tag
-`v0.17.0`) runs a third job, **publish**, after the other two have passed on
-that commit. It refuses a tag that disagrees with the version in `app.py`,
-`frontend/package.json` and the changelog; pushes the image to
-`ghcr.io/jh-infosec/shadowfax` as `:0.17.0`, `:0.17` and `:latest` (a release
-marked as a pre-release never becomes `:latest`); signs it with Sigstore cosign
-using the job's GitHub identity (no stored key) and verifies the signature
-against that exact identity (v0.20); then pulls back what it published, by
-digest, and checks that it starts, reports the right version,
-runs as non-root and generated its admin password. Pushing to `main` never
-publishes anything.
-
-The first time, GitHub makes the package private. The job says so in a warning;
-make it public once under **your profile → Packages → shadowfax → Package
-settings → Change visibility**.
-
----
-
-
-### Updating the screenshots
-
-```bash
-python demo.py --fast        # against a throwaway instance
-python screenshots.py        # rewrites docs/screenshots/*.png
-```
-
-The script adds a little data of its own (two scanners reporting on one host, a
-few accounts, a user with two-factor on) so that every screen it shows has
-something on it — use an instance whose data you can lose. `test_api.py` checks
-that every image the README shows exists, so a screenshot that never got
-uploaded fails CI rather than showing a broken image.
+`recover.py` works against PostgreSQL as well, as long as the same
+`SHADOWFAX_DATABASE_URL` is set where you run it.
 
 ## Command line
 
-The CLI talks to the same HTTP API as the dashboard, so authentication and roles
-apply identically — it is a convenience, never a way around the security model.
+The CLI talks to the same HTTP API as the dashboard, so the same sign-in and
+roles apply. It's a convenience, not a way around the security model.
 
 ```bash
 python cli.py login -u admin            # stores a token in ~/.shadowfax/config.json
@@ -573,91 +286,46 @@ python cli.py alerts --severity critical
 python cli.py incidents --json
 python cli.py explain incident <id>
 python cli.py search "critical destructive actions by ai agents"
-cat trace.json | python cli.py ingest -  # a harness emitting its own trace
+cat trace.json | python cli.py ingest -  # a harness sending its own trace
 ```
 
-Every command takes `--json` for machine consumption. Exit codes are meaningful
-(`0` ok, `1` failure, `2` usage, `3` auth, `4` unreachable), and `check` exits
-non-zero when alerts match — so an agent harness can gate its own run:
+Every command accepts `--json`. Exit codes are `0` ok, `1` failure, `2` usage,
+`3` auth and `4` unreachable. `check` exits non-zero when alerts match, so an
+agent harness can stop itself:
 
 ```bash
 python cli.py check --severity critical || echo "agent tripped a detector"
 ```
 
-The triage queue — what most needs an analyst right now:
+Some other useful commands:
 
 ```bash
-python cli.py digest              # ranked queue with a covering summary
-python cli.py digest --plain      # the deterministic text, no model involved
-```
-
-The ranking is computed deterministically (severity, completed attack chains,
-unacknowledged volume, age) and every item shows the reasons behind its
-position. Shadowfax ranks the queue; you decide. An incident leaves the list
-when its alerts are acknowledged.
-
-Verify that the event log has not been tampered with (see Evidence integrity):
-
-```bash
-python cli.py verify              # exit 0 if intact, 1 if broken
-```
-
-Ingest findings from any tool that speaks the shared envelope — the kind of
-JSON is detected, so the same command takes events or an envelope:
-
-```bash
-maltriage sample.exe --envelope | python cli.py ingest -
-python cli.py ingest findings.json
-```
-
-See who is failing to sign in, and let a locked-out colleague back in:
-
-```bash
-python cli.py lockouts            # exit 1 while any scope is locked
+python cli.py digest                    # ranked triage queue with reasons
+python cli.py digest --plain            # same thing, no language model involved
+python cli.py verify                    # exit 0 if the event ledger is intact
+python cli.py lockouts                  # who is failing to sign in
 python cli.py lockouts --unlock j.bartlett
-```
-
-Write Shadowfax's own findings out for another tool to read — the mirror of
-`ingest`:
-
-```bash
-python cli.py export --actor apt-agent-9 | some-other-tool --envelope -
-python cli.py export > shadowfax-findings.json
-```
-
-Ask what an agent is allowed to do — or whether one action would be reported,
-with an exit code a harness can act on (see Agent permissions):
-
-```bash
-python cli.py permissions recon-agent-3              # the profile that governs it
-python cli.py permissions recon-agent-3 --tool nc    # exit 1: outside permissions
-```
-
-Change your password, or (admin) reset someone else's — passwords are always
-prompted for, never taken as flags, where they would land in shell history:
-
-```bash
-python cli.py passwd                          # asks for the current one first
-python cli.py passwd --user alice --generate   # prints a one-time password
-```
-
-Tell Shadowfax what an agent was started with, and refuse to start it if that
-exceeds its profile (see Capability manifests):
-
-```bash
+python cli.py export --actor apt-agent-9 > findings.json
+python cli.py permissions recon-agent-3              # the profile that applies
+python cli.py permissions recon-agent-3 --tool nc    # exit 1 if it would be reported
+python cli.py permissions recon-agent-3 --draft      # draft a profile from its activity
 python cli.py manifest build-agent-2 tools.json || exit 1
+python cli.py passwd                    # change your password
+python cli.py passwd --user alice --generate   # admin reset with a one-time password
+python cli.py subjects                  # everything findings were reported about
+python cli.py forwarding --test         # send a test alert to the SIEM
 ```
 
-Point it elsewhere with `--url`, `SHADOWFAX_URL`, or the stored config.
-
----
+Passwords are always prompted for and never passed as flags, so they don't end
+up in your shell history. Use `--url`, `SHADOWFAX_URL` or the saved config to
+point the CLI at a different server.
 
 ## Agent permissions
 
-Every other detector here infers that something is *wrong* from the fact that
-it is *unusual* — more targets than usual, faster than its baseline, more bytes
-than a threshold. None of them knows what an agent was for. A permission profile
-says so: which tools the agent was given, and which targets it may touch.
+Most detectors decide something is wrong because it's unusual: more targets than
+normal, faster than its baseline, more data than a threshold. None of them know
+what the agent was actually meant to do. A permission profile tells Shadowfax
+exactly that.
 
 ```json
 "agent_permissions": {
@@ -673,51 +341,46 @@ says so: which tools the agent was given, and which targets it may touch.
 }
 ```
 
-An action outside the profile raises `permission_violation` — **critical** if
-it was explicitly denied, **high** if it was merely never granted — naming the
-profile and each way the event breached it. It needs no baseline, so an agent's
-very first action can trip it. With `"unprofiled_agents": "alert"`, an AI agent
-that nobody declared raises one `undeclared_agent` alert.
+Anything outside the profile raises `permission_violation`. It's **critical** if
+the tool or target was explicitly denied and **high** if it just wasn't granted.
+No baseline is needed, so an agent's very first action can trigger it. With
+`"unprofiled_agents": "alert"`, an AI agent that nobody wrote a profile for
+raises one `undeclared_agent` alert.
 
-The rules are chosen so that the profile cannot quietly fail open:
+I designed the rules so a profile can't quietly fail open:
 
 | Rule | Why |
 |---|---|
-| A grant left out means *unrestricted*; an empty list means *nothing* | Two different statements, kept different |
-| Deny wins over allow | Something written down as forbidden stays forbidden |
-| A deny matches any spelling of a tool (`/usr/bin/nc`, `NC`, `nc.exe`) | Renaming the binary must not dodge a denial |
-| An allow matches only as written, against the *resolved* target | `/repo/../etc/shadow` is not under `/repo/*`, and a `python` in `/tmp` is not the granted one |
-| A tool call with no tool name, or an event with no target, is not granted | Silence is not permission |
-| Malformed profiles are refused at `PUT /policy` with every problem listed | `"allowed_tools": "nmap"` would grant `n`, `m`, `a` and `p`; `alowed_tools` would grant everything |
-| One alert per distinct breach | Forty retries of one denied tool are one finding, not forty |
+| Leaving out a list means unrestricted, an empty list means nothing | They're two different statements |
+| Deny beats allow | If you wrote it down as forbidden, it stays forbidden |
+| A deny matches any spelling of a tool (`/usr/bin/nc`, `NC`, `nc.exe`) | Renaming the binary shouldn't get around it |
+| An allow only matches as written, against the resolved path | `/repo/../etc/shadow` isn't inside `/repo/*` |
+| A tool call with no tool name, or an event with no target, isn't granted | Missing information isn't permission |
+| Broken profiles are rejected by `PUT /policy` with every problem listed | `"allowed_tools": "nmap"` would otherwise grant `n`, `m`, `a` and `p` |
+| One alert per distinct breach | Forty retries of the same denied tool is one finding |
 
-Deny lists are a backstop; **the allow-list is the control**. A relative path
-such as `../../etc/passwd` cannot be resolved without the agent's working
-directory, so no deny pattern will reliably catch it — but it was never granted,
-so an allow-list catches it without trying.
+Deny lists are a backstop. The allow list is the real control. A relative path
+like `../../etc/passwd` can't be resolved without knowing the agent's working
+directory, so a deny pattern won't reliably catch it, but an allow list will
+because it was never granted.
 
-Profiles are keyed by actor id or by pattern. An exact id wins; otherwise the
-most specific pattern does (`build-prod-*` over `build-*` over `*`), the same
-way every time. Because a profile is policy, changing one rescans history:
-declare a profile for an agent that has run for a month and every recorded
-action is judged against it.
+Profiles are matched by exact actor id first, then by the most specific pattern
+(`build-prod-*` beats `build-*`, which beats `*`). Because a profile is part of
+the policy, adding one rescans history, so every action an agent already took is
+judged against it.
 
-The actor drawer shows the governing profile beside the timeline, so an alert
-reading *outside declared permissions* sits next to what was declared.
-
-**Asking ahead.** `GET /actors/{id}/permissions?tool=nc&target=...` (or
-`shadowfax permissions`) answers whether an action would be reported — the
-detector's own judgement, asked in advance, and held by a test to the same
-answer the detector gives afterwards. An agent runtime can use it to refuse a
-call before making it. Shadowfax itself still only observes: a monitor that is
-also the gate becomes the thing an attacker most wants to stop, and enforcement
-belongs in the runtime.
+You can also ask in advance. `GET /actors/{id}/permissions?tool=nc&target=...`
+(or `cli.py permissions`) tells you whether an action would be reported, using
+the same logic the detector uses afterwards. An agent runtime could use that to
+refuse a call before making it. Shadowfax itself still only observes, because a
+monitor that's also the gate becomes the first thing an attacker wants to take
+down.
 
 ### Capability manifests
 
-A profile says what an agent may do. The framework running it knows what it
-*can* do — its tool list, its MCP servers. A **manifest** is that list, posted
-by whatever starts the agent:
+A profile says what an agent is allowed to do. The framework running it knows
+what it can do: its tool list and its MCP servers. A manifest is that list,
+posted by whatever starts the agent:
 
 ```bash
 curl -X POST http://localhost:8000/agents/build-agent-2/manifest \
@@ -726,133 +389,103 @@ curl -X POST http://localhost:8000/agents/build-agent-2/manifest \
        "mcp_servers": {"github": {"tools": [{"name": "create_issue"}]}}}'
 ```
 
-Bare names, Anthropic/MCP tool objects, OpenAI function tools and MCP
-`tools/list` results are all accepted; MCP tools become `mcp__github__create_issue`,
-as Claude Code names them. Only names are kept — descriptions and schemas, where
-an injected instruction would sit, are dropped on arrival. Anything Shadowfax
-cannot read rejects the whole manifest, because quietly dropping a tool would
-report it absent.
+It accepts plain names, Anthropic and MCP tool objects, OpenAI function tools
+and MCP `tools/list` results. MCP tools are named like
+`mcp__github__create_issue`. Only the names are stored. Descriptions and schemas
+are dropped on arrival, since that's where an injected instruction would hide.
+If any part of a manifest can't be read, the whole thing is rejected rather than
+silently missing a tool.
 
-| Alert | Severity | Means |
+| Alert | Severity | Meaning |
 |---|---|---|
-| `excess_capability` | high if denied, else medium | configured with a tool the profile does not grant — caught *before* it is used |
+| `excess_capability` | high if denied, otherwise medium | configured with a tool the profile doesn't grant, caught before it's used |
 | `capability_drift` | low | a later manifest added tools |
-| `unlisted_tool_call` | medium | the agent called a tool its own manifest does not list |
+| `unlisted_tool_call` | medium | the agent called a tool its own manifest doesn't list |
 
-The last is what neither side shows alone: an agent calling a tool its
-configuration does not account for has either a wrong manifest or a tool from
-somewhere else — an injected server, a tool added at runtime. The actor drawer
-shows every configured tool marked against the profile, and what changed since
-the previous manifest.
-
----
+The last one is the interesting case. An agent calling a tool that isn't in its
+configuration either has a wrong manifest or got the tool from somewhere else,
+like an injected MCP server.
 
 ### Drafting a profile
 
-Writing a profile by hand means knowing every tool an agent needs. **Draft a
-profile from what it did** (in an agent's drawer, for analysts; `GET
-/agents/{id}/profile-draft`; `shadowfax permissions <agent> --draft`) builds a
-first draft from the agent's **tool calls** — not from its manifest. A profile
-copied from the configuration would grant whatever the agent was given, which is
-exactly what `excess_capability` is there to question.
+Writing a profile by hand means knowing every tool the agent needs. The **Draft
+a profile** button in an agent's drawer (also `GET /agents/{id}/profile-draft`
+and `cli.py permissions <agent> --draft`) builds a first draft from the agent's
+actual tool calls. It deliberately doesn't copy the manifest, because a profile
+copied from the configuration would just grant whatever the agent was given,
+which is exactly what `excess_capability` is meant to question.
 
-- the tools it called are granted, except shells and raw sockets (`bash`, `sh`,
-  `powershell`, `nc`…), which are denied wherever the agent has them;
-- configured tools it never called are not granted — saved, they become
-  `excess_capability`, candidates to remove from its configuration;
-- the usual secrets (`~/.ssh/*`, `~/.aws/*`, `/etc/*`, `*.pem`) are denied, and
-  no target allow-list is guessed;
-- it shows every past event the draft would have flagged.
+- Tools it called are allowed, except shells and raw sockets (`bash`, `sh`,
+  `powershell`, `nc` and so on), which are denied wherever they appear.
+- Configured tools it never called aren't granted. Once the profile is saved
+  they show up as `excess_capability`, which makes them candidates to remove.
+- The usual secret locations (`~/.ssh/*`, `~/.aws/*`, `/etc/*`, `*.pem`) are
+  denied. No target allow list is guessed.
+- It shows every past event the draft would have flagged.
 
-Nothing is saved: **Open in policy editor** puts the draft into the policy text
-under the agent's id or its family pattern (`recon-agent-*`), and it takes effect
-only when an analyst saves it.
+Nothing is saved automatically. **Open in policy editor** puts the draft into the
+policy under the agent's id or its family pattern (like `recon-agent-*`), and it
+only takes effect when an analyst saves it.
 
 ## Evidence integrity
 
-Shadowfax asks whether an actor's behaviour should be trusted. That question is
-worth very little if the record of the behaviour cannot itself be trusted — an
-event history that could have been quietly edited after the fact is not evidence,
-it is an assertion.
-
-Every event is hash-chained to the one before it:
+There's not much point asking whether an agent's behaviour can be trusted if the
+record of that behaviour could have been edited afterwards. So every event is
+hash-chained to the one before it:
 
 ```
 entry_hash = sha256( prev_hash | canonical_json(event content) )
 ```
 
-Because each link folds in the one before it, changing any byte of any event
-invalidates that entry and every entry after it. Verification recomputes the
-whole chain and reports the **first** position where it diverges, so a break is
-located rather than merely announced — and the three failure modes read
-differently: content that no longer matches its hash (edited), an entry that no
-longer chains to its predecessor (deleted or reordered), and a valid chain that
-is shorter than the recorded head (truncated).
+Changing any byte of any event breaks that entry and every one after it.
+Verification recomputes the whole chain and reports the first place it breaks,
+and tells you whether an event was edited, deleted or reordered, or whether the
+log was cut short.
 
 ```bash
 python cli.py verify     # exit 0 if intact, 1 if broken
 ```
 
 ```
-ledger intact — 39 entries verified, head 491329ea531869ec…
+ledger intact: 39 entries verified, head 491329ea531869ec…
 
 LEDGER BROKEN at position 24 (event id 25, actor recon-agent-3): the entry's
-content does not match its hash -- this event was modified after it was
+content does not match its hash, so this event was modified after it was
 recorded. 24 entries before it verified cleanly.
 ```
 
-The dashboard carries the same check as a badge beside the connection
-indicator — both answer "can I believe what I am looking at right now" — and it
-re-verifies itself whenever the event count changes.
+The dashboard shows the same check as a badge and re-checks whenever the event
+count changes.
 
-The chain follows the order events were **received**, not the `timestamp` they
-claim. Events legitimately arrive out of chronological order, and ordering by
-data the emitter supplies would make the proof depend on the thing being
-audited. What is proven is *"these entries were appended in this order and none
-has changed since"* — a statement about the store, not about the world.
+The chain follows the order events were received, not the timestamps they
+claim, because events can legitimately arrive out of order and the proof
+shouldn't depend on data the sender controls.
 
-This is tamper-**evident**, not tamper-**proof**. It makes silent modification
-and deletion detectable by anyone who can read the log; it does not prevent
-them. An attacker with full write access to the database could rewrite the
-events, the chain and the recorded head together. The honest mitigation is to
-anchor the head somewhere that attacker does not control — `GET /ledger/head`
-returns the entry count and head hash for exactly that purpose, and where it
-gets published is deliberately left to the operator rather than claimed here.
+This is tamper evident, not tamper proof. Someone with full write access to the
+database could rewrite the events, the chain and the head together. The fix for
+that is to copy the head somewhere they can't reach. `GET /ledger/head` returns
+the entry count and head hash for that purpose. Where you publish it is up to
+you.
 
----
+## The sign-in page
 
-## The front door
+Shadowfax has had a `brute_force_auth` detector since v0.1, but until v0.10 its
+own sign-in page would have let an attacker guess forever. That didn't sit right
+with me, so the login is now properly protected.
 
-Shadowfax has shipped a `brute_force_auth` detector since v0.1. Until v0.10 its
-own sign-in endpoint would have sailed straight past it — unlimited attempts, no
-delay, no record. A tool that detects the attack it is itself vulnerable to is
-not a serious tool.
-
-**Backoff, then lockout.** After a few failures the caller must wait a growing
-interval between attempts (2s, 4s, 8s … capped). Someone who fat-fingered their
-password notices nothing; a script working through a wordlist is slowed by
-orders of magnitude. Past the limit the scope is locked outright. Nothing
-sleeps: answering a flood by holding connections open would turn the defence
-into a resource-exhaustion vector, so Shadowfax replies at once with `429` and
-an honest `Retry-After`.
-
-**Hard lockout applies to a (username, source) pair, never to the account.**
-Locking an account after N failures hands anyone who knows a username a
-denial-of-service against its owner. A second, looser scope covers a source
-address across every username it tries — that is what catches password spraying
-— and it **slows but never locks**, because an office, a VPN exit or a NAT
-gateway is shared, and locking one out would let a single attacker deny sign-in
-to everyone behind it.
-
-**No enumeration oracle.** The throttle is consulted before the username is
-looked up, and a failure is recorded whether or not the account exists, so an
-imaginary username locks out exactly like a real one. When there is no such
-user, `auth.dummy_verify` burns the same PBKDF2 work a real check would — the
-old early return made response time a reliable signal for which accounts exist.
-
-```bash
-python cli.py lockouts
-```
+- **Backoff, then lockout.** After a few failures the caller has to wait longer
+  and longer between attempts (2s, 4s, 8s, up to a cap), then the scope is
+  locked. Someone who mistyped won't notice, but a password list slows to a
+  crawl. Nothing sleeps on the server: it replies straight away with `429` and a
+  `Retry-After`, so a flood can't tie up connections.
+- **Lockout is per username and source, never per account.** Locking an account
+  after N failures would let anyone who knows a username lock its owner out. A
+  looser limit per source address catches password spraying, but it only slows
+  things down and never locks, because a whole office or VPN can share one
+  address.
+- **No username enumeration.** Failures are counted the same way whether or not
+  the account exists, and a check for a missing user does the same PBKDF2 work
+  as a real one, so response times don't give anything away.
 
 ```
 sign-in throttle: lock after 5 failures in 15 min, for 15 min (backoff from 3)
@@ -861,81 +494,51 @@ USERNAME       SOURCE       FAILS  STATE     LAST FAILURE
 j.bartlett     127.0.0.1    5      LOCKED    2026-09-30T12:02:11
 ```
 
+`X-Forwarded-For` is ignored on purpose. The client sets it, so an attacker
+could just rotate it. If you run Shadowfax behind a proxy, make sure the real
+client address reaches it, otherwise every request shares one source.
+
+This slows guessing down. It won't stop an attacker with lots of addresses, and
+it's not a replacement for good passwords and two-factor.
+
 ### Shadowfax watches itself
 
-Failed sign-ins and lockouts are ingested as **ordinary events**, under the
-actor `shadowfax-auth`, into the same hash-chained ledger as everything else.
-The existing `brute_force_auth` detector fires on them with the same `T1110`
-mapping, and they appear in the same alert table — with no special-casing
-anywhere in the engine. There is no separate audit path to keep in sync, and no
-privileged log that a compromised admin could edit more quietly than the rest.
+Failed sign-ins and lockouts are stored as ordinary events under the actor
+`shadowfax-auth`, in the same ledger as everything else. The normal
+`brute_force_auth` detector fires on them and they show up in the normal alert
+table. There's no separate audit log to keep in sync.
 
-The attempted username travels in metadata, never as the actor id: it is
-attacker-controlled text, and keying actors on it would let anyone mint actors
-at will — or post events into a real actor's timeline by "signing in" as them,
-poisoning the evidence for an unrelated investigation.
+The username someone tried is stored in the event's metadata, not as the actor,
+because it's attacker-controlled text. Otherwise anyone could "sign in" as a
+real actor and inject events into their timeline.
 
-Set `SHADOWFAX_SELF_MONITOR=0` to turn it off.
+Set `SHADOWFAX_SELF_MONITOR=0` to turn this off.
 
 ### Locked out of your own Shadowfax
 
-If the only admin password is lost — or the generated one has scrolled out of the
-container log — reset it from the machine Shadowfax runs on:
+If the only admin password is lost, reset it from the machine Shadowfax runs on:
 
 ```bash
-docker exec -it shadowfax python recover.py admin       # the published image
-docker exec -it shadowfax python recover.py admin --remove-2fa   # phone lost too
-docker compose exec shadowfax python recover.py admin   # with docker compose
-python recover.py admin                                  # from source
+docker exec -it shadowfax python recover.py admin               # published image
+docker exec -it shadowfax python recover.py admin --remove-2fa  # lost phone too
+docker compose exec shadowfax python recover.py admin           # docker compose
+python recover.py admin                                          # from source
 ```
 
-It asks you to type the username again, then prints a newly generated password
-once. That password must be changed at the next sign-in; every session the
-account had is ended and its sign-in failures are cleared. It works on the
-database file directly, so it is not reachable over the network, and anyone able
-to run it could already rewrite that file. It is also not quiet: the reset is
-written into the ledger and raises a high `console_recovery` alert naming the
-account and the OS user — even with self-monitoring switched off, because a
-reset that bypassed sign-in is exactly what an analyst should see. Your events
-are untouched; nothing is discarded.
+It asks you to type the username again and then prints a new password once. You
+have to change it at the next sign-in, all of the account's sessions are ended
+and its sign-in failures are cleared. It works directly on the database, so it
+can't be reached over the network. It isn't silent either: the reset goes into
+the ledger and raises a high `console_recovery` alert naming the account and the
+OS user, even with self-monitoring off. None of your events are touched.
 
-### Configuration
+## Ingesting findings from other tools
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `SHADOWFAX_LOGIN_MAX_FAILURES` | 5 | failures before a scope is locked |
-| `SHADOWFAX_LOGIN_WINDOW_MINUTES` | 15 | how far back failures count |
-| `SHADOWFAX_LOGIN_LOCKOUT_MINUTES` | 15 | how long a lockout lasts |
-| `SHADOWFAX_LOGIN_BACKOFF_AFTER` | 3 | failures before backoff starts |
-| `SHADOWFAX_LOGIN_BACKOFF_CAP_SECONDS` | 30 | longest per-scope wait |
-| `SHADOWFAX_LOGIN_SOURCE_BACKOFF_AFTER` | 10 | failures from one source before it is slowed |
-| `SHADOWFAX_LOGIN_SOURCE_BACKOFF_CAP_SECONDS` | 60 | longest per-source wait |
-| `SHADOWFAX_SELF_MONITOR` | on | ingest front-door events into the log |
-| `SHADOWFAX_REQUIRE_ADMIN_2FA` | off | admins must turn on two-factor before anything else works |
-
-These live in the environment, **not** in the detection policy. The policy
-governs detection; this is enforcement of the platform's own door, and putting
-it behind `PUT /policy` would let any analyst widen it to nothing.
-
-**Behind a proxy:** `X-Forwarded-For` is deliberately ignored — it is set by the
-client, so keying a security control on it would hand the control to the
-attacker, who would simply rotate the header. Terminate the proxy somewhere that
-presents the real peer address, or every request will share one source scope.
-
-This slows credential guessing. It does not stop a distributed attacker with
-many source addresses, and it is not a substitute for good passwords or a second
-factor.
-
----
-
-## Ingesting other tools' findings
-
-`findings-envelope.md` defines a wire format shared across this portfolio:
-maltriage produces findings from a file's bytes, claude-recon-agent from a
-target's services, Shadowfax from an actor's event history. Shadowfax ingests
-that envelope, and **knows nothing about the tool that sent it** — anything that
-writes the format is ingestible, which is what makes this a pipe rather than an
-integration.
+[findings-envelope.md](findings-envelope.md) defines a JSON format shared by the
+tools in my portfolio: maltriage reports findings about a file, claude-recon-agent
+about a target's services, and Shadowfax about an actor's history. Shadowfax
+accepts that format from anything, without knowing anything about the tool that
+sent it.
 
 ```bash
 maltriage sample.exe --envelope | python cli.py ingest -
@@ -948,309 +551,296 @@ maltriage 0.2.0 -> file:sha256:9f86d081884c7d65: 2 finding(s) ingested
   info     authenticode_common_name  [unvalidated]
 ```
 
-### Findings become events, not alerts
+Some details worth knowing:
 
-The obvious implementation writes an alert row per finding. It would also break
-the invariant the rest of Shadowfax rests on: alerts are a pure function of
-`(an actor's events, policy)`, recomputed on every rescan and never patched — so
-an alert with no event behind it would survive until the next rescan of that
-actor and then silently vanish.
+- **Findings are stored as events, not alerts.** Alerts are always rebuilt from
+  events and policy, so a finding goes in as an event and a detector turns it
+  into an alert. That means the ledger covers it, rescans keep it, and a recon
+  finding from another tool can be the first stage of a kill chain that
+  Shadowfax's own detectors complete.
+- **A bad envelope is rejected whole,** with the field at fault named, so the
+  person writing the other tool finds out what's wrong.
+- **Other tools can't use Shadowfax's own 28 detector categories,** so an alert
+  reading `destructive_action` always means Shadowfax found it.
+- **Unvalidated findings are marked but not downgraded.** `validated: false`
+  means the tool is repeating something the subject said about itself, like a
+  certificate name or a service banner. The dashboard shows a `via <tool>` badge
+  and an `unvalidated` marker, but the severity is left alone.
+- **Re-running a scanner doesn't create duplicates.** Finding ids are based on
+  content, so unchanged results are skipped and any acknowledgement stays put.
+- **Subjects are kept separate from actors.** A file or host is stored as
+  `file:sha256:...` or `host:10.0.0.9`, so a file called `admin` can't turn into
+  the user `admin`.
+- **`info` findings count for nothing in risk scoring,** so a hundred of them
+  can't outweigh one critical.
 
-A finding is therefore stored as an **event**, and a detector turns it back into
-an alert. Rescans reproduce it, the hash-chained ledger covers it, and
-correlation sees it alongside native alerts. The payoff is composition: a
-reconnaissance finding from another tool can form the **first stage of a kill
-chain** whose later stages Shadowfax detected itself —
-
-```
-Reconnaissance → Privilege Escalation → Credential Access → Lateral Movement → Exfiltration
-   (recon agent)   ·········· Shadowfax's own detectors ··········
-```
-
-— with no special-casing anywhere in the engine.
-
-### What Shadowfax will not accept
-
-Validation is the trust boundary, and a malformed envelope is rejected **whole**,
-naming the field at fault. Keeping the findings we happen to like would hide the
-emitter's bug, and whoever writes the next emitter deserves to be told what is
-wrong with theirs.
-
-```
-400 invalid findings envelope — findings[0].severity: must be one of
-critical, high, medium, low, info
-```
-
-A finding's `key` becomes the alert category, so an emitter **may not use one of
-Shadowfax's own twenty-eight detector categories**. An alert reading
-`destructive_action` must mean Shadowfax's detector found it, not that somebody
-else said so.
-
-### Provenance, and who checked
-
-Every ingested alert carries the tool that reported it, that tool's observed
-evidence, and its `validated` flag — shown as a `via <tool>` badge, an
-`unvalidated` marker and the evidence line beneath the message.
-
-`validated: false` means the emitter is repeating something the subject asserted
-about itself: a certificate common name, a service banner, a `Server:` header.
-Shadowfax marks these and **does not downgrade them**. The envelope is explicit
-that a consumer may treat unvalidated findings differently but may not treat
-them as absent, and quietly lowering another tool's severity would be a hidden
-policy. An alert Shadowfax raised itself carries no `validated` flag at all —
-"nobody claimed this, we found it" is a different statement from "somebody
-claimed it without checking".
-
-Ingested evidence is fenced as untrusted in the investigation assistant's
-prompt, alongside agent-reported fields. It is another tool's report of a file's
-bytes or a service's banner, which is exactly where an injection would be
-planted.
-
-### Re-running an emitter
-
-A finding's id is a function of its content, so re-running a scanner over
-unchanged input produces the same ids and Shadowfax skips them. Analyst state
-follows the finding rather than the row it landed in: acknowledge a finding
-today, re-run the scanner tomorrow, and the acknowledgement is still there.
-
-```
-maltriage 0.2.0 -> file:sha256:9f86d081884c7d65: 0 finding(s) ingested, 2 already known
-```
-
-Shadowfax derives its alert id *from* the emitter's id rather than using it
-directly, under a fixed namespace, so an emitter cannot send a crafted id that
-inherits an unrelated alert's acknowledgement.
-
-### Speaking the format, not just reading it
-
-Shadowfax emits the envelope as well as ingesting it, so the portfolio's other
-tools can consume Shadowfax the way it consumes them. `GET /findings` returns
-one envelope per actor; `?actor_id=` returns a single one.
-
-Writing a producer and a consumer against the same document is the only real
-test of a wire format — a spec with one implementation is a spec with one
-opinion. The test suite round-trips it: what the producer emits is handed
-straight to the consumer's own validator.
-
-**The id needed no new scheme.** `alert_identity` has followed the envelope's
-rule since v0.3, so a Shadowfax alert id already *is* a conformant finding id.
-Re-exporting unchanged data produces the same ids, and a consumer can tell
-"again" from "new".
-
-**Ingested findings are not re-emitted.** An alert carrying a `source_tool` came
-from somebody else; restating it under `source.tool: shadowfax`, with
-Shadowfax's `validated` flag on it, would make this a laundering service. Ask
-Shadowfax what Shadowfax found and you get exactly that.
-
-**Metadata is quoted from an allowlist.** An envelope is piped, stored and
-shared, and the spec forbids carrying secret material — so the question is not
-what to strip but what is known safe. Counts, thresholds and levels are; an
-agent's `tool` and `arguments` strings are not, because a tool call is exactly
-where a credential ends up.
-
-**`validated: true`, with a stated scope.** Every alert is a conclusion
-Shadowfax's own engine computed over the record it holds, not a self-description
-passed along. But what is verified is a property of the *recorded history*, not
-of the world: the events came from the thing being watched. Same scope the
-ledger claims, and said out loud rather than implied.
-
-**Shadowfax refuses its own envelope.** Every key in the export is a native
-detector category, and ingest rejects those — so Shadowfax cannot be fed its own
-output. The loop is closed by the shape of the thing, not by a rule anyone has
-to remember.
+Shadowfax also exports its own findings in the same format with `GET /findings`
+(or `?actor_id=` for one actor). It only exports what it found itself, never
+findings it received from other tools, and it won't accept its own export back
+because every category in it is one of its own.
 
 ### Subject pages
 
-The **Subjects** button lists everything findings have been reported about —
-files, hosts, log workspaces and actors — worst first. A subject's drawer leads
-with its **findings report**: the tools that reported on it, each with the
-versions and runs it reported from, their findings worst first with evidence,
-ATT&CK reference and recommendation; which findings were `unvalidated`; which
-are acknowledged or assigned; and, called out at the top, any finding **two
-tools agree on** — two scanners reporting the same key is worth more than either
-alone. The same report is `GET /subjects/{id}` (`GET /subjects` for the list)
-and `shadowfax subjects [id]`.
-
-### Subjects and the `info` level
-
-A `kind: actor` subject lands on that actor's real timeline and inherits its
-existing actor type. Every other kind is namespaced — `file:sha256:…`,
-`host:10.0.0.9`, `log_workspace:ws-7` — under a new `external` actor type, so a
-file called `admin` cannot quietly become the user `admin`.
-
-The envelope's ladder has five levels; Shadowfax's own detectors emit the top
-four and `info` arrives from outside. It is **weighted 0** in risk scoring,
-incident scoring and the triage digest: informational findings are context, and
-a hundred of them must not out-score one critical.
-
----
+The **Subjects** button lists everything findings were reported about (files,
+hosts, log workspaces and actors), worst first. Each subject opens a report
+showing which tools reported on it, from which versions and runs, their findings
+with evidence and recommendations, which ones are unvalidated or acknowledged,
+and at the top, any finding that two tools agree on. The same report is
+available from `GET /subjects/{id}` and `cli.py subjects <id>`.
 
 ## Sending alerts to a SIEM
 
-Shadowfax can forward each new alert, once, to the SIEM a team already watches —
-Splunk, Elastic, Sentinel, QRadar or anything that takes a webhook or syslog.
+Shadowfax can send each new alert once to whatever SIEM a team already uses,
+such as Splunk, Elastic, Sentinel or QRadar, over a webhook or syslog.
 
 | Variable | Meaning |
 | --- | --- |
 | `SHADOWFAX_FORWARD_WEBHOOK_URL` | POST each alert as JSON to this http(s) URL |
 | `SHADOWFAX_FORWARD_WEBHOOK_SECRET` | sign each request with HMAC-SHA256 (recommended) |
-| `SHADOWFAX_FORWARD_SYSLOG` | `udp://host:514` or `tcp://host:6514` — RFC 5424 syslog |
-| `SHADOWFAX_FORWARD_SYSLOG_FORMAT` | `cef` (default; parsed by nearly every SIEM) or `json` |
-| `SHADOWFAX_FORWARD_MIN_SEVERITY` | `medium` by default; `info` sends everything |
-| `SHADOWFAX_FORWARD_BACKFILL` | `1` to also send the alerts that existed when forwarding was switched on |
+| `SHADOWFAX_FORWARD_SYSLOG` | `udp://host:514` or `tcp://host:6514`, RFC 5424 syslog |
+| `SHADOWFAX_FORWARD_SYSLOG_FORMAT` | `cef` (default, understood by most SIEMs) or `json` |
+| `SHADOWFAX_FORWARD_MIN_SEVERITY` | `medium` by default, `info` sends everything |
+| `SHADOWFAX_FORWARD_BACKFILL` | `1` to also send alerts that existed before forwarding was turned on |
 
-- **Each alert is sent once per destination.** Alert ids are deterministic, and
-  an outbox in the database records what has been queued for where, so a rescan,
-  a restart or a reset to the sample data does not send anything twice.
-- **It never slows ingest.** Alerts are queued in the same transaction that
-  stores them, and a background thread delivers them, retrying with exponential
-  backoff (5 s doubling to an hour) for eight attempts.
-- **Switching it on does not replay history** into the SIEM; existing alerts are
-  recorded as a baseline (set `SHADOWFAX_FORWARD_BACKFILL=1` to send them).
-- **A SIEM that stops receiving is itself an alert:** when delivery is given up,
-  `forwarding_failed` (high) is raised — whoever can cut the path to the SIEM has
-  blinded it, and that should not be silent.
-- No redirects are followed and the destination comes only from the
-  environment, never from the API.
+- Each alert is sent once per destination. Alert ids don't change, and a table
+  records what's been queued where, so restarts and rescans don't send
+  duplicates.
+- It never slows down ingest. Alerts are queued in the same transaction that
+  stores them and a background thread sends them, retrying with backoff from 5
+  seconds up to an hour, eight times.
+- Turning it on doesn't flood the SIEM with history unless you ask for a
+  backfill.
+- If delivery keeps failing, Shadowfax raises a high `forwarding_failed` alert.
+  Cutting off the SIEM is a way to blind the people watching it, so it shouldn't
+  happen quietly.
+- Destinations only come from environment variables, never from the API, and
+  redirects aren't followed.
 
-**Verifying a webhook.** Each request carries `X-Shadowfax-Timestamp` and, with a
-secret, `X-Shadowfax-Signature: sha256=<hex>` over `"<timestamp>.<body>"`:
+To verify a webhook, each request has an `X-Shadowfax-Timestamp` header and,
+with a secret set, `X-Shadowfax-Signature: sha256=<hex>` over
+`"<timestamp>.<body>"`:
 
 ```python
 expected = "sha256=" + hmac.new(secret, f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
 ok = hmac.compare_digest(expected, signature) and abs(time.time() - int(ts)) < 300
 ```
 
-`shadowfax forwarding` shows what has been sent, what is pending and the last
-error; `shadowfax forwarding --test` sends a test alert (severity `info`,
-category `forwarding_test`) to every destination and says what happened.
+`cli.py forwarding` shows what's been sent, what's pending and the last error.
+`cli.py forwarding --test` sends a test alert to every destination.
 
 ## Security
 
-Every endpoint requires authentication. Analysts sign in for a bearer token
-(12-hour sessions); agents and harnesses ingest events with an API key. Access
-is role-based: `viewer` reads, `analyst` acknowledges, assigns and edits
-policy, `admin` manages users, keys and resets. Passwords are hashed with
-PBKDF2 and a per-user salt, and only credential fingerprints are stored, never
-the secrets. CORS is restricted to the dashboard origin. The sign-in endpoint
-is throttled and locks out, and costs the same whether or not the username
-exists — see The front door above.
+Every endpoint needs authentication. People sign in for a bearer token (12 hour
+sessions) and agents send events with an API key. There are three roles:
+`viewer` can read, `analyst` can acknowledge, assign and edit the policy, and
+`admin` manages users, keys and resets. Passwords are hashed with PBKDF2 and a
+per-user salt, and tokens and keys are only stored as fingerprints.
 
 On a fresh database the first admin comes from `SHADOWFAX_ADMIN_USERNAME` and
-`SHADOWFAX_ADMIN_PASSWORD`. If those are unset, running from source creates
-`admin` / `admin` with a warning, and the published image generates a random
-password and prints it once — set real credentials before exposing the API.
+`SHADOWFAX_ADMIN_PASSWORD`. If they aren't set, running from source creates
+`admin` / `admin` with a warning, and the Docker image generates a random
+password and prints it once. Set real credentials before exposing it anywhere.
 
-Passwords must be at least 12 characters, not the username and not one of the
-handful always tried first. Changing one requires the current password — through
-the same throttle as sign-in — and signs out every other session. An admin reset
-ends all of the user's sessions and marks the new password must-change: until
-the owner replaces it, the server allows nothing else. Changes and resets are
-written into the ledger.
+**Passwords.** At least 12 characters, not the username and not one of the
+obvious ones. Changing yours needs the current password (throttled like sign-in)
+and signs out your other sessions. When an admin resets someone's password, that
+person has to choose a new one before they can do anything else. Changes and
+resets go into the ledger.
 
-Admins manage accounts from the dashboard's **Accounts** drawer (or the same
-`/users` and `/api-keys` endpoints). New users get a generated password they
-must change at first sign-in; API keys are shown once and revoked at a click.
-Creating an account and issuing or revoking a key are written into the ledger
-with who did it, and a new **administrator** raises `admin_account_created`
-(medium, ATT&CK T1136) — an extra admin is the classic way to keep a foothold.
-Promoting an existing account to admin raises `admin_role_granted` (medium,
-T1098). Disabling an account signs it out everywhere and refuses its sign-in
-without deleting anything it did; an admin cannot change their own role or
-disable themselves, and the last enabled admin can be neither demoted nor
-disabled. `recover.py` re-enables the account it recovers.
+**Accounts.** Admins manage users and API keys from the **Accounts** drawer. New
+users get a generated password they must change on first sign-in, and API keys
+are shown once. Creating a new admin raises `admin_account_created` (T1136) and
+promoting someone to admin raises `admin_role_granted` (T1098), since an extra
+admin account is a classic way to keep access. Disabling an account signs it out
+everywhere without deleting anything it did. Admins can't change their own role
+or disable themselves, and the last enabled admin can't be demoted or disabled.
 
-**Two-factor sign-in** (TOTP, RFC 6238) is available to every account from the
-dashboard's **Two-factor** button: scan the QR code (or type the key) into any
-authenticator app and confirm with a first code. Sign-in then asks for a code
-after the password. A code works once, one 30-second step of clock drift is
-allowed either way, and wrong codes count towards the same backoff and lockout
-as wrong passwords. Ten recovery codes, shown once and stored as fingerprints,
-cover a lost phone. Turning it off takes the password and a code; an admin can
-remove it from someone else's account (their sessions end), which raises
-`mfa_removed` (medium, ATT&CK T1556). The TOTP secret is stored in the database
-as it must be readable to check a code — whoever can read the database file can
-read it. `shadowfax login` prompts for the code; `recover.py` keeps two-factor
-unless given `--remove-2fa`.
+**Two-factor sign-in.** Any account can turn on TOTP from the **Two-factor**
+button by scanning a QR code into an authenticator app. Each code works once,
+one 30 second step of clock drift is allowed, and wrong codes count towards the
+same lockout as wrong passwords. Ten recovery codes cover a lost phone. Turning
+it off needs the password and a code. An admin can remove it from someone
+else's account, which raises `mfa_removed` (T1556). Set
+`SHADOWFAX_REQUIRE_ADMIN_2FA=1` to make it mandatory for admins: an admin
+without it can only reach the enrolment screen until it's set up.
 
-Set `SHADOWFAX_REQUIRE_ADMIN_2FA=1` to **require** it for administrators: an
-admin without it signs in to the enrolment screen and nothing else — the API,
-ingest and the live stream all refuse that session until two-factor is on — and
-an admin cannot turn their own off while it is required (another admin removes
-it for a lost phone). Other roles and API keys are unaffected. It is an
-environment setting rather than policy because analysts can edit the policy.
-**New recovery codes** (the password and a current code) replace the old list
-at once.
+**Other protections.**
 
-A lost admin password is recovered with `recover.py` on the server itself (see
-Locked out of your own Shadowfax above), never over the API; the recovery is
-recorded and raises `console_recovery`.
+- Session tokens never appear in URLs. The live stream uses a single-use ticket
+  that expires after 30 seconds.
+- Requests are limited before they're parsed: 2 MiB per body, 1,000 events per
+  request and 16 KiB of metadata per event.
+- Each credential can send 6,000 events a minute by default. Going over is
+  refused with `429` and raises an `ingest_flood` alert.
+- Timestamps must be ISO 8601 and are stored in UTC.
+- Because alerts are rebuilt from the whole history, a new event dated in the
+  past can make old alerts disappear. When that happens Shadowfax records which
+  alerts went and who sent the event, and raises `history_rewritten`.
+- Nobody can send events as Shadowfax's own actors.
+- The CLI only sends a saved token to the server it was saved for, and doesn't
+  follow redirects.
 
-The session token never appears in a URL. The dashboard's live stream is opened
-with a single-use ticket that expires in 30 seconds (`POST /stream/ticket`),
-because a URL is what access logs record; signing out ends any stream the
-session opened. Requests are bounded before they are parsed — 2 MiB per body,
-1,000 events or findings per request, 16 KiB of metadata per event, with fixed
-limits on identifiers — and each refusal names the setting that controls it
-(`SHADOWFAX_MAX_BODY_BYTES`, `SHADOWFAX_MAX_EVENTS_PER_REQUEST`,
-`SHADOWFAX_MAX_METADATA_BYTES`). Each ingest credential also has a budget —
-6,000 events a minute by default (`SHADOWFAX_INGEST_EVENTS_PER_MINUTE`) — past
-which requests are refused whole with `429` and `Retry-After`, and the first
-refusal raises an `ingest_flood` alert naming the credential. Findings and manifests arrive only through the
-endpoints that validate them — `POST /events` refuses both event types, and an
-envelope may not claim to come from Shadowfax.
+Password hashing uses the standard library's PBKDF2 rather than bcrypt or
+argon2, and tokens don't rotate. Those are the main reasons I'd still call this a
+portfolio project rather than something to run in production as is.
 
-Timestamps must be ISO 8601 and are stored in UTC, so `+02:00` and `Z` sort
-and compare as the same instant. Because detection reads the whole history,
-a new event dated in the past can change what was concluded about the past —
-so when an upload makes existing alerts disappear, Shadowfax writes an
-`alerts_retired` event naming them and the credential that sent it, and raises
-`history_rewritten` (high). Nobody can ingest under Shadowfax's own actors
-(`shadowfax`, `shadowfax-ingest`), tool names in findings are restricted to
-letters, digits, `.`, `_` and `-`, and an external tool's finding ids are
-scoped to the subject they describe. The ledger takes a write lock before it
-reads the chain head, so two writers cannot fork it. The command line only
-sends a saved token to the server it was saved for, and does not follow
-redirects. Hashing is
-stdlib PBKDF2 rather than bcrypt/argon2; that, and the still-single-writer
-SQLite backend, are the reasons Shadowfax remains a local-development tool.
+## Configuration
 
----
+Everything is set with environment variables. Security settings live here
+rather than in the detection policy on purpose, because analysts can edit the
+policy and shouldn't be able to loosen the platform's own protections.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SHADOWFAX_DATABASE_URL` | unset | PostgreSQL connection URL. Unset means SQLite |
+| `SHADOWFAX_DB` | `shadowfax.db` beside the code | SQLite file location |
+| `SHADOWFAX_ADMIN_USERNAME` | `admin` | first admin on a fresh database |
+| `SHADOWFAX_ADMIN_PASSWORD` | unset | first admin's password |
+| `SHADOWFAX_CORS_ORIGINS` | dashboard dev server | extra origins allowed to call the API |
+| `SHADOWFAX_REQUIRE_ADMIN_2FA` | off | admins must set up two-factor first |
+| `SHADOWFAX_SELF_MONITOR` | on | record attacks on the sign-in page as events |
+| `SHADOWFAX_LOGIN_MAX_FAILURES` | 5 | failures before a scope is locked |
+| `SHADOWFAX_LOGIN_WINDOW_MINUTES` | 15 | how far back failures count |
+| `SHADOWFAX_LOGIN_LOCKOUT_MINUTES` | 15 | how long a lockout lasts |
+| `SHADOWFAX_LOGIN_BACKOFF_AFTER` | 3 | failures before backoff starts |
+| `SHADOWFAX_LOGIN_BACKOFF_CAP_SECONDS` | 30 | longest wait per scope |
+| `SHADOWFAX_LOGIN_SOURCE_BACKOFF_AFTER` | 10 | failures from one address before it's slowed |
+| `SHADOWFAX_LOGIN_SOURCE_BACKOFF_CAP_SECONDS` | 60 | longest wait per address |
+| `SHADOWFAX_MAX_BODY_BYTES` | 2 MiB | largest request body |
+| `SHADOWFAX_MAX_EVENTS_PER_REQUEST` | 1000 | events or findings per request |
+| `SHADOWFAX_MAX_METADATA_BYTES` | 16 KiB | metadata per event |
+| `SHADOWFAX_INGEST_EVENTS_PER_MINUTE` | 6000 | ingest budget per credential |
+| `ANTHROPIC_API_KEY` | unset | lets a model write explanations and translate searches |
+| `SHADOWFAX_LLM_MODEL` | built in | which model to use |
+
+The SIEM forwarding variables are listed in [Sending alerts to a SIEM](#sending-alerts-to-a-siem).
 
 ## Investigation assistant
 
-The dashboard can explain any alert or incident in plain English: a "✦ explain"
-link on each alert, and an "Explain this incident" threat summary in the
-Incidents view. This is the only part of Shadowfax that uses a language model,
-and it is deliberately confined to explaining. It is handed an evidence brief
-assembled from facts the deterministic engine already produced, and it creates
-nothing, decides nothing and has no tools — the explain endpoints are read-only.
-Fields reported by the monitored agent are treated as untrusted data in the
-prompt, and because the assistant cannot act, a prompt-injected narrative can be
-wrong but can never make Shadowfax do anything.
+The dashboard can explain any alert or incident in plain English, using the
+**explain** link on an alert or **Explain this incident** in the Incidents view.
+This is the only part of Shadowfax that uses a language model, and it's kept to
+explaining. It gets a brief built from facts the detection engine already
+produced. It can't create, change or decide anything, and it has no tools.
+Anything the monitored agent reported about itself is marked as untrusted in the
+prompt, and since the assistant can't take any action, a prompt injection could
+at worst produce a wrong explanation.
 
-The same assistant powers **natural-language search**: the search box above the
-alert table takes a plain-English request ("critical destructive actions by AI
-agents last week") and the assistant *translates* it into a filter. It only
-translates — every value it proposes is validated against Shadowfax's known
-severities, actor types and categories before the query runs, so a hallucinated
-value is dropped rather than executed, and the banner shows exactly how the
-query was read. Detection and the query itself stay deterministic.
+The same assistant handles **natural language search**. Type something like
+"critical destructive actions by AI agents last week" and it translates that
+into a filter. Every value is checked against the real severities, actor types
+and categories before the query runs, so a made-up value is dropped, and a
+banner shows exactly how the search was read.
 
-Set `ANTHROPIC_API_KEY` (optionally `SHADOWFAX_LLM_MODEL`) to have a model write
-the narratives and translate searches. With no key configured, explanations use
-the deterministic brief and search uses a keyword parser, so both features work
-out of the box and the test suite needs no network. Each result is labelled with
-its source.
+Set `ANTHROPIC_API_KEY` to have a model write the explanations. Without one,
+explanations use the built-in brief and search uses a keyword parser, so both
+still work and the tests don't need a network connection.
 
----
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+python test_api.py
+```
+
+That runs 833 checks against the API. To run the same checks on PostgreSQL, set
+`SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
+database it's pointed at**, so never point it at real data.
+
+The dashboard has its own tests that drive a real browser with Playwright,
+because a build that compiles can still render nothing:
+
+```bash
+python demo.py --fast          # put some data on the dashboard first
+python test_dashboard.py
+```
+
+There are 57 checks, covering things like the alert rows rendering with severity
+and ATT&CK technique, filters actually filtering, the kill chain being drawn, the
+ledger badge reading verified, the session token never appearing in a URL, and
+the Accounts drawer creating a user whose password really works. They refuse to
+run against an empty instance. Add `--headed` to watch the browser.
+
+The demo doubles as an end-to-end test. With `--assert`, every expectation it
+prints is checked and the run fails if any detection didn't happen:
+
+```bash
+python demo.py --fast --assert
+```
+
+```
+━━ ASSERTIONS FAILED
+
+  ✗ step 8: expected shadowfax-auth / brute_force_auth (401s, then 429s, and Shadowfax alerting on the attempt), not raised
+```
+
+### Continuous integration
+
+Every push runs two jobs. **checks** runs the API suite on SQLite and again on
+PostgreSQL, then builds the dashboard. **container** builds the Docker image,
+starts it and replays the attack against it. That proves the image builds, runs
+as a non-root user, serves the dashboard, raises the detections this README
+describes, and refuses `admin/admin` when started without credentials.
+
+### Releasing
+
+Publishing a release on GitHub (**Releases → Draft a new release**, with a tag
+like `v0.32.0`) runs a third job, **publish**, once the other two have passed. It
+checks the tag matches the version in `app.py`, `frontend/package.json` and the
+changelog, pushes the image to `ghcr.io/jh-infosec/shadowfax`, signs it with
+Sigstore cosign (no stored key, it uses the job's GitHub identity), then pulls
+it back and checks it starts properly. Pushing to `main` never publishes
+anything. A release marked as a pre-release never becomes `:latest`.
+
+The first time, GitHub makes the package private. Make it public once under
+**your profile → Packages → shadowfax → Package settings → Change visibility**.
+
+### Updating the screenshots
+
+```bash
+python demo.py --fast        # against a throwaway instance
+python screenshots.py        # rewrites docs/screenshots/*.png
+```
+
+The script adds a bit of data of its own (two scanners reporting on one host, a
+few accounts and a user with two-factor on) so every screen has something on
+it, so use an instance you don't mind adding to. The tests check that every
+image in this README exists and is a real PNG.
+
+## Roadmap
+
+The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
+[ROADMAP.md](ROADMAP.md). The short version:
+
+| Version | Added |
+| --- | --- |
+| 0.1 to 0.2 | API, detection engine, dashboard, timelines, policy editor |
+| 0.3 | Stable alert ids, acknowledge and assign, sign-in and roles, live updates |
+| 0.4 | Agent tool call detection, MITRE ATT&CK mapping, incidents |
+| 0.5 | Completion fraud, token spend, the investigation assistant, natural language search |
+| 0.6 to 0.8 | Kill chain detection, the CLI, the triage digest |
+| 0.9 to 0.10 | Hash-chained ledger, sign-in throttling, self-monitoring |
+| 0.11 | Ingesting findings from other tools |
+| 0.12 to 0.14 | Docker, the scripted attack, CI, browser tests |
+| 0.15 to 0.18 | Findings export, permission profiles, the published image, capability manifests |
+| 0.19 to 0.22 | Password changes, ingest budgets, fixes from a security review, console recovery |
+| 0.23 to 0.27 | Accounts screen, roles, two-factor sign-in, subject pages |
+| 0.28 to 0.30 | Build tool updates, profile drafts, screenshots |
+| 0.31 | Sending alerts to a SIEM |
+| 0.32 | PostgreSQL support |
+
+Still to do before 1.0:
+
+- An Electron desktop app
+- Multi-user support
+- A production deployment guide
 
 ## Philosophy
 
-Shadowfax is intended to assist analysts, not replace them.
+Shadowfax is meant to help analysts, not replace them.
 
-Detection remains deterministic and policy-driven. Every rule is explicit and
-lives in one file, where the policy governs it and tests can reach it.
+Detection is deterministic and driven by policy. Every rule is written out in
+one file, where the policy controls it and the tests can check it.
 
-Large language models are used only to explain, correlate and summarise
-activity. They are never treated as the security boundary.
+Language models are only used to explain and summarise. They're never the
+security boundary.

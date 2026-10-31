@@ -59,7 +59,7 @@ def recover(username: str, *, now: datetime | None = None, remove_2fa: bool = Fa
     FileNotFoundError when there is no database to recover."""
     # Imported here so `--help` works without the server's dependencies, and so
     # a missing database is reported before anything creates one.
-    if not db.DB_PATH.exists():
+    if not db.DATABASE_URL and not db.DB_PATH.exists():
         raise FileNotFoundError(
             f"no database at {db.DB_PATH} -- set SHADOWFAX_DB to the file the server uses")
     import app

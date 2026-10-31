@@ -387,6 +387,24 @@ manifest event, like a finding, skips the behavioural heuristics and the
 permission target check -- it is a declaration, not an action. Excess tools are
 reported once each across manifests; unlisted calls once per tool per manifest.
 
+#### pgcompat.py
+
+PostgreSQL support (v0.32). When `SHADOWFAX_DATABASE_URL` is set, `db.get_conn()`
+returns a `pgcompat.Connection` instead of a sqlite3 one. It offers the part of
+the sqlite3 API that db.py and app.py use (`execute`, `executemany`,
+`executescript`, `commit`, `rollback`, `lastrowid`, `rowcount`, `total_changes`,
+`in_transaction`, rows that index by name or position) and translates the few
+SQLite-only bits of SQL on the way through: `?` placeholders, `datetime('now')`,
+`INSERT OR IGNORE`, `json_extract`, `LIKE` (to ILIKE, because SQLite's LIKE
+ignores case), `PRAGMA table_info` and the `sqlite_master` lookup. The schema
+gets `BIGSERIAL` ids and `TEXT COLLATE "C"`, so text sorts by byte the way
+SQLite sorts it on any server locale. `BEGIN IMMEDIATE` becomes
+`pg_advisory_xact_lock`, one transaction-scoped lock that every former
+write-lock path takes, so the ledger head, sign-in failure counts, the
+last-admin check and the two-factor step are still read and written by one
+writer at a time. There is one set of queries; the API suite runs against both
+databases.
+
 #### forward.py
 
 Alert forwarding (v0.31). `Config.from_env()` reads the destinations (refusing
@@ -613,7 +631,9 @@ than one process.
 
 #### db.py
 
-All SQLite interaction. No other module imports `sqlite3`.
+All database interaction. No other module imports `sqlite3`, and with
+`SHADOWFAX_DATABASE_URL` set the same code runs on PostgreSQL through
+`pgcompat.py`.
 
 Tables:
 
@@ -996,7 +1016,8 @@ Authentication, roles, API keys and CORS restriction now exist (see the
 Authentication principle above), so the endpoints are no longer open. What
 keeps Shadowfax a local-development tool is narrower: passwords use stdlib
 PBKDF2 rather than bcrypt/argon2, tokens are bearer tokens without rotation,
-and the store is SQLite. Harden these before running it anywhere shared.
+and the default store is SQLite (PostgreSQL is supported from v0.32). Harden
+these before running it anywhere shared.
 
 ### Request limits and ingest budgets
 
@@ -1014,8 +1035,9 @@ SQLite, with a 30-second busy timeout. `insert_event` opens `BEGIN IMMEDIATE`
 before it reads the chain head (v0.21), so two writers queue rather than both
 chaining onto the same previous hash and forking the ledger. Sign-in and
 password changes take the same lock around reading and recording failures, so
-parallel guesses cannot all read the same failure count. PostgreSQL is planned
-for v1.0.
+parallel guesses cannot all read the same failure count. On PostgreSQL (v0.32)
+the same paths take a transaction-scoped advisory lock instead, which gives the
+same guarantee across any number of processes.
 
 ### Retired alerts
 
@@ -1135,6 +1157,7 @@ tickets.py              limits.py               manifest.py
 ratelimit.py            timeutil.py             recover.py
 totp.py                 subjects.py             profile_draft.py
 forward.py              screenshots.py          docs/screenshots/*.png
+pgcompat.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml

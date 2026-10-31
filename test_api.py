@@ -13,6 +13,12 @@ import db as db_module
 db_module.DB_PATH = db_module.Path(__file__).parent / "test_shadowfax.db"
 if db_module.DB_PATH.exists():
     db_module.DB_PATH.unlink()
+# v0.32: with SHADOWFAX_DATABASE_URL set the whole suite runs against PostgreSQL,
+# starting from an empty schema. Never point this at a database you want to keep.
+if db_module.DATABASE_URL:
+    import pgcompat as _pgc
+    _pgc.reset_schema(db_module.DATABASE_URL)
+    print(f"(running against PostgreSQL: {db_module.DATABASE_URL.split('@')[-1]})")
 
 try:
     from fastapi.testclient import TestClient
@@ -478,6 +484,13 @@ client.post("/search", json={"query": "everything"})
 after_counts = client.get("/stats").json()["alert_counts"]
 check("searching creates no alerts (read-only)", before_counts == after_counts)
 
+# Free text ignores case on either database (SQLite's LIKE does; PostgreSQL's does not, so
+# pgcompat translates it to ILIKE).
+_any = client.get("/alerts").json()[0]["actor_id"]
+_lc = client.get("/alerts", params={"search": _any.lower()}).json()
+_uc = client.get("/alerts", params={"search": _any.upper()}).json()
+check("free-text search ignores case", len(_lc) > 0 and {a["id"] for a in _uc} == {a["id"] for a in _lc})
+
 # Time bounds on the alert query itself.
 early = client.get("/alerts?since=2026-08-01T00:00:00").json()
 check("since bound excludes older alerts", all(a["timestamp"] >= "2026-08-01T00:00:00" for a in early))
@@ -517,7 +530,8 @@ check("the ledger still verifies after an append", client.get("/ledger/verify").
 # Tamper with a stored event behind the API's back, exactly as an attacker with
 # database access would. Then repair it, so the rest of the suite is unaffected.
 _tampered_id = client.get("/alerts").json()[0]["event_id"]
-_con = _sqlite3.connect(str(db_module.DB_PATH))
+_con_cm = db_module.get_conn()     # straight to the database, whichever it is
+_con = _con_cm.__enter__()
 _orig = _con.execute("SELECT target FROM events WHERE id = ?", (_tampered_id,)).fetchone()[0]
 _con.execute("UPDATE events SET target = 'innocent_looking' WHERE id = ?", (_tampered_id,))
 _con.commit()
@@ -529,7 +543,7 @@ check("the break says the content no longer matches its hash",
       "does not match its hash" in v["reason"])
 check("entries before the break still verify", v["verified"] >= 0)
 _con.execute("UPDATE events SET target = ? WHERE id = ?", (_orig, _tampered_id))
-_con.commit(); _con.close()
+_con.commit(); _con_cm.__exit__(None, None, None)
 check("restoring the original content makes the ledger valid again",
       client.get("/ledger/verify").json()["ok"] is True)
 
@@ -2121,7 +2135,8 @@ check("and a current code; a wrong one is counted",
       _r.status_code == 401 and _fails27("req-admin") == 1)
 with db_module.get_conn() as _c:
     db_module.clear_login_failures(_c, "req-admin"); _c.commit()
-_r = _ra.post("/auth/totp/recovery-codes", json={"current_password": TEST_PW, "code": _code27(_sec27, 1)})
+_used27 = _code27(_sec27, 1)   # one value, reused below: recomputing could land on the next step
+_r = _ra.post("/auth/totp/recovery-codes", json={"current_password": TEST_PW, "code": _used27})
 _new27 = _r.json().get("recovery_codes", [])
 check("then returns ten new codes", _r.status_code == 200 and len(set(_new27)) == 10
       and not set(_new27) & set(_codes27))
@@ -2133,7 +2148,7 @@ check("and the new ones work",
                                        "recovery_code": _new27[0]}).status_code == 200)
 check("the code used cannot be used again for another set",
       _ra.post("/auth/totp/recovery-codes", json={"current_password": TEST_PW,
-                                                   "code": _code27(_sec27, 1)}).status_code == 401)
+                                                   "code": _used27}).status_code == 401)
 with db_module.get_conn() as _c:
     db_module.clear_login_failures(_c, "req-admin"); _c.commit()
 
@@ -2635,14 +2650,15 @@ except LookupError as _e:
 check("an unknown user is refused, naming the admins that do exist",
       _unk is not None and "nobody-here" in _unk and "lost-admin" in _unk)
 
-_real_path = db_module.DB_PATH
+_real_path, _real_url = db_module.DB_PATH, db_module.DATABASE_URL
 db_module.DB_PATH = _real_path.parent / "no-such-shadowfax.db"
+db_module.DATABASE_URL = None     # a missing SQLite file, whichever backend this run uses
 try:
     _recover.recover("lost-admin")
     _missing = False
 except FileNotFoundError:
     _missing = True
-db_module.DB_PATH = _real_path
+db_module.DB_PATH, db_module.DATABASE_URL = _real_path, _real_url
 check("a missing database is reported, not silently created",
       _missing and not (_real_path.parent / "no-such-shadowfax.db").exists())
 
