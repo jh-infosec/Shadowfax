@@ -47,11 +47,18 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "admin_role_granted",
     # v0.25: a second factor taken off an account.
     "mfa_removed",
+    # v0.31: alerts that could not be delivered to the SIEM.
+    "forwarding_failed",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
 # The platform's own sign-in actor (app.SELF_ACTOR_ID); only Shadowfax writes it.
 AUTH_ACTOR_ID = "shadowfax-auth"
+# v0.31: the alert forwarder (forward.FORWARD_ACTOR_ID).
+FORWARD_ACTOR_ID = "shadowfax-forward"
+# Shadowfax's own actors are quiet for weeks by design; going quiet and coming
+# back is not a dormancy signal for them, whatever an older policy lists.
+PLATFORM_ACTORS = frozenset({AUTH_ACTOR_ID, INGEST_ACTOR_ID, FORWARD_ACTOR_ID})
 
 
 def external_alert_identity(tool: str, finding_id: str, actor_id: str = "") -> str:
@@ -382,6 +389,18 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                        else "by its owner")))
             continue
 
+        # The SIEM stopped receiving (v0.31). An attacker who can cut the path
+        # to the SIEM has blinded it; the alerts are still here, but whoever
+        # watches the SIEM will not see them.
+        if e["event_type"] == "forward_failed":
+            if e["actor_id"] == FORWARD_ACTOR_ID:
+                alerts.append(_mk_alert(e, "high", "forwarding_failed",
+                    f"{meta.get('alerts', '?')} alert(s) could not be delivered to "
+                    f"{meta.get('destination', 'the SIEM')} after every retry "
+                    f"(last error: {meta.get('last_error', 'unknown')}) -- whoever watches "
+                    f"the SIEM is not seeing them"))
+            continue
+
         if e["event_type"] == "alerts_retired":
             if e["actor_id"] == INGEST_ACTOR_ID:
                 retired = meta.get("retired") or []
@@ -470,7 +489,8 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
         # alerting on that would train an analyst to ignore the category. The
         # exemption lives in the policy rather than in a hardcoded name here, so
         # detectors stay a pure function of (events, policy).
-        if last_seen is not None and e["actor_id"] not in policy.get("dormancy_exempt_actors", []):
+        if (last_seen is not None and e["actor_id"] not in PLATFORM_ACTORS
+                and e["actor_id"] not in policy.get("dormancy_exempt_actors", [])):
             gap = ts - last_seen
             if gap >= timedelta(minutes=policy.get("dormancy_threshold_minutes", 120)):
                 note = " (target previously touched -- possible foothold rebuild)" if e["target"] in touched_targets else ""

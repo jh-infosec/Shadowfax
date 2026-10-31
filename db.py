@@ -159,6 +159,22 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 CREATE INDEX IF NOT EXISTS idx_login_attempts_scope
     ON login_attempts(username, source, at);
 
+-- v0.31: alert forwarding outbox. One row per (alert, destination): an alert
+-- already here is never queued for that destination again, which is what makes
+-- forwarding exactly-once across rescans, restarts and resets.
+CREATE TABLE IF NOT EXISTS forward_outbox (
+    alert_id TEXT NOT NULL,
+    destination TEXT NOT NULL,
+    status TEXT NOT NULL,          -- pending | sent | failed | baseline | dropped
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    queued_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (alert_id, destination)
+);
+CREATE INDEX IF NOT EXISTS idx_forward_due ON forward_outbox(status, next_attempt_at);
+
 -- v0.25: two-factor recovery codes. Fingerprints only; each works once.
 CREATE TABLE IF NOT EXISTS recovery_codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -821,6 +837,70 @@ def actors_with_findings(conn: sqlite3.Connection) -> list[str]:
     """Every actor at least one ingested finding is about (v0.26)."""
     return [r[0] for r in conn.execute(
         "SELECT DISTINCT actor_id FROM events WHERE event_type = 'finding' ORDER BY actor_id")]
+
+
+# Alert forwarding outbox (v0.31). Times are naive UTC ISO strings throughout,
+# so the 'due' comparison is a plain string comparison that is also correct.
+
+def _naive_now() -> datetime:
+    return _utc_now().replace(tzinfo=None)
+
+
+
+def forward_knows(conn: sqlite3.Connection, destination: str) -> bool:
+    return conn.execute("SELECT 1 FROM forward_outbox WHERE destination = ? LIMIT 1",
+                        (destination,)).fetchone() is not None
+
+
+def forward_enqueue(conn: sqlite3.Connection, alert_ids: list[str], destination: str,
+                    status: str = "pending") -> int:
+    """Queue alerts not already in the outbox for this destination. Returns how
+    many were new."""
+    now = _iso(_naive_now())
+    before = conn.total_changes
+    conn.executemany(
+        """INSERT OR IGNORE INTO forward_outbox
+               (alert_id, destination, status, attempts, next_attempt_at, queued_at, updated_at)
+           VALUES (?, ?, ?, 0, ?, ?, ?)""",
+        [(a, destination, status, now if status == "pending" else None, now, now)
+         for a in alert_ids])
+    return conn.total_changes - before
+
+
+def forward_due(conn: sqlite3.Connection, now: datetime, limit: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT * FROM forward_outbox WHERE status = 'pending' AND next_attempt_at <= ?
+           ORDER BY queued_at, alert_id LIMIT ?""",
+        (_iso(now), limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def forward_mark(conn: sqlite3.Connection, alert_id: str, destination: str, status: str,
+                 attempts: int, next_attempt_at: datetime | None, error: str | None) -> None:
+    conn.execute(
+        """UPDATE forward_outbox SET status = ?, attempts = ?, next_attempt_at = ?,
+                                     last_error = ?, updated_at = ?
+           WHERE alert_id = ? AND destination = ?""",
+        (status, attempts, _iso(next_attempt_at) if next_attempt_at else None, error,
+         _iso(_naive_now()), alert_id, destination))
+
+
+def forward_status(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for r in conn.execute("""SELECT destination, status, COUNT(*) AS n FROM forward_outbox
+                             GROUP BY destination, status"""):
+        out.setdefault(r["destination"], {})[r["status"]] = r["n"]
+    for dest, info in out.items():
+        last = conn.execute(
+            """SELECT last_error, updated_at FROM forward_outbox
+               WHERE destination = ? AND last_error IS NOT NULL
+               ORDER BY updated_at DESC LIMIT 1""", (dest,)).fetchone()
+        sent = conn.execute(
+            """SELECT MAX(updated_at) FROM forward_outbox WHERE destination = ? AND status = 'sent'""",
+            (dest,)).fetchone()[0]
+        info["last_error"] = dict(last) if last else None
+        info["last_sent_at"] = sent
+    return out
 
 
 def count_active_admins(conn: sqlite3.Connection) -> int:

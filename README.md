@@ -43,13 +43,14 @@ investigation and explainability.
 
 - REST API built with FastAPI
 - SQLite event database
-- Rule-based detection engine across twenty-seven alert categories, including AI-agent tool-call analysis
+- Rule-based detection engine across twenty-eight alert categories, including AI-agent tool-call analysis
 - Policy management with full rescan on change
 - Actor risk scoring
 - Stable, deterministic alert identity that survives a rescan
 - Acknowledge and assign alerts, with analyst state that persists across rescans
 - Authentication with user accounts, roles (admin / analyst / viewer) and API keys
 - Subject pages — everything other tools reported about a file, host or workspace, grouped by tool, with findings two tools agree on called out
+- SIEM forwarding — each new alert sent once to a webhook (signed) or syslog (CEF or JSON), with retries, and an alert if the SIEM stops receiving
 - Two-factor sign-in — codes from any authenticator app (QR enrolment from the dashboard), single-use and throttled, with recovery codes; removing it raises an alert
 - Password changes and admin resets — the current password required and throttled, other sessions signed out, admin-reset passwords forced to change before anything else works
 - Dashboard sign-in, with the UI adapting to the signed-in user's role
@@ -316,6 +317,14 @@ Planned
 
 - Draft a permission profile from what an agent did — shipped (v0.29.0)
 
+### v0.30
+
+- Screenshots in the README — shipped (v0.30.0)
+
+### v0.31
+
+- Forward alerts to a SIEM (webhook, syslog/CEF) — shipped (v0.31.0)
+
 ### v1.0
 
 - Electron Desktop Application
@@ -494,7 +503,7 @@ python demo.py --fast --assert
 ```
 
 That turns the demo into an end-to-end check of the whole stack — ingest,
-twenty-seven detectors, correlation, kill-chain ordering, findings-envelope ingest,
+twenty-eight detectors, correlation, kill-chain ordering, findings-envelope ingest,
 the front door and the ledger — against a real server over real HTTP. It is a
 different kind of evidence from the unit suite, which never leaves the process.
 
@@ -973,7 +982,7 @@ critical, high, medium, low, info
 ```
 
 A finding's `key` becomes the alert category, so an emitter **may not use one of
-Shadowfax's own twenty-seven detector categories**. An alert reading
+Shadowfax's own twenty-eight detector categories**. An alert reading
 `destructive_action` must mean Shadowfax's detector found it, not that somebody
 else said so.
 
@@ -1075,6 +1084,46 @@ incident scoring and the triage digest: informational findings are context, and
 a hundred of them must not out-score one critical.
 
 ---
+
+## Sending alerts to a SIEM
+
+Shadowfax can forward each new alert, once, to the SIEM a team already watches —
+Splunk, Elastic, Sentinel, QRadar or anything that takes a webhook or syslog.
+
+| Variable | Meaning |
+| --- | --- |
+| `SHADOWFAX_FORWARD_WEBHOOK_URL` | POST each alert as JSON to this http(s) URL |
+| `SHADOWFAX_FORWARD_WEBHOOK_SECRET` | sign each request with HMAC-SHA256 (recommended) |
+| `SHADOWFAX_FORWARD_SYSLOG` | `udp://host:514` or `tcp://host:6514` — RFC 5424 syslog |
+| `SHADOWFAX_FORWARD_SYSLOG_FORMAT` | `cef` (default; parsed by nearly every SIEM) or `json` |
+| `SHADOWFAX_FORWARD_MIN_SEVERITY` | `medium` by default; `info` sends everything |
+| `SHADOWFAX_FORWARD_BACKFILL` | `1` to also send the alerts that existed when forwarding was switched on |
+
+- **Each alert is sent once per destination.** Alert ids are deterministic, and
+  an outbox in the database records what has been queued for where, so a rescan,
+  a restart or a reset to the sample data does not send anything twice.
+- **It never slows ingest.** Alerts are queued in the same transaction that
+  stores them, and a background thread delivers them, retrying with exponential
+  backoff (5 s doubling to an hour) for eight attempts.
+- **Switching it on does not replay history** into the SIEM; existing alerts are
+  recorded as a baseline (set `SHADOWFAX_FORWARD_BACKFILL=1` to send them).
+- **A SIEM that stops receiving is itself an alert:** when delivery is given up,
+  `forwarding_failed` (high) is raised — whoever can cut the path to the SIEM has
+  blinded it, and that should not be silent.
+- No redirects are followed and the destination comes only from the
+  environment, never from the API.
+
+**Verifying a webhook.** Each request carries `X-Shadowfax-Timestamp` and, with a
+secret, `X-Shadowfax-Signature: sha256=<hex>` over `"<timestamp>.<body>"`:
+
+```python
+expected = "sha256=" + hmac.new(secret, f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
+ok = hmac.compare_digest(expected, signature) and abs(time.time() - int(ts)) < 300
+```
+
+`shadowfax forwarding` shows what has been sent, what is pending and the last
+error; `shadowfax forwarding --test` sends a test alert (severity `info`,
+category `forwarding_test`) to every destination and says what happened.
 
 ## Security
 

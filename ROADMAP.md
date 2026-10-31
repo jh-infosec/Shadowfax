@@ -374,5 +374,7 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 - [ ] PostgreSQL support
 - [ ] Multi-user support
 - [x] Docker images -- built since `v0.12.0`, published to ghcr.io since `v0.17.0`.
-- [ ] SIEM integrations
+- [x] SIEM integrations (`v0.31.0`): each new alert forwarded once to a
+      signed webhook and/or syslog (CEF or JSON), through a durable outbox with
+      retries; `forwarding_failed` when the SIEM stops receiving.
 - [ ] Production deployment

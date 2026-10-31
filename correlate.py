@@ -51,6 +51,7 @@ _CATEGORY_PHRASE = {
     "admin_account_created": "a new administrator account",
     "admin_role_granted": "an account promoted to administrator",
     "mfa_removed": "two-factor removed from an account",
+    "forwarding_failed": "alerts that did not reach the SIEM",
 }
 
 

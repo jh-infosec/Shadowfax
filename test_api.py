@@ -1757,6 +1757,208 @@ with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
 
+print("\n== forwarding alerts to a SIEM (v0.31) ==")
+import forward as _fw
+import hmac as _hmac31, hashlib as _hl31, socket as _sock31, threading as _th31, json as _json31
+import http.server as _hs31
+from datetime import datetime as _dt31, timedelta as _td31
+
+def _cfg_err(env):
+    try:
+        _fw.Config.from_env(env); return None
+    except ValueError as e:
+        return str(e)
+check("forwarding is off unless configured", _fw.Config.from_env({}).enabled is False
+      and app_module.FORWARD.enabled is False)
+check("a webhook must be http(s)", "http(s)" in (_cfg_err({"SHADOWFAX_FORWARD_WEBHOOK_URL": "file:///etc/passwd"}) or ""))
+check("syslog must be udp:// or tcp:// with a host",
+      _cfg_err({"SHADOWFAX_FORWARD_SYSLOG": "syslog.example:514"}) is not None)
+check("an unknown minimum severity is refused at startup",
+      _cfg_err({"SHADOWFAX_FORWARD_WEBHOOK_URL": "https://x", "SHADOWFAX_FORWARD_MIN_SEVERITY": "loud"}) is not None)
+_c31 = _fw.Config.from_env({"SHADOWFAX_FORWARD_WEBHOOK_URL": "https://siem.example/hook?token=abc",
+                            "SHADOWFAX_FORWARD_WEBHOOK_SECRET": "s3cret",
+                            "SHADOWFAX_FORWARD_SYSLOG": "udp://10.0.0.5:514"})
+check("both destinations, described without secrets or query strings",
+      [d.describe() for d in _c31.destinations] == ["webhook https://siem.example/hook",
+                                                    "syslog udp://10.0.0.5:514"]
+      and _c31.destinations[1].fmt == "cef")
+check("medium and above by default", _c31.wants({"severity": "high"}) and not _c31.wants({"severity": "low"}))
+
+_a31 = {"id": "abc123", "severity": "high", "category": "permission_violation",
+        "message": "tool 'nc' denied | cs4=forged suser=admin\nsecond line",
+        "actor_id": "evil|agent", "actor_type": "ai_agent", "target": "/etc/passwd",
+        "timestamp": "2026-10-27T09:00:00", "attack": [{"id": "T1059"}], "source_tool": None}
+_cef31 = _fw.cef(_a31, "0.31.0")
+_head31, _ext31 = _cef31.rsplit("|", 1)[0], _cef31.split("|", 7)[7]
+check("CEF has the standard seven header fields",
+      _cef31.startswith("CEF:0|Shadowfax|Shadowfax|0.31.0|permission_violation|permission violation|8|"))
+check("attacker text cannot forge a CEF field: = and newlines are escaped",
+      "cs4\\=forged suser\\=admin" in _ext31 and "\n" not in _cef31 and "suser=evil|agent" in _ext31)
+check("syslog lines carry RFC 5424 priority (audit facility, severity mapped)",
+      _fw.syslog_line(_a31, "0.31.0", "cef", "host1").startswith("<107>1 ") and " host1 shadowfax - " in
+      _fw.syslog_line(_a31, "0.31.0", "cef", "host1"))
+_sig31 = _fw.signature("s3cret", "1700000000", b'{"a":1}')
+check("webhook signatures are HMAC-SHA256 over timestamp.body",
+      _sig31 == "sha256=" + _hmac31.new(b"s3cret", b'1700000000.{"a":1}', _hl31.sha256).hexdigest())
+
+# A real HTTP receiver.
+_got31 = []
+class _H31(_hs31.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        _got31.append((self.path, dict(self.headers), body))
+        code = {"/hook": 200, "/fail": 500, "/redirect": 302}[self.path]
+        self.send_response(code)
+        if code == 302: self.send_header("Location", "http://127.0.0.1:1/elsewhere")
+        self.end_headers()
+_srv31 = _hs31.HTTPServer(("127.0.0.1", 0), _H31)
+_th31.Thread(target=_srv31.serve_forever, daemon=True).start()
+_port31 = _srv31.server_address[1]
+_hook31 = _fw.Destination("webhook", f"http://127.0.0.1:{_port31}/hook", "json", "s3cret")
+_fw.send(_hook31, _a31, "0.31.0")
+_path, _hdr, _body = _got31[-1]
+check("a webhook receives the alert as JSON",
+      _json31.loads(_body)["alert"]["id"] == "abc123" and _json31.loads(_body)["alert"]["attack"] == ["T1059"])
+check("signed, so the receiver can verify it came from Shadowfax",
+      _hdr["X-Shadowfax-Signature"] == _fw.signature("s3cret", _hdr["X-Shadowfax-Timestamp"], _body))
+def _send_err(dest):
+    try:
+        _fw.send(dest, _a31, "0.31.0"); return None
+    except _fw.ForwardError as e:
+        return str(e)
+check("a server error is a delivery failure",
+      _send_err(_fw.Destination("webhook", f"http://127.0.0.1:{_port31}/fail")) == "HTTP 500")
+check("a redirect is refused, not followed",
+      _send_err(_fw.Destination("webhook", f"http://127.0.0.1:{_port31}/redirect")) == "HTTP 302"
+      and not any(p == "/elsewhere" for p, _, _ in _got31))
+check("an unreachable receiver is a delivery failure",
+      _send_err(_fw.Destination("webhook", "http://127.0.0.1:1/x")) is not None)
+_udp31 = _sock31.socket(_sock31.AF_INET, _sock31.SOCK_DGRAM); _udp31.bind(("127.0.0.1", 0)); _udp31.settimeout(3)
+_fw.send(_fw.Destination("syslog", f"udp://127.0.0.1:{_udp31.getsockname()[1]}", "cef"), _a31, "0.31.0")
+_line31 = _udp31.recv(9000).decode()
+check("syslog over UDP delivers a CEF line", "CEF:0|Shadowfax|" in _line31 and _line31.startswith("<107>1 "))
+_tcp31 = _sock31.socket(); _tcp31.bind(("127.0.0.1", 0)); _tcp31.listen(1); _tcp31.settimeout(3)
+_t31 = _th31.Thread(target=_fw.send, args=(_fw.Destination("syslog", f"tcp://127.0.0.1:{_tcp31.getsockname()[1]}", "json"), _a31, "0.31.0"))
+_t31.start(); _conn31, _ = _tcp31.accept(); _raw31 = b""
+while True:
+    _chunk = _conn31.recv(65536)
+    if not _chunk: break
+    _raw31 += _chunk
+_t31.join()
+_n31, _, _msg31 = _raw31.partition(b" ")
+check("syslog over TCP uses octet counting, with JSON when asked",
+      int(_n31) == len(_msg31) and '"category":"permission_violation"' in _msg31.decode())
+
+# The outbox: each alert once, history not replayed, failures surfaced.
+_sent31 = []
+def _fake_send(dest, alert, version): _sent31.append((dest.name, alert["id"]))
+_saved31 = (app_module.FORWARD, app_module._FORWARD_READY)
+app_module.FORWARD = _fw.Config([_fw.Destination("webhook", "https://siem.test/hook")], "medium", False)
+try:
+    with db_module.get_conn() as _c:
+        app_module._forward_baseline(_c); _c.commit()
+        _base31 = {r[0] for r in _c.execute("SELECT alert_id FROM forward_outbox WHERE status='baseline'")}
+    check("turning forwarding on records existing alerts as a baseline, not as news",
+          len(_base31) > 10)
+    app_module._FORWARD_READY = True
+    _w31 = _fw.Worker(app_module.FORWARD, app_module.VERSION, db_module.get_conn,
+                      app_module._record_forward_failure, sender=_fake_send)
+    check("so nothing is sent for history", _w31.run_once() == {"sent": 0, "failed": 0, "retried": 0})
+    client.post("/events", json=[{"timestamp": f"2026-10-27T11:0{i}:00", "actor_id": "fwd-agent-1",
+                                  "actor_type": "ai_agent", "event_type": "tool_call",
+                                  "target": f"/etc/shadow{i}", "metadata": {"tool": "rm -rf"}}
+                                 for i in range(2)])
+    _new31 = [a["id"] for a in client.get("/alerts").json()
+              if a["actor_id"] == "fwd-agent-1" and app_module.FORWARD.wants(a)]
+    _r31 = _w31.run_once()
+    check("a new alert is sent", len(_new31) >= 1 and _r31["sent"] == len(_new31)
+          and {i for _, i in _sent31} == set(_new31))
+    client.put("/policy", json=client.get("/policy").json())     # rescans everything
+    check("exactly once: a rescan that rebuilds the same alerts sends nothing again",
+          _w31.run_once()["sent"] == 0 and len(_sent31) == len(_new31))
+    client.post("/events", json=[{"timestamp": "2026-10-27T11:30:00", "actor_id": "fwd-low-1",
+                                  "actor_type": "human", "event_type": "file_access",
+                                  "target": "x", "metadata": {}}])
+    with db_module.get_conn() as _c:
+        _low31 = [a for a in db_module.query_alerts(_c, actor_id="fwd-low-1", limit=50)
+                  if not app_module.FORWARD.wants(a)]
+        _queued_low = [r for r in _c.execute("SELECT alert_id FROM forward_outbox")
+                       if r[0] in {a["id"] for a in _low31}]
+    check("alerts below the minimum severity are not queued", not _queued_low)
+
+    # A receiver that keeps failing.
+    def _bad_send(dest, alert, version): raise _fw.ForwardError("connection refused")
+    _wb31 = _fw.Worker(app_module.FORWARD, app_module.VERSION, db_module.get_conn,
+                       app_module._record_forward_failure, sender=_bad_send)
+    client.post("/events", json=[{"timestamp": "2026-10-27T12:00:00", "actor_id": "fwd-agent-2",
+                                  "actor_type": "ai_agent", "event_type": "tool_call",
+                                  "target": "/etc/shadow", "metadata": {"tool": "rm -rf"}}])
+    _r31 = _wb31.run_once()
+    with db_module.get_conn() as _c:
+        _row31 = dict(_c.execute("SELECT * FROM forward_outbox WHERE status='pending' LIMIT 1").fetchone())
+    check("a failed delivery is retried later, not dropped",
+          _r31["retried"] >= 1 and _row31["attempts"] == 1 and _row31["last_error"] == "connection refused"
+          and _row31["next_attempt_at"] > _dt31.utcnow().isoformat())
+    check("ingest did not wait for it", client.get("/alerts").status_code == 200)
+    check("backoff grows and is capped", [_fw.backoff(n) for n in (1, 2, 3)] == [5, 10, 20]
+          and _fw.backoff(50) == _fw.MAX_BACKOFF_SECONDS)
+    app_module.SELF_MONITOR = True
+    _n_ff = len(client.get("/alerts", params={"category": ["forwarding_failed"]}).json())
+    _later = _dt31.utcnow()
+    for _ in range(_fw.MAX_ATTEMPTS + 1):
+        _later += _td31(hours=2)
+        _wb31.run_once(now=_later)
+    _ff31 = client.get("/alerts", params={"category": ["forwarding_failed"]}).json()
+    check("after the last retry it is given up on, and forwarding_failed is raised (high)",
+          len(_ff31) == _n_ff + 1 and _ff31[0]["severity"] == "high"
+          and "siem.test" in _ff31[0]["message"] and "connection refused" in _ff31[0]["message"])
+    with db_module.get_conn() as _c:
+        check("the outbox says which alerts did not get through",
+              _c.execute("SELECT COUNT(*) FROM forward_outbox WHERE status='failed'").fetchone()[0] >= 1)
+    _w31.run_once(now=_dt31.utcnow() + _td31(days=30))   # drain anything pending
+    _sent31.clear()
+    client.post("/reset")
+    check("resetting to the sample data does not replay the demo history into the SIEM",
+          _w31.run_once()["sent"] == 0 and not _sent31)
+    client.post("/events", json=[{"timestamp": "2026-10-27T13:00:00", "actor_id": "fwd-agent-3",
+                                  "actor_type": "ai_agent", "event_type": "tool_call",
+                                  "target": "/etc/shadow", "metadata": {"tool": "rm -rf"}}])
+    check("but what happens after the reset is sent", _w31.run_once()["sent"] >= 1)
+    _st31 = client.get("/forwarding").json()
+    check("GET /forwarding shows each destination's counts and last error, no secrets",
+          _st31["enabled"] is True and _st31["destinations"][0]["sent"] >= 1
+          and _st31["destinations"][0]["failed"] >= 1
+          and _st31["destinations"][0]["last_error"]["last_error"] == "connection refused")
+    check("viewers cannot see forwarding", as_user("viewer1", TEST_PW).get("/forwarding").status_code == 403)
+    _code_rc, _cout, _cerr = run_cli(["forwarding"])
+    check("`shadowfax forwarding` shows the counts and exits non-zero while anything failed",
+          _code_rc == 1 and "siem.test/hook" in _cout and "failed" in _cout and "connection refused" in _cout)
+    app_module.FORWARD = _fw.Config([_hook31, _fw.Destination("webhook", f"http://127.0.0.1:{_port31}/fail")])
+    _t = client.post("/forwarding/test").json()
+    check("POST /forwarding/test sends a test alert to each destination and reports per destination",
+          [r["ok"] for r in _t["results"]] == [True, False] and _t["results"][1]["error"] == "HTTP 500"
+          and _json31.loads(_got31[-2][2])["alert"]["category"] == "forwarding_test")
+finally:
+    app_module.FORWARD, app_module._FORWARD_READY = _saved31
+    app_module.SELF_MONITOR = False
+check("with forwarding off, the test endpoint says how to turn it on",
+      client.post("/forwarding/test").status_code == 409)
+check("nobody can ingest as the forwarder",
+      client.post("/events", json=[{"timestamp": "2026-10-27T09:00:00", "actor_id": "shadowfax-forward",
+                                    "actor_type": "service_account", "event_type": "forward_failed",
+                                    "target": "x", "metadata": {}}]).status_code == 400)
+def _dormant31(actor):
+    return [a for a in detectors.run_for_actor([
+        {"id": 1, "timestamp": "2026-01-01T09:00:00", "actor_id": actor, "actor_type": "service_account",
+         "event_type": "auth_failure", "target": "x", "metadata": {}},
+        {"id": 2, "timestamp": "2026-09-01T09:00:00", "actor_id": actor, "actor_type": "service_account",
+         "event_type": "auth_failure", "target": "x", "metadata": {}}],
+        {**_POLICY, "dormancy_exempt_actors": []}) if a["category"] == "dormant_reappearance"]
+check("Shadowfax's own actors are never 'dormant', whatever an older policy lists",
+      _dormant31("some-service") and not _dormant31("shadowfax-auth") and not _dormant31("shadowfax-forward"))
+_srv31.shutdown()
+
 print("\n== README screenshots (v0.30) ==")
 import re as _re30
 from pathlib import Path as _P30

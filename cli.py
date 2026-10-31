@@ -563,6 +563,33 @@ def human_subject(out, r) -> None:
             print(f"  {_col((f['severity'] or '').upper(), 9)}{f['title']}{flags}", file=out)
 
 
+def cmd_forwarding(client: Client, args, out) -> int:
+    """Where alerts are forwarded and how delivery is going (v0.31, admin), or
+    --test to send a test alert now. Non-zero if anything has failed."""
+    if args.test:
+        r = client.call("POST", "/forwarding/test")
+        emit(out, r, args.json, lambda o, v: [print(
+            f"{'ok  ' if x['ok'] else 'FAIL'} {x['where']}" + ("" if x["ok"] else f" -- {x['error']}"),
+            file=o) for x in v["results"]])
+        return EXIT_OK if all(x["ok"] for x in r["results"]) else EXIT_FAIL
+    r = client.call("GET", "/forwarding")
+
+    def human(o, v):
+        if not v["enabled"]:
+            print("forwarding is off (set SHADOWFAX_FORWARD_WEBHOOK_URL and/or "
+                  "SHADOWFAX_FORWARD_SYSLOG)", file=o)
+            return
+        print(f"forwarding {v['min_severity']} and above", file=o)
+        for d in v["destinations"]:
+            counts = ", ".join(f"{d.get(k, 0)} {k}" for k in ("sent", "pending", "failed"))
+            print(f"  {d['where']} ({d['format']}): {counts}", file=o)
+            if d.get("last_error"):
+                print(f"    last error: {d['last_error']['last_error']} at "
+                      f"{_short_time(d['last_error']['updated_at'])}", file=o)
+    emit(out, r, args.json, human)
+    return EXIT_FAIL if any(d.get("failed") for d in r["destinations"]) else EXIT_OK
+
+
 def human_lockouts(out, report) -> None:
     s = report["settings"]
     print(f"sign-in throttle: lock after {s['max_failures']} failures in "
@@ -841,6 +868,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="sign-in lockouts (non-zero while any scope is locked)")
     sp.add_argument("--unlock", metavar="USERNAME",
                     help="clear a username's recorded failures (admin)")
+    sp = sub.add_parser("forwarding",
+                        help="alert forwarding to a SIEM: status, or --test (admin)")
+    sp.add_argument("--test", action="store_true", help="send a test alert to every destination now")
     sp = sub.add_parser("subjects",
                         help="what other tools reported findings about, or one subject's report")
     sp.add_argument("subject", nargs="?", help="e.g. host:10.0.0.9 or file:sha256:...")
@@ -882,6 +912,7 @@ COMMANDS = {
     "alerts": cmd_alerts, "check": cmd_check, "incidents": cmd_incidents,
     "explain": cmd_explain, "search": cmd_search, "actors": cmd_actors,
     "digest": cmd_digest, "verify": cmd_verify, "lockouts": cmd_lockouts, "subjects": cmd_subjects,
+    "forwarding": cmd_forwarding,
     "export": cmd_export, "permissions": cmd_permissions,
     "manifest": cmd_manifest, "passwd": cmd_passwd,
     "stats": cmd_stats, "policy": cmd_policy,

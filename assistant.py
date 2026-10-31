@@ -541,6 +541,8 @@ _CATEGORY_SYNONYMS = {
     "two-factor": "mfa_removed",
     "2fa": "mfa_removed",
     "mfa": "mfa_removed",
+    "siem": "forwarding_failed",
+    "forwarding": "forwarding_failed",
 }
 
 

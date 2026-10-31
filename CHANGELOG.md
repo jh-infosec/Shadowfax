@@ -1,5 +1,87 @@
 # Changelog
 
+## Version 0.31.0
+
+Sending alerts to a SIEM. A detection that only appears on Shadowfax's own
+dashboard is one somebody has to remember to look at. Most teams already watch
+one place — Splunk, Elastic, Sentinel, QRadar — and Shadowfax now arrives there.
+
+### Where
+
+- **Webhook:** each alert POSTed as JSON to `SHADOWFAX_FORWARD_WEBHOOK_URL`.
+  With `SHADOWFAX_FORWARD_WEBHOOK_SECRET` set, signed: `X-Shadowfax-Signature:
+  sha256=HMAC(secret, "<timestamp>.<body>")` beside `X-Shadowfax-Timestamp`, so
+  a receiver can reject forged and replayed requests (the README shows the
+  three-line check).
+- **Syslog:** `SHADOWFAX_FORWARD_SYSLOG=udp://host:514` or `tcp://host:6514`,
+  RFC 5424 (audit facility, severity mapped), TCP with RFC 6587 octet counting.
+  The message is **CEF** by default — the format nearly every SIEM parses
+  without configuration — or JSON. CEF escaping is strict: an alert message is
+  partly attacker-chosen text (an agent's tool call, a scanner's banner), and
+  `suser=admin` inside it must stay text, not become a field.
+- `SHADOWFAX_FORWARD_MIN_SEVERITY` (default `medium`). Both destinations can be
+  on at once.
+
+### How it stays correct
+
+- **Exactly once per destination.** A new `forward_outbox` table records every
+  alert queued for every destination, keyed on (alert id, destination); alert
+  ids are deterministic, so a rescan that rebuilds the same alert queues
+  nothing. Restarts don't resend.
+- **Never in ingest's way.** Alerts are queued in the same transaction that
+  stores them, so a crash cannot lose one, and a background thread delivers
+  them: exponential backoff from 5 seconds to an hour, eight attempts.
+- **No history flood.** When a destination is first configured, every existing
+  alert is recorded as a baseline and not sent (`SHADOWFAX_FORWARD_BACKFILL=1`
+  sends them). **Reset to sample data** reloads the demo history with new event
+  ids — and so new alert ids — and would have replayed all of it into the SIEM
+  on every reset; found in the live test, and now a reset takes a fresh
+  baseline. Ingest running alongside a reset is still forwarded.
+- **A SIEM that stops receiving is a finding.** When an alert is given up on,
+  `forward_failed` is written under a new platform actor, `shadowfax-forward`,
+  and the detector raises **`forwarding_failed`** (high), naming the
+  destination and the last error — at most once an hour per destination while
+  it stays down. An attacker who can cut the path to the SIEM has blinded
+  whoever watches it; the alerts are still in Shadowfax, but that should not be
+  silent. Detector categories: twenty-seven → **twenty-eight**.
+- **Not an SSRF:** destinations come only from the environment, never from the
+  API; redirects are refused, not followed; five-second timeout.
+
+### Seeing it
+
+- `GET /forwarding` (admin): each destination, described without secrets or
+  query strings, with sent / pending / failed / baseline counts, the last error
+  and the last delivery. `shadowfax forwarding` prints it and exits non-zero
+  while anything has failed — usable from monitoring.
+- `POST /forwarding/test` / `shadowfax forwarding --test`: a test alert
+  (severity `info`, category `forwarding_test`) to every destination now, with
+  the result for each.
+
+### Also
+
+- Shadowfax's own actors (`shadowfax-auth`, `shadowfax-ingest`,
+  `shadowfax-forward`) are now exempt from `dormant_reappearance` in code, not
+  only through the policy's exempt list, which an older or edited policy may
+  lack. All three are reserved: nobody can ingest as them.
+
+### Verification
+
+- **832** API checks (from 796), including real deliveries to a local HTTP
+  receiver (signature verified), a UDP syslog listener and a TCP one (octet
+  count checked), a 500, a redirect (refused, never followed) and an unreachable
+  port. Ten mutations, each caught: the outbox replacing instead of ignoring
+  (resends), history sent at switch-on, CEF `=` not escaped, redirects followed,
+  give-ups not reported, the severity filter ignored, the signature not covering
+  the timestamp, the dormancy exemption removed, never giving up, and reset
+  replaying the sample data. The dormancy check passed its mutation at first —
+  the events it used never reach the dormancy rule — and was rewritten to use
+  ones that do.
+- **Live:** a server started with both destinations, the scripted attack run
+  against it: 23 alerts reached the webhook, all 23 with valid signatures, none
+  twice; the same 23 arrived as CEF over syslog; none of the demo history was
+  replayed by the demo's reset.
+- **57** dashboard checks; replay: all 12 assertions held.
+
 ## Version 0.30.0
 
 Screenshots. The README described a kill chain forming, a profile drafted from

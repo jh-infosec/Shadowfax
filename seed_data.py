@@ -77,7 +77,7 @@ DEFAULT_POLICY = {
     # an event when someone fails to authenticate, so a long silence is the
     # healthy case -- alerting on it would be noise, and noise is how a whole
     # category of alert gets ignored.
-    "dormancy_exempt_actors": ["shadowfax-auth", "shadowfax-ingest"],
+    "dormancy_exempt_actors": ["shadowfax-auth", "shadowfax-ingest", "shadowfax-forward"],
     "brute_force_window_minutes": 10,
     "brute_force_max_failures": 4,
     "lateral_movement_window_minutes": 15,

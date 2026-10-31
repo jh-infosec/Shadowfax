@@ -387,6 +387,23 @@ manifest event, like a finding, skips the behavioural heuristics and the
 permission target check -- it is a declaration, not an action. Excess tools are
 reported once each across manifests; unlisted calls once per tool per manifest.
 
+#### forward.py
+
+Alert forwarding (v0.31). `Config.from_env()` reads the destinations (refusing
+anything but http(s) for the webhook and udp/tcp for syslog); `payload()`,
+`cef()` (header `|` and extension `=`/newline escaping, so alert text cannot
+forge a field) and `syslog_line()` (RFC 5424, audit facility) format an alert;
+`send()` delivers one -- signed webhook with no redirects, UDP syslog, or TCP
+syslog with RFC 6587 octet counting. `app._rescan_actor` queues new alerts into
+`forward_outbox` in the same transaction that stores them (INSERT OR IGNORE on
+(alert id, destination) is what makes it exactly-once); the startup baseline,
+and a baseline after `POST /reset`, keep history out. `Worker.run_once()` is one
+delivery pass -- due rows, send, mark sent, or reschedule with exponential
+backoff, or give up after eight attempts and call `_record_forward_failure`,
+which writes `forward_failed` under `shadowfax-forward` (at most one an hour per
+destination) for the detector's `forwarding_failed`. The thread just calls it
+every two seconds.
+
 #### profile_draft.py
 
 Profile drafts (v0.29), pure: `draft(actor_id, events, policy)` counts the
@@ -1117,6 +1134,7 @@ throttle.py             envelope.py             permissions.py
 tickets.py              limits.py               manifest.py
 ratelimit.py            timeutil.py             recover.py
 totp.py                 subjects.py             profile_draft.py
+forward.py              screenshots.py          docs/screenshots/*.png
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml
 .dockerignore           .github/workflows/ci.yml

@@ -24,6 +24,7 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,7 @@ import db
 import detectors
 import digest as digest_mod
 import envelope
+import forward
 import ledger
 import limits
 import manifest
@@ -58,7 +60,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.30.0"
+VERSION = "0.31.0"
 SESSION_TTL_HOURS = 12
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
@@ -92,6 +94,7 @@ RESERVED_EVENT_TYPES = {
     # means its own limiter refused someone.
     INGEST_THROTTLED: "nothing -- Shadowfax records these itself",
     "alerts_retired": "nothing -- Shadowfax records these itself",
+    "forward_failed": "nothing -- Shadowfax records these itself",
 }
 
 # Recorded sign-in attempts are operational state for the throttle, not
@@ -120,7 +123,7 @@ SELF_TARGET = "shadowfax_login"
 # The platform's own actors (v0.21). Only Shadowfax writes their timelines: an
 # ingest client posting a "password_reset ... reset_by: admin" event under
 # shadowfax-auth produced an entry indistinguishable from a real one.
-RESERVED_ACTORS = frozenset({SELF_ACTOR_ID, INGEST_ACTOR_ID})
+RESERVED_ACTORS = frozenset({SELF_ACTOR_ID, INGEST_ACTOR_ID, forward.FORWARD_ACTOR_ID})
 
 
 def _refuse_reserved_actor(actor_id: str) -> None:
@@ -173,9 +176,11 @@ SELF_MONITOR = os.environ.get("SHADOWFAX_SELF_MONITOR", "1").strip().lower() not
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _FORWARD_READY, FORWARD_WORKER
     # Capture the running loop so bus.publish() can signal it from the sync
     # threadpool where the mutating endpoints run.
     bus.set_loop(asyncio.get_running_loop())
+    _FORWARD_READY = False
     db.init_db()
     with db.get_conn() as conn:
         _bootstrap_admin(conn)
@@ -191,7 +196,73 @@ async def lifespan(app: FastAPI):
             # them: alerts are a pure function of events and the active policy.
             _rescan_all(conn)
             conn.commit()
+        _forward_baseline(conn)
+        conn.commit()
+    _FORWARD_READY = True
+    FORWARD_WORKER = forward.Worker(FORWARD, VERSION, db.get_conn, _record_forward_failure)
+    FORWARD_WORKER.start()
     yield
+    FORWARD_WORKER.stop()
+
+
+# Alert forwarding (v0.31; see forward.py). Configured from the environment
+# only: an API that could set the destination could make the server send
+# requests anywhere.
+FORWARD = forward.Config.from_env()
+FORWARD_WORKER: forward.Worker | None = None
+# Alerts produced while starting up (sample data, a rebuild) are history, not
+# news: nothing is queued until the baseline below has been taken.
+_FORWARD_READY = False
+_FORWARD_FAILURE_QUIET = timedelta(hours=1)
+# Set while a request reloads the sample data: those alerts are a fresh copy of
+# the demo history, not news, and get a new baseline instead of being sent.
+# Per thread, so ingest running alongside a reset is still forwarded.
+_forward_hold = threading.local()
+_forward_failure_last: dict[str, datetime] = {}
+
+
+def _forward_baseline(conn: sqlite3.Connection) -> None:
+    """The first time a destination is configured, every existing alert is
+    recorded as already seen, so turning forwarding on does not replay the
+    whole history into the SIEM (unless SHADOWFAX_FORWARD_BACKFILL asks)."""
+    for dest in FORWARD.destinations:
+        if db.forward_knows(conn, dest.name):
+            continue
+        ids = [r[0] for r in conn.execute("SELECT id, severity FROM alerts")
+               if FORWARD.wants({"severity": r[1]})]
+        db.forward_enqueue(conn, ids, dest.name, "pending" if FORWARD.backfill else "baseline")
+        # Mark the destination known even when there is nothing to baseline.
+        if not ids:
+            db.forward_enqueue(conn, ["(baseline)"], dest.name, "baseline")
+
+
+def _forward_enqueue(conn: sqlite3.Connection, alerts: list[dict[str, Any]]) -> None:
+    if not (_FORWARD_READY and FORWARD.enabled) or getattr(_forward_hold, "on", False):
+        return
+    ids = [a["id"] for a in alerts if FORWARD.wants(a)]
+    for dest in FORWARD.destinations:
+        db.forward_enqueue(conn, ids, dest.name)
+
+
+def _record_forward_failure(conn: sqlite3.Connection, where: str, alert_ids: list[str],
+                            last_error: str) -> None:
+    """Alerts given up on: an event under shadowfax-forward, which the detector
+    turns into forwarding_failed. At most one per destination an hour while it
+    stays broken -- the event is the outage, not each alert in it."""
+    now = _naive_utc_now()
+    last = _forward_failure_last.get(where)
+    if not SELF_MONITOR or (last and now - last < _FORWARD_FAILURE_QUIET):
+        return
+    _forward_failure_last[where] = now
+    db.insert_event(conn, {
+        "timestamp": now.isoformat(), "actor_id": forward.FORWARD_ACTOR_ID,
+        "actor_type": SELF_ACTOR_TYPE, "task": "alert_forwarding",
+        "event_type": "forward_failed", "target": where,
+        "metadata": {"destination": where, "alerts": len(alert_ids),
+                     "alert_ids": alert_ids[:20], "last_error": last_error},
+    })
+    _rescan_actor(conn, forward.FORWARD_ACTOR_ID)
+    bus.publish({"type": "change", "reason": "forwarding", "actors": [forward.FORWARD_ACTOR_ID]})
 
 
 def _bootstrap_admin(conn: sqlite3.Connection) -> None:
@@ -468,6 +539,9 @@ def _rescan_actor(conn: sqlite3.Connection, actor_id: str) -> list[dict[str, Any
     events = db.get_events_for_actor(conn, actor_id)
     alerts = detectors.run_for_actor(events, policy)
     db.replace_alerts_for_actor(conn, actor_id, alerts)
+    # Queued in the same transaction as the alerts themselves, so a crash
+    # between the two cannot lose one (v0.31).
+    _forward_enqueue(conn, alerts)
     return alerts
 
 
@@ -1249,7 +1323,16 @@ def reset(identity: dict = Depends(require_role("admin"))):
     with db.get_conn() as conn:
         db.wipe_all(conn)
         db.set_policy(conn, DEFAULT_POLICY)
-        _load_events(conn, SAMPLE_EVENTS)
+        # Sample events get new ids, so their alerts get new ids too: without
+        # this, every reset would replay the whole demo history into the SIEM.
+        _forward_hold.on = True
+        try:
+            _load_events(conn, SAMPLE_EVENTS)
+        finally:
+            _forward_hold.on = False
+        for dest in FORWARD.destinations:
+            db.forward_enqueue(conn, [r[0] for r in conn.execute("SELECT id FROM alerts")],
+                               dest.name, "baseline")
         conn.commit()
     bus.publish({"type": "change", "reason": "reset"})
     return {"status": "reset to bundled sample data"}
@@ -1890,6 +1973,46 @@ def update_user(username: str, req: UpdateUserRequest, request: Request,
         conn.commit()
     return {"username": username, "role": new_role, "disabled": new_disabled,
             "changes": changes or ["nothing to change"], "sessions_ended": ended}
+
+
+# Alert forwarding status (v0.31, admin only)
+
+@app.get("/forwarding")
+def forwarding_status(identity: dict = Depends(require_role("admin"))):
+    """Where alerts are forwarded, and how delivery is going. Destinations are
+    described without their secrets."""
+    with db.get_conn() as conn:
+        status = db.forward_status(conn)
+    return {
+        "enabled": FORWARD.enabled,
+        "min_severity": FORWARD.min_severity,
+        "destinations": [{"name": d.name, "where": d.describe(), "format": d.fmt,
+                          "signed": bool(d.secret) if d.name == "webhook" else None,
+                          **{k: v for k, v in status.get(d.name, {}).items()}}
+                         for d in FORWARD.destinations],
+    }
+
+
+@app.post("/forwarding/test")
+def forwarding_test(identity: dict = Depends(require_role("admin"))):
+    """Send a test alert to every destination now, and say what happened. The
+    test alert is not stored and not queued; severity info, category
+    forwarding_test, so a SIEM rule can ignore it."""
+    if not FORWARD.enabled:
+        raise HTTPException(409, "forwarding is not configured; set SHADOWFAX_FORWARD_WEBHOOK_URL "
+                                 "and/or SHADOWFAX_FORWARD_SYSLOG")
+    probe = {"id": "test-" + secrets.token_hex(6), "severity": "info", "category": "forwarding_test",
+             "message": f"Shadowfax forwarding test from {identity['username']}",
+             "actor_id": forward.FORWARD_ACTOR_ID, "actor_type": SELF_ACTOR_TYPE,
+             "target": "siem", "timestamp": _naive_utc_now().isoformat(), "attack": []}
+    results = []
+    for dest in FORWARD.destinations:
+        try:
+            forward.send(dest, probe, VERSION)
+            results.append({"where": dest.describe(), "ok": True})
+        except forward.ForwardError as exc:
+            results.append({"where": dest.describe(), "ok": False, "error": str(exc)})
+    return {"test_alert_id": probe["id"], "results": results}
 
 
 # API keys for programmatic ingest (admin only)
