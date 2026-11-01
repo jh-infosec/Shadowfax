@@ -49,6 +49,23 @@ jobs:
     name: Test suite and dashboard build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # v0.32: a PostgreSQL server for the second run of the suite. The official
+    # image defaults to an en_US locale, which is the case worth testing: text
+    # has to sort the way SQLite sorts it there too.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: shadowfax
+          POSTGRES_PASSWORD: shadowfax-ci
+          POSTGRES_DB: shadowfax_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shadowfax"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -66,9 +83,16 @@ jobs:
         # Exits non-zero on the first failure and names the check that broke.
         run: python test_api.py
 
+      - name: Run the test suite on PostgreSQL
+        # The same suite again, with the database swapped. A throwaway CI
+        # database, so the password here protects nothing.
+        env:
+          SHADOWFAX_DATABASE_URL: postgresql://shadowfax:shadowfax-ci@localhost:5432/shadowfax_test
+        run: python test_api.py
+
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -202,6 +226,42 @@ jobs:
           echo "the generated password -> ${code}"
           test "${code}" = "200"
           docker rm -f fresh
+
+      - name: The PostgreSQL setup works as the deployment guide says (v0.34)
+        # docker-compose.postgres.yml exactly as docs/deployment.md tells
+        # people to run it: one command, a generated database password nobody
+        # types, the admin password from the log. Then the scripted attack
+        # against it, a check that the events really are in PostgreSQL, and a
+        # restart to show the data and the password survive it.
+        env:
+          SHADOWFAX_PORT: "8100"
+        run: |
+          set -eu
+          dc() { docker compose -f docker-compose.postgres.yml "$@"; }
+          wait_healthy() {
+            for _ in $(seq 1 60); do
+              curl -fsS http://127.0.0.1:8100/healthz > /dev/null && return 0
+              sleep 2
+            done
+            echo "the PostgreSQL stack never became healthy"; dc logs; return 1
+          }
+          dc up -d --build
+          wait_healthy
+          dc logs --no-log-prefix shadowfax > pg-stack.log 2>&1
+          generated=$(awk '/^ *password: /{print $2; exit}' pg-stack.log)
+          test -n "${generated}" || { echo "no generated password in the log"; cat pg-stack.log; exit 1; }
+          python demo.py --fast --assert --no-colour --url http://127.0.0.1:8100 \
+            --username admin --password "${generated}"
+          events=$(dc exec -T db psql -U shadowfax -d shadowfax -Atc "SELECT COUNT(*) FROM events")
+          echo "events stored in PostgreSQL: ${events}"
+          test "${events}" -gt 0
+          dc restart
+          wait_healthy
+          SHADOWFAX_PASSWORD="${generated}" python cli.py --url http://127.0.0.1:8100 login -u admin
+          python cli.py --url http://127.0.0.1:8100 verify
+          dc exec -T db pg_dump -U shadowfax -d shadowfax --clean --if-exists -f /backups/ci.sql
+          test -s backups/ci.sql
+          dc down -v
 
       - name: Container log
         if: always()
