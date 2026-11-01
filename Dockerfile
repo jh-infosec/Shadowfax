@@ -37,7 +37,13 @@ FROM python:3.11-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     SHADOWFAX_DB=/data/shadowfax.db \
-    SHADOWFAX_GENERATE_ADMIN_PASSWORD=1
+    SHADOWFAX_GENERATE_ADMIN_PASSWORD=1 \
+    FORWARDED_ALLOW_IPS=""
+
+# v0.34: trust no proxy's X-Forwarded-For unless told to. uvicorn otherwise
+# believes it from 127.0.0.1, and the sign-in throttle keys on the address it
+# reports. Behind a reverse proxy, set FORWARDED_ALLOW_IPS to the proxy's
+# address (docker-compose.postgres.yml does this for its Caddy).
 
 # v0.17: this image is published, so anyone can `docker run` it. Without a
 # SHADOWFAX_ADMIN_PASSWORD, the first start generates a random admin password

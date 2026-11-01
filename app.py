@@ -20,6 +20,7 @@ alerts, but never blocks or modifies events.
 
 from __future__ import annotations
 import asyncio
+import time
 import json
 import os
 import secrets
@@ -60,7 +61,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.33.0"
+VERSION = "0.34.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -192,6 +193,34 @@ SELF_MONITOR = os.environ.get("SHADOWFAX_SELF_MONITOR", "1").strip().lower() not
 
 # Application startup
 
+DB_WAIT_SECONDS = _env_positive_int("SHADOWFAX_DB_WAIT_SECONDS", 60)
+
+
+async def _init_db_when_ready() -> None:
+    """Create or upgrade the schema, waiting for PostgreSQL if it isn't up yet
+    (v0.34). After a reboot the database can take a few seconds longer to
+    start than Shadowfax; crashing and being restarted would get there too,
+    but noisily. SQLite is a file and never needs waiting for."""
+    if not db.DATABASE_URL:
+        db.init_db()
+        return
+    import psycopg
+    deadline = time.monotonic() + DB_WAIT_SECONDS
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            db.init_db()
+            return
+        except psycopg.OperationalError as exc:
+            if time.monotonic() >= deadline:
+                raise
+            reason = (str(exc).strip().splitlines() or ["not reachable"])[0].strip()
+            print(f"  SHADOWFAX: waiting for the database (attempt {attempt}): {reason}",
+                  flush=True)
+            await asyncio.sleep(2)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _FORWARD_READY, FORWARD_WORKER
@@ -199,7 +228,7 @@ async def lifespan(app: FastAPI):
     # threadpool where the mutating endpoints run.
     bus.set_loop(asyncio.get_running_loop())
     _FORWARD_READY = False
-    db.init_db()
+    await _init_db_when_ready()
     with db.get_conn() as conn:
         _bootstrap_admin(conn)
         if db.get_policy(conn) is None:
@@ -335,8 +364,8 @@ def _bootstrap_admin(conn: sqlite3.Connection) -> None:
         )
     elif source == "generated":
         # Printed once, on the start that created the account, and never stored
-        # anywhere but as a PBKDF2 hash. Lose it and the fix is a fresh volume,
-        # or SHADOWFAX_ADMIN_PASSWORD on the first start.
+        # anywhere but as a hash. Lose it and the fix is recover.py (see the
+        # README), or SHADOWFAX_ADMIN_PASSWORD on the first start.
         print(
             "\n" + "=" * 72 + "\n"
             "  SHADOWFAX: created the first admin account with a generated password\n"
@@ -1276,8 +1305,18 @@ def triage_digest(limit: int = digest_mod.DEFAULT_LIMIT, narrative: bool = True,
     return result
 
 
+def allow_integrity_check(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any]:
+    """Any signed-in user, or any API key (v0.34). Checking the ledger and
+    copying its head somewhere else are jobs for a schedule, and a scheduled
+    job can't keep a session going now that tokens rotate. Neither endpoint
+    shows any event's content."""
+    if identity["kind"] == "service":
+        return identity
+    return require_role("viewer")(require_user(identity))
+
+
 @app.get("/ledger/verify")
-def verify_ledger(identity: dict = Depends(require_role("viewer"))):
+def verify_ledger(identity: dict = Depends(allow_integrity_check)):
     """Verify the tamper-evident event ledger (v0.9).
 
     Recomputes the hash chain over every stored event in insertion order and
@@ -1295,15 +1334,26 @@ def verify_ledger(identity: dict = Depends(require_role("viewer"))):
 
 
 @app.get("/ledger/head")
-def ledger_head(identity: dict = Depends(require_role("viewer"))):
+def ledger_head(at: int | None = Query(None, ge=0),
+                identity: dict = Depends(allow_integrity_check)):
     """The ledger's current head hash and entry count.
 
     Export this somewhere outside the database's own trust boundary -- a log
     server, a signed commit, a colleague's inbox. Anchoring the head off-box is
     what turns "we can tell it changed" into something a third party can check.
+
+    `?at=N` (v0.34) gives the head as it was when the ledger had N entries, so
+    a copy saved earlier can be checked: if the hash differs, history before
+    that point has been rewritten -- even if the rewriter recomputed the whole
+    chain so that `/ledger/verify` passes.
     """
     with db.get_conn() as conn:
-        return db.get_ledger_head(conn)
+        head = db.get_ledger_head(conn)
+        if at is None:
+            return head
+        if at > head["entry_count"]:
+            raise HTTPException(404, f"the ledger has {head['entry_count']} entries, not {at}")
+        return {"entry_count": at, "head_hash": db.ledger_hash_at(conn, at)}
 
 
 @app.get("/assistant/status")

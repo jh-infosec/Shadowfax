@@ -132,9 +132,12 @@ class Cursor:
 class Connection:
     """The subset of sqlite3.Connection that db.py and app.py use."""
 
-    def __init__(self, url: str, serial_tables: frozenset[str]):
+    def __init__(self, url: str, serial_tables: frozenset[str], password: str | None = None):
         import psycopg
-        self._pg = psycopg.connect(url, autocommit=False)
+        # A password given separately (v0.34, from a file) is never written
+        # into the URL, so it can't leak through anything that prints one.
+        extra = {"password": password} if password else {}
+        self._pg = psycopg.connect(url, autocommit=False, **extra)
         self._serial = serial_tables
         self.total_changes = 0
 

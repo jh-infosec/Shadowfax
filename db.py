@@ -36,6 +36,32 @@ DB_PATH = Path(os.environ.get("SHADOWFAX_DB") or (Path(__file__).parent / "shado
 # v0.32: PostgreSQL instead, when set (see pgcompat.py). SQLite stays the default.
 DATABASE_URL = (os.environ.get("SHADOWFAX_DATABASE_URL") or "").strip() or None
 
+
+def read_password_file(path: str | None) -> str | None:
+    """The database password from a file (v0.34), the way Docker secrets work.
+
+    A password in SHADOWFAX_DATABASE_URL sits in the environment, where
+    `docker inspect`, crash reports and `/proc/<pid>/environ` all show it. A
+    file mounted read-only into the container shows up in none of those. A
+    missing or empty file is an error at start-up rather than a confusing
+    "password authentication failed" later.
+    """
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            password = f.read().strip()
+    except OSError as exc:
+        raise RuntimeError(f"SHADOWFAX_DATABASE_PASSWORD_FILE: cannot read {path}: "
+                           f"{exc.strerror or exc}") from None
+    if not password:
+        raise RuntimeError(f"SHADOWFAX_DATABASE_PASSWORD_FILE: {path} is empty")
+    return password
+
+
+DATABASE_PASSWORD = read_password_file(
+    (os.environ.get("SHADOWFAX_DATABASE_PASSWORD_FILE") or "").strip() or None)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -293,7 +319,8 @@ def backend() -> str:
 def get_conn(path: Path | None = None) -> Iterator[sqlite3.Connection]:
     if path is None and DATABASE_URL:
         import pgcompat
-        conn = pgcompat.Connection(DATABASE_URL, pgcompat.serial_tables(SCHEMA))
+        conn = pgcompat.Connection(DATABASE_URL, pgcompat.serial_tables(SCHEMA),
+                                   password=DATABASE_PASSWORD)
         try:
             yield conn
         finally:
@@ -378,6 +405,17 @@ def ledger_entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         e["entry_hash"] = r["entry_hash"]
         out.append(e)
     return out
+
+
+def ledger_hash_at(conn: sqlite3.Connection, position: int) -> str | None:
+    """The stored entry hash at a position (1 is the first entry), i.e. what
+    the head was when the ledger had that many entries (v0.34). None past the
+    end."""
+    if position <= 0:
+        return ledger.GENESIS_HASH
+    row = conn.execute("SELECT entry_hash FROM events ORDER BY id ASC LIMIT 1 OFFSET ?",
+                       (position - 1,)).fetchone()
+    return row["entry_hash"] if row is not None else None
 
 
 def insert_event(conn: sqlite3.Connection, event: dict[str, Any]) -> int:

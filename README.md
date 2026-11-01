@@ -73,6 +73,8 @@ is not a security boundary and doesn't block anything.
 - Sends alerts to a SIEM over a signed webhook or syslog (CEF or JSON)
 - Per-credential ingest budgets and request size limits
 - One command Docker setup, plus a signed image published to ghcr.io
+- A one command PostgreSQL and HTTPS setup, with a deployment guide covering
+  backups and upgrades
 - CI that runs the tests on both databases, builds the image and replays a
   scripted attack against it
 
@@ -179,6 +181,10 @@ configure.
 
 `docker compose down` keeps your data. `docker compose down -v` deletes it.
 
+This setup is for trying Shadowfax on your own machine. To run it on a server
+for other people, with PostgreSQL and HTTPS, see
+[docs/deployment.md](docs/deployment.md).
+
 ### Without Docker
 
 The backend and dashboard run as two processes. Backend, from the repository
@@ -242,24 +248,36 @@ you're presenting.
 ## Using PostgreSQL
 
 SQLite is the default because it needs no setup, but it only allows one writer
-at a time. For anything bigger, point Shadowfax at a PostgreSQL database:
+at a time. For anything bigger, use PostgreSQL. The easiest way is the compose
+file that starts both together:
 
 ```bash
-export SHADOWFAX_DATABASE_URL=postgresql://shadowfax:secret@db-host:5432/shadowfax
+docker compose -f docker-compose.postgres.yml up -d --build
+docker compose -f docker-compose.postgres.yml logs shadowfax   # the admin password
+```
+
+There's nothing to choose first. The database password is generated on the
+first start and kept in a private Docker volume, and the admin password is
+generated and printed once. Add `--profile https` and a domain name and Caddy
+puts HTTPS in front. **[docs/deployment.md](docs/deployment.md)** walks through
+running it on a server for other people: HTTPS, locking it down, backups,
+keeping a copy of the ledger head and upgrading.
+
+To use a PostgreSQL server you already have, point Shadowfax at it:
+
+```bash
+export SHADOWFAX_DATABASE_URL=postgresql://shadowfax@db-host:5432/shadowfax
+export SHADOWFAX_DATABASE_PASSWORD_FILE=/path/to/file-containing-the-password
 uvicorn app:app --port 8000
 ```
 
-or with Docker:
-
-```bash
-docker run -d -p 8000:8000 \
-  -e SHADOWFAX_DATABASE_URL=postgresql://shadowfax:secret@db-host:5432/shadowfax \
-  ghcr.io/jh-infosec/shadowfax
-```
-
-The tables are created on first start. The database needs to exist already and
-the user needs permission to create tables in it. Everything works the same way
-on both databases, and the full API test suite runs against each of them in CI.
+The password can also go in the URL (`postgresql://shadowfax:secret@...`), but a
+file keeps it out of the environment, where `docker inspect` and crash reports
+can show it. The tables are created on first start. The database needs to exist
+already and the user needs permission to create tables in it. If the database
+isn't up yet, Shadowfax waits for it (up to a minute) instead of failing.
+Everything works the same way on both databases, and the full API test suite
+runs against each of them in CI.
 
 A few notes on how it works:
 
@@ -466,8 +484,12 @@ shouldn't depend on data the sender controls.
 This is tamper evident, not tamper proof. Someone with full write access to the
 database could rewrite the events, the chain and the head together. The fix for
 that is to copy the head somewhere they can't reach. `GET /ledger/head` returns
-the entry count and head hash for that purpose. Where you publish it is up to
-you.
+the entry count and head hash for that purpose, and an API key can read it, so
+a scheduled job on another machine can save it every hour. To check a copy
+later, `GET /ledger/head?at=63` returns the head as it was at entry 63. If it no
+longer matches what you saved, history before that point was rewritten, even
+if `verify` passes. The [deployment guide](docs/deployment.md#6-keep-a-copy-of-the-ledger-head-somewhere-else)
+has the exact commands.
 
 ## The sign-in page
 
@@ -496,9 +518,13 @@ USERNAME       SOURCE       FAILS  STATE     LAST FAILURE
 j.bartlett     127.0.0.1    5      LOCKED    2026-09-30T12:02:11
 ```
 
-`X-Forwarded-For` is ignored on purpose. The client sets it, so an attacker
-could just rotate it. If you run Shadowfax behind a proxy, make sure the real
-client address reaches it, otherwise every request shares one source.
+`X-Forwarded-For` is only believed from a proxy you name. The client sets that
+header, so if Shadowfax trusted it from anyone, an attacker could just make up a
+new address for every guess. The Docker image trusts nobody's by default. Behind
+a reverse proxy, set `FORWARDED_ALLOW_IPS` to the proxy's address so Shadowfax
+sees each visitor's real address; the PostgreSQL compose file does this for its
+Caddy. (If you run uvicorn yourself, note that it trusts `127.0.0.1` unless you
+set `FORWARDED_ALLOW_IPS` too.)
 
 This slows guessing down. It won't stop an attacker with lots of addresses, and
 it's not a replacement for good passwords and two-factor.
@@ -696,9 +722,10 @@ without it can only reach the enrolment screen until it's set up.
 - The CLI only sends a saved token to the server it was saved for, and doesn't
   follow redirects.
 
-For a shared deployment, put HTTPS in front of it, use PostgreSQL, and keep the
-database and its backups private. The two-factor secrets have to be stored in a
-readable form, so anyone who can read the database can read them.
+For a shared deployment, follow [docs/deployment.md](docs/deployment.md):
+PostgreSQL, HTTPS in front, and the database and its backups kept private. The
+two-factor secrets have to be stored in a readable form, so anyone who can read
+the database can read them.
 
 ## Configuration
 
@@ -709,10 +736,13 @@ policy and shouldn't be able to loosen the platform's own protections.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SHADOWFAX_DATABASE_URL` | unset | PostgreSQL connection URL. Unset means SQLite |
+| `SHADOWFAX_DATABASE_PASSWORD_FILE` | unset | a file holding the PostgreSQL password |
+| `SHADOWFAX_DB_WAIT_SECONDS` | 60 | how long to wait for PostgreSQL at start-up |
 | `SHADOWFAX_DB` | `shadowfax.db` beside the code | SQLite file location |
 | `SHADOWFAX_ADMIN_USERNAME` | `admin` | first admin on a fresh database |
 | `SHADOWFAX_ADMIN_PASSWORD` | unset | first admin's password |
 | `SHADOWFAX_CORS_ORIGINS` | dashboard dev server | extra origins allowed to call the API |
+| `FORWARDED_ALLOW_IPS` | none in the image | the reverse proxy allowed to report client addresses |
 | `SHADOWFAX_SESSION_HOURS` | 12 | longest a sign-in lasts |
 | `SHADOWFAX_SESSION_IDLE_MINUTES` | 30 | how long a token lasts without being swapped |
 | `SHADOWFAX_REQUIRE_ADMIN_2FA` | off | admins must set up two-factor first |
@@ -761,7 +791,7 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 874 checks against the API. To run the same checks on PostgreSQL, set
+That runs 900 checks against the API. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
 
@@ -798,7 +828,10 @@ Every push runs two jobs. **checks** runs the API suite on SQLite and again on
 PostgreSQL, then builds the dashboard. **container** builds the Docker image,
 starts it and replays the attack against it. That proves the image builds, runs
 as a non-root user, serves the dashboard, raises the detections this README
-describes, and refuses `admin/admin` when started without credentials.
+describes, and refuses `admin/admin` when started without credentials. It then
+starts the PostgreSQL compose setup exactly as the deployment guide does,
+replays the attack against that too, restarts it to check nothing is lost, and
+takes a backup.
 
 ### Releasing
 
@@ -847,12 +880,12 @@ The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
 | 0.31 | Sending alerts to a SIEM |
 | 0.32 | PostgreSQL support |
 | 0.33 | argon2id passwords, rotating session tokens |
+| 0.34 | PostgreSQL in one command, HTTPS with Caddy, the deployment guide |
 
 Still to do before 1.0:
 
 - An Electron desktop app
 - Multi-user support
-- A production deployment guide
 
 ## Philosophy
 

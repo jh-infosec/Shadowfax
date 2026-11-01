@@ -1116,6 +1116,37 @@ credential, and reports only status, service and version -- a health endpoint
 that described internals would be free reconnaissance for anyone who could
 reach the port.
 
+### PostgreSQL in one command (v0.34)
+
+`docker-compose.postgres.yml` runs three services, plus Caddy under the `https`
+profile:
+
+- `secrets` is a one-shot container (no network) that writes a random 64-hex
+  database password into the `shadowfax-secrets` volume the first time and
+  leaves it alone after that. Mode 0444, because the postgres and shadowfax
+  users are different users in different containers, and only these
+  containers mount the volume.
+- `db` is PostgreSQL 16, initialised from `POSTGRES_PASSWORD_FILE`, with no
+  published port. Shadowfax waits for its healthcheck.
+- `shadowfax` reads the same file through `SHADOWFAX_DATABASE_PASSWORD_FILE`.
+  `db.read_password_file` reads it at import, and `pgcompat.Connection` hands
+  it to psycopg as a separate argument, so it is never in an environment
+  variable, a URL or a log line. At start-up `_init_db_when_ready` retries a
+  PostgreSQL that isn't accepting connections yet for up to
+  `SHADOWFAX_DB_WAIT_SECONDS`.
+- `caddy` terminates TLS with an automatic certificate for `SHADOWFAX_DOMAIN`
+  and has a fixed address (172.30.53.10) outside the subnet's dynamic range.
+  Shadowfax's `FORWARDED_ALLOW_IPS` names exactly that address, so uvicorn
+  takes the client address from Caddy's `X-Forwarded-For` and from nobody
+  else. The image sets `FORWARDED_ALLOW_IPS=""`, trusting no proxy, because
+  uvicorn's own default trusts 127.0.0.1.
+
+`docs/deployment.md` is the operator's guide: the .env file, HTTPS, lock-down,
+`pg_dump --clean` backups written to the `./backups` bind mount (so the same
+command works in PowerShell), restore, ledger-head anchoring with an API key and
+`GET /ledger/head?at=N`, and upgrades. The CI container job runs the compose
+file the way the guide does.
+
 ## Continuous integration (v0.13)
 
 Two jobs on every push, because they answer different questions (a third,
@@ -1195,7 +1226,8 @@ totp.py                 subjects.py             profile_draft.py
 forward.py              screenshots.py          docs/screenshots/*.png
 pgcompat.py
 demo.py                 test_dashboard.py       Dockerfile
-docker-compose.yml
+docker-compose.yml      docker-compose.postgres.yml             Caddyfile
+docs/deployment.md
 .dockerignore           .github/workflows/ci.yml
 architecture.md
 README.md

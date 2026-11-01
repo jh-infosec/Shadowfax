@@ -1,0 +1,139 @@
+# Shadowfax on PostgreSQL, in one command (v0.34).
+#
+#   docker compose -f docker-compose.postgres.yml up -d --build
+#   docker compose -f docker-compose.postgres.yml logs shadowfax   # the admin password
+#
+# Then open http://localhost:8000 and sign in as admin with the password from
+# the log. Nothing needs choosing first: the database password is generated on
+# the first start and stored in a private volume, and the admin password is
+# generated and printed once.
+#
+# With HTTPS in front (a domain pointing at this machine, ports 80 and 443
+# open), add the https profile and Caddy gets a certificate on its own:
+#
+#   SHADOWFAX_DOMAIN=shadowfax.example.com \
+#     docker compose -f docker-compose.postgres.yml --profile https up -d --build
+#
+# docs/deployment.md covers backups, upgrades and the rest.
+#
+# `down` keeps everything. `down -v` deletes the database AND its password,
+# together. Never delete one of the two volumes without the other: the
+# database only accepts the password it was created with.
+
+services:
+  # Writes a random database password into a volume the first time, and leaves
+  # it alone after that. Postgres and Shadowfax read it from there, so it is
+  # never in an environment variable, this file or `docker inspect`.
+  secrets:
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        f=/run/shadowfax-secrets/db_password
+        if [ ! -s "$$f" ]; then
+          umask 077
+          head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$$f.tmp"
+          mv "$$f.tmp" "$$f"
+          echo "generated a database password"
+        fi
+        # Readable by the postgres and shadowfax users, which are different
+        # users in different containers. Only these containers mount the volume.
+        chmod 0444 "$$f"
+    volumes:
+      - shadowfax-secrets:/run/shadowfax-secrets
+    network_mode: none
+    restart: "no"
+
+  db:
+    image: postgres:16-alpine
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: shadowfax
+      POSTGRES_DB: shadowfax
+      POSTGRES_PASSWORD_FILE: /run/shadowfax-secrets/db_password
+    volumes:
+      - shadowfax-pgdata:/var/lib/postgresql/data
+      - shadowfax-secrets:/run/shadowfax-secrets:ro
+      # Backups are written here and restored from here (docs/deployment.md),
+      # so the same commands work in PowerShell, Command Prompt and bash.
+      - ./backups:/backups
+    # No `ports`: the database is reachable from the containers in this file
+    # and nothing else.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shadowfax -d shadowfax"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - shadowfax
+    restart: unless-stopped
+
+  shadowfax:
+    build: .
+    image: shadowfax:local
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SHADOWFAX_DATABASE_URL: postgresql://shadowfax@db:5432/shadowfax
+      SHADOWFAX_DATABASE_PASSWORD_FILE: /run/shadowfax-secrets/db_password
+      # No SHADOWFAX_ADMIN_PASSWORD on purpose: the first start generates one
+      # and prints it to the log once. Set it here to choose your own.
+      SHADOWFAX_CORS_ORIGINS: http://localhost:8000,http://127.0.0.1:8000${SHADOWFAX_DOMAIN:+,https://${SHADOWFAX_DOMAIN}}
+      # Only Caddy (below) may tell Shadowfax a client's real address. Anyone
+      # else sending X-Forwarded-For is ignored, so the sign-in throttle can't
+      # be dodged by making up a header.
+      FORWARDED_ALLOW_IPS: 172.30.53.10
+      # Optional. Put any of these in a .env file beside this one rather than
+      # editing this file (docs/deployment.md has an example).
+      SHADOWFAX_REQUIRE_ADMIN_2FA: ${SHADOWFAX_REQUIRE_ADMIN_2FA:-0}
+      SHADOWFAX_FORWARD_WEBHOOK_URL: ${SHADOWFAX_FORWARD_WEBHOOK_URL:-}
+      SHADOWFAX_FORWARD_WEBHOOK_SECRET: ${SHADOWFAX_FORWARD_WEBHOOK_SECRET:-}
+      SHADOWFAX_FORWARD_SYSLOG: ${SHADOWFAX_FORWARD_SYSLOG:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - shadowfax-secrets:/run/shadowfax-secrets:ro
+    ports:
+      # This machine only. With the https profile, people reach Shadowfax
+      # through Caddy on 443 instead.
+      - "127.0.0.1:${SHADOWFAX_PORT:-8000}:8000"
+    networks:
+      - shadowfax
+    restart: unless-stopped
+
+  # HTTPS, only with `--profile https`. Caddy gets and renews a certificate for
+  # SHADOWFAX_DOMAIN by itself.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    depends_on:
+      - shadowfax
+    environment:
+      SHADOWFAX_DOMAIN: ${SHADOWFAX_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - shadowfax-caddy:/data
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      shadowfax:
+        # Fixed, so FORWARDED_ALLOW_IPS above can name it. Other containers get
+        # addresses from the upper half of the subnet and can't take it.
+        ipv4_address: 172.30.53.10
+    restart: unless-stopped
+
+networks:
+  shadowfax:
+    ipam:
+      config:
+        - subnet: 172.30.53.0/24
+          ip_range: 172.30.53.128/25
+
+volumes:
+  shadowfax-pgdata:
+  shadowfax-secrets:
+  shadowfax-caddy:

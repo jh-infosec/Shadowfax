@@ -1,5 +1,64 @@
 # Changelog
 
+## Version 0.34.0
+
+PostgreSQL in one command, HTTPS, and a guide to running Shadowfax on a server
+for other people.
+
+```bash
+docker compose -f docker-compose.postgres.yml up -d --build
+docker compose -f docker-compose.postgres.yml logs shadowfax   # the admin password
+```
+
+### What's new
+
+- **`docker-compose.postgres.yml`** starts Shadowfax and PostgreSQL 16 together.
+  Nothing needs choosing first. A small one-off container generates a random
+  database password on the first start and keeps it in a private volume, and
+  the admin password is generated and printed once. The database has no
+  published port, and Shadowfax only listens on the machine itself.
+- **HTTPS with Caddy.** Add `--profile https` and set `SHADOWFAX_DOMAIN`, and
+  Caddy gets and renews a certificate by itself. The live stream passes
+  straight through, and it adds HSTS and a few other security headers.
+- **[docs/deployment.md](docs/deployment.md)**, the deployment guide: a `.env`
+  file so commands stay short, HTTPS, locking it down, backups and restores,
+  keeping a copy of the ledger head on another machine, and upgrading.
+- **`SHADOWFAX_DATABASE_PASSWORD_FILE`.** The database password can come from a
+  file, so it stays out of environment variables, `docker inspect` and logs. A
+  missing or empty file stops start-up with a clear reason.
+- **Shadowfax waits for PostgreSQL** at start-up (up to a minute,
+  `SHADOWFAX_DB_WAIT_SECONDS`) instead of crashing when the database is a few
+  seconds slower to start, which is normal after a reboot.
+- **Ledger checks for scheduled jobs.** An API key can now read
+  `GET /ledger/head` and `GET /ledger/verify`, since a scheduled job can't keep
+  a session going now that tokens rotate. It still can't read alerts.
+- **`GET /ledger/head?at=N`** returns the head as it was at entry N, so a copy
+  saved earlier can be checked. A test shows why this matters: someone who
+  rewrites an early event and recomputes the whole chain gets past
+  `/ledger/verify`, but not past a saved head.
+
+### Fixed
+
+- **Forwarded addresses.** The README said `X-Forwarded-For` was ignored, but
+  uvicorn believes it from 127.0.0.1 by default. The Docker image now trusts no
+  proxy (`FORWARDED_ALLOW_IPS=""`), and the compose file trusts only its own
+  Caddy, at a fixed address no other container can be given. Tested live with
+  Caddy: a made-up header is ignored and Shadowfax sees each visitor's real
+  address.
+
+### Tested
+
+- 900 API checks, passing on SQLite and PostgreSQL. 26 are new. Among them:
+  the compose file's security properties, the password script run twice, the
+  start-up wait, and the rewritten-history case above.
+- Live, without Docker (Docker Hub isn't reachable from where I build): the
+  password file against a PostgreSQL login that requires it (right, wrong,
+  empty and missing files), a backup and restore round trip with the guide's
+  exact `pg_dump` and `psql` options, the real Caddyfile in front of Shadowfax,
+  and the database stopping and starting under a running Shadowfax.
+- CI now starts the compose file the way the guide does, replays the attack
+  against it, restarts it and takes a backup. That needs the new ci.yml.
+
 ## Version 0.33.0
 
 Production hardening. Until now the README listed two reasons Shadowfax wasn't

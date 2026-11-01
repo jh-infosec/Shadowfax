@@ -1,0 +1,21 @@
+# HTTPS in front of Shadowfax (v0.34), used by docker-compose.postgres.yml
+# with `--profile https`. Caddy gets a certificate for SHADOWFAX_DOMAIN by
+# itself and renews it.
+
+{$SHADOWFAX_DOMAIN} {
+	encode gzip
+
+	reverse_proxy shadowfax:8000 {
+		# The live stream (Server-Sent Events) has to reach the browser as each
+		# message is sent, not when a buffer fills up.
+		flush_interval -1
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+}

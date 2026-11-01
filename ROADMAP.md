@@ -380,4 +380,7 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       retries; `forwarding_failed` when the SIEM stops receiving.
 - [x] Production hardening (`v0.33.0`): argon2id password hashing (old hashes
       upgraded at sign-in) and rotating session tokens with reuse detection.
-- [ ] Production deployment
+- [x] Production deployment (`v0.34.0`): `docker-compose.postgres.yml` starts
+      Shadowfax and PostgreSQL with a generated database password, Caddy adds
+      HTTPS, and `docs/deployment.md` covers backups, ledger anchoring and
+      upgrades. CI runs it the way the guide does.

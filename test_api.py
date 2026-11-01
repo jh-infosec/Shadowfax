@@ -3855,6 +3855,159 @@ bus._deliver({"type": "change", "reason": "unit-test"})
 check("bus delivers a published change to subscribers", q.get_nowait().get("reason") == "unit-test")
 bus.unsubscribe(q)
 
+print("\n== deployment: PostgreSQL in one command (v0.34) ==")
+import ipaddress as _ip34, re as _re34, stat as _st34, subprocess as _sp34, tempfile as _tf34
+import asyncio as _aio34
+import yaml as _yaml
+import pgcompat
+from urllib.parse import urlparse as _up34
+_root34 = _P(__file__).parent
+
+# The database password comes from a file.
+_d34 = _P(_tf34.mkdtemp())
+(_d34 / "pw").write_text("s3cret-from-a-file\n")
+(_d34 / "empty").write_text("")
+check("the password file is read and its newline dropped",
+      db_module.read_password_file(str(_d34 / "pw")) == "s3cret-from-a-file"
+      and db_module.read_password_file(None) is None)
+def _pwerr34(path):
+    try:
+        db_module.read_password_file(path)
+    except RuntimeError as exc:
+        return str(exc)
+    return ""
+check("a missing or empty file stops start-up with a reason",
+      "cannot read" in _pwerr34(str(_d34 / "nope")) and "is empty" in _pwerr34(str(_d34 / "empty")))
+import psycopg as _pg34
+_seen34 = {}
+_real_connect34 = _pg34.connect
+_pg34.connect = lambda url, **kw: _seen34.update(url=url, **kw) or (_ for _ in ()).throw(RuntimeError("stop"))
+try:
+    try:
+        pgcompat.Connection("postgresql://shadowfax@db:5432/shadowfax", frozenset(), password="s3cret")
+    except RuntimeError:
+        pass
+finally:
+    _pg34.connect = _real_connect34
+check("and handed to the driver on its own, never written into the URL",
+      _seen34.get("password") == "s3cret" and "s3cret" not in _seen34.get("url", ""))
+
+# Waiting for a database that isn't up yet, instead of crashing.
+_saved_url34, _saved_wait34 = db_module.DATABASE_URL, app_module.DB_WAIT_SECONDS
+db_module.DATABASE_URL = "postgresql://nobody@127.0.0.1:1/nothing?connect_timeout=1"
+app_module.DB_WAIT_SECONDS = 1
+_out34 = _io.StringIO()
+import contextlib as _cl34
+_raised34 = None
+with _cl34.redirect_stdout(_out34):
+    try:
+        _aio34.run(app_module._init_db_when_ready())
+    except _pg34.OperationalError as exc:
+        _raised34 = exc
+db_module.DATABASE_URL, app_module.DB_WAIT_SECONDS = _saved_url34, _saved_wait34
+check("start-up waits for PostgreSQL, saying so, and gives up after SHADOWFAX_DB_WAIT_SECONDS",
+      "waiting for the database" in _out34.getvalue() and _raised34 is not None)
+
+# A scheduled job can check the ledger with an API key.
+_k34 = client.post("/api-keys", json={"label": "ledger anchor"}).json()["api_key"]
+_kc34 = TestClient(app)
+_kc34.headers["X-API-Key"] = _k34
+_head34 = _kc34.get("/ledger/head")
+_ver34 = _kc34.get("/ledger/verify")
+check("an API key can read the ledger head and run the verification",
+      _head34.status_code == 200 and _ver34.status_code == 200 and _ver34.json()["ok"] is True)
+check("in the compact form the deployment guide's grep looks for",
+      '"ok":true' in _ver34.text)
+check("but still can't read alerts", _kc34.get("/alerts").status_code == 403)
+
+# Checking a saved copy of the head.
+_saved34 = _head34.json()
+client.post("/events", json=[{"timestamp": "2026-10-30T10:00:00", "actor_id": "anchor-test",
+                              "actor_type": "human", "event_type": "login", "target": "x"}])
+_now34 = client.get("/ledger/head").json()
+_at34 = _kc34.get("/ledger/head", params={"at": _saved34["entry_count"]}).json()
+check("?at=N gives back the head as it was at entry N",
+      _now34["entry_count"] > _saved34["entry_count"] and _at34["head_hash"] == _saved34["head_hash"])
+check("?at=0 is the start of the chain, and past the end is a 404",
+      _kc34.get("/ledger/head", params={"at": 0}).json()["head_hash"] == _ledger.GENESIS_HASH
+      and _kc34.get("/ledger/head", params={"at": _now34["entry_count"] + 5}).status_code == 404)
+# Someone with the database rewrites an early event and recomputes the whole chain.
+with db_module.get_conn() as _c:
+    _first34 = _c.execute("SELECT id, target FROM events ORDER BY id ASC LIMIT 1").fetchone()
+    _c.execute("UPDATE events SET target = ? WHERE id = ?", ("rewritten", _first34["id"]))
+    _rows34 = _c.execute("SELECT * FROM events ORDER BY id ASC").fetchall()
+    _chain34 = _ledger.compute_chain([db_module._row_to_event(r) for r in _rows34])
+    for _r, (_prev, _entry) in zip(_rows34, _chain34):
+        _c.execute("UPDATE events SET prev_hash = ?, entry_hash = ? WHERE id = ?", (_prev, _entry, _r["id"]))
+    db_module._write_ledger_head(_c, len(_chain34), _chain34[-1][1])
+    _c.commit()
+check("a rewrite with a recomputed chain passes verification on its own",
+      client.get("/ledger/verify").json()["ok"] is True)
+check("but the saved head no longer matches, which is why the guide says to keep one",
+      _kc34.get("/ledger/head", params={"at": _saved34["entry_count"]}).json()["head_hash"]
+      != _saved34["head_hash"])
+
+# The compose file, as the deployment guide runs it.
+_dc34 = _yaml.safe_load((_root34 / "docker-compose.postgres.yml").read_text(encoding="utf-8"))
+_svc34 = _dc34["services"]
+_sfx34 = _svc34["shadowfax"]["environment"]
+check("the database is not published on any port", "ports" not in _svc34["db"])
+check("Shadowfax is published on this machine only",
+      all(str(p).startswith("127.0.0.1:") for p in _svc34["shadowfax"]["ports"]))
+check("the database password is never in the environment or the URL",
+      "POSTGRES_PASSWORD" not in _svc34["db"]["environment"]
+      and _svc34["db"]["environment"]["POSTGRES_PASSWORD_FILE"] == _sfx34["SHADOWFAX_DATABASE_PASSWORD_FILE"]
+      and _up34(_sfx34["SHADOWFAX_DATABASE_URL"]).password is None
+      and not any("PASSWORD" in k and not k.endswith("_FILE") and k != "SHADOWFAX_REQUIRE_ADMIN_2FA"
+                  for k in _sfx34))
+check("Shadowfax waits for a healthy database, and the database for its password",
+      _svc34["shadowfax"]["depends_on"]["db"]["condition"] == "service_healthy"
+      and _svc34["db"]["depends_on"]["secrets"]["condition"] == "service_completed_successfully"
+      and "healthcheck" in _svc34["db"])
+_caddy_ip34 = _svc34["caddy"]["networks"]["shadowfax"]["ipv4_address"]
+_ipam34 = _dc34["networks"]["shadowfax"]["ipam"]["config"][0]
+check("only Caddy's address may set the client address, and no other container can be given it",
+      _sfx34["FORWARDED_ALLOW_IPS"] == _caddy_ip34
+      and _ip34.ip_address(_caddy_ip34) in _ip34.ip_network(_ipam34["subnet"])
+      and _ip34.ip_address(_caddy_ip34) not in _ip34.ip_network(_ipam34["ip_range"]))
+check("Caddy only runs with the https profile", _svc34["caddy"]["profiles"] == ["https"])
+_caddyfile34 = (_root34 / "Caddyfile").read_text(encoding="utf-8")
+check("the Caddyfile proxies to Shadowfax for SHADOWFAX_DOMAIN, passing the live stream straight through",
+      "{$SHADOWFAX_DOMAIN}" in _caddyfile34 and "reverse_proxy shadowfax:8000" in _caddyfile34
+      and "flush_interval -1" in _caddyfile34)
+check("backups land in ./backups, which git ignores",
+      "./backups:/backups" in _svc34["db"]["volumes"]
+      and "backups/" in (_root34 / ".gitignore").read_text(encoding="utf-8").splitlines())
+_script34 = _svc34["secrets"]["command"][0].replace("$$", "$")
+_sd34 = _P(_tf34.mkdtemp())
+_runs34 = [_sp34.run(["sh", "-c", _script34.replace("/run/shadowfax-secrets", str(_sd34))],
+                     capture_output=True, text=True) for _ in range(2)]
+_pwf34 = _sd34 / "db_password"
+_pw34 = _pwf34.read_text() if _pwf34.exists() else ""
+check("the password script makes a 64-character random password the first time",
+      all(r.returncode == 0 for r in _runs34) and _re34.fullmatch(r"[0-9a-f]{64}", _pw34) is not None
+      and "generated" in _runs34[0].stdout)
+check("keeps it on every start after that, readable but not writable",
+      _runs34[1].stdout == "" and _pwf34.read_text() == _pw34
+      and _st34.S_IMODE(_pwf34.stat().st_mode) == 0o444)
+check("the image trusts no proxy's X-Forwarded-For unless told to",
+      'FORWARDED_ALLOW_IPS=""' in (_root34 / "Dockerfile").read_text(encoding="utf-8"))
+
+# The guide, and the README's promise to read like a person wrote it.
+_guide34 = (_root34 / "docs" / "deployment.md").read_text(encoding="utf-8")
+_readme34 = (_root34 / "README.md").read_text(encoding="utf-8")
+check("the README links the deployment guide", "docs/deployment.md" in _readme34)
+check("the guide's backup command writes where the compose file mounts backups",
+      "-f /backups/shadowfax.sql" in _guide34 and "pg_dump -U shadowfax -d shadowfax --clean" in _guide34)
+check("neither the README nor the guide uses long dashes",
+      not _re34.search("[—–]| -- ", _readme34 + _guide34))
+if _ci_path.exists():
+    _steps34 = _ci["jobs"]["container"]["steps"]
+    _pgstep34 = next((st for st in _steps34 if "docker-compose.postgres.yml" in str(st.get("run", ""))), None)
+    check("CI starts the PostgreSQL setup and replays the attack against it",
+          _pgstep34 is not None and "demo.py --fast --assert" in _pgstep34["run"]
+          and "--no-log-prefix" in _pgstep34["run"])
+
 print("\n== reset ==")
 r = client.post("/reset")
 check("POST /reset returns 200", r.status_code == 200)
