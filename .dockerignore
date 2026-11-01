@@ -25,7 +25,11 @@ __pycache__
 # Documentation is useful in the repository, not in a runtime image.
 *.md
 !README.md
+docs
 
 Dockerfile
 docker-compose.yml
+docker-compose.postgres.yml
+Caddyfile
+backups
 .dockerignore
