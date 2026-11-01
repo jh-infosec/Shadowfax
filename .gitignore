@@ -4,6 +4,10 @@
 shadowfax.db
 test_shadowfax.db
 
+# Database backups (v0.34). They hold everything the database does, including
+# password hashes and two-factor secrets, so they never belong in a repository.
+backups/
+
 # Python
 __pycache__/
 *.py[cod]
