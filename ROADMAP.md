@@ -378,4 +378,6 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 - [x] SIEM integrations (`v0.31.0`): each new alert forwarded once to a
       signed webhook and/or syslog (CEF or JSON), through a durable outbox with
       retries; `forwarding_failed` when the SIEM stops receiving.
+- [x] Production hardening (`v0.33.0`): argon2id password hashing (old hashes
+      upgraded at sign-in) and rotating session tokens with reuse detection.
 - [ ] Production deployment

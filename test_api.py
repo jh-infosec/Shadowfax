@@ -1746,7 +1746,7 @@ check("CLI `lockouts` exits 0 once nothing is locked", code == 0)
 
 # -- the timing side channel ------------------------------------------------
 # Returning early for an unknown user would make the response time a reliable
-# oracle for which accounts exist. dummy_verify burns the same PBKDF2 work.
+# oracle for which accounts exist. dummy_verify does the same argon2 work.
 import auth as auth_mod
 import time as _time
 
@@ -1770,6 +1770,237 @@ app_module.SELF_MONITOR = False
 with db_module.get_conn() as _c:
     _c.execute("DELETE FROM login_attempts")
     _c.commit()
+
+print("\n== password hashing: argon2id (v0.33) ==")
+import threading as _th33
+client.post("/users", json={"username": "hash-user", "password": TEST_PW, "role": "analyst"})
+def _hrow33(name="hash-user"):
+    with db_module.get_conn() as _c:
+        return db_module.get_user_by_username(_c, name)
+_r33 = _hrow33()
+check("new passwords are stored as argon2id, with the OWASP settings",
+      _r33["password_hash"].startswith("$argon2id$v=19$m=19456,t=2,p=1$")
+      and _r33["salt"] == auth_mod.ARGON2_SALT_MARKER)
+check("the same password hashes differently each time (a fresh salt)",
+      auth_mod.hash_password(TEST_PW)[0] != auth_mod.hash_password(TEST_PW)[0])
+check("a damaged hash is a refusal, not a crash",
+      auth_mod.verify_password(TEST_PW, "argon2id", "$argon2id$v=19$garbage") is False
+      and auth_mod.verify_password(TEST_PW, "not-hex", "abcd") is False)
+_weak33 = __import__("argon2").PasswordHasher(time_cost=1, memory_cost=8192, parallelism=1).hash(TEST_PW)
+check("argon2 made with weaker settings is due an upgrade; today's is not",
+      auth_mod.needs_rehash(_weak33) and not auth_mod.needs_rehash(_r33["password_hash"]))
+
+# A pre-v0.33 account: put a PBKDF2 hash back, as an old database would have it.
+_salt33 = "a1" * 16
+with db_module.get_conn() as _c:
+    db_module.upgrade_password_hash(_c, _r33["id"], auth_mod._pbkdf2_hex(TEST_PW, _salt33), _salt33)
+    _c.commit()
+check("an old PBKDF2 hash is recognised as one", auth_mod.is_legacy_hash(_hrow33()["password_hash"]))
+_lc33 = TestClient(app)
+check("a wrong password against an old hash is refused",
+      _lc33.post("/auth/login", json={"username": "hash-user", "password": "wrong-password-33"}).status_code == 401)
+check("and does not touch the stored hash", auth_mod.is_legacy_hash(_hrow33()["password_hash"]))
+check("the right password still signs in with the old hash",
+      _lc33.post("/auth/login", json={"username": "hash-user", "password": TEST_PW}).status_code == 200)
+_after33 = _hrow33()
+check("and that sign-in quietly moved it to argon2id",
+      _after33["password_hash"].startswith("$argon2id$") and _after33["salt"] == "argon2id")
+check("without counting as a password change (nothing to force or report)",
+      _after33["password_changed_at"] == _r33["password_changed_at"]
+      and not _after33["must_change_password"])
+check("and the password still works afterwards",
+      _lc33.post("/auth/login", json={"username": "hash-user", "password": TEST_PW}).status_code == 200)
+with db_module.get_conn() as _c:
+    _c.execute("DELETE FROM login_attempts"); _c.commit()
+
+# Each hash holds 19 MiB while it runs; only a few may run at once.
+_real_hasher33 = auth_mod._HASHER
+class _SlowHasher33:
+    def __init__(self):
+        self.now = 0; self.peak = 0; self.lock = _th33.Lock()
+    def hash(self, pw):
+        with self.lock:
+            self.now += 1; self.peak = max(self.peak, self.now)
+        _time.sleep(0.05)
+        with self.lock:
+            self.now -= 1
+        return "$argon2id$fake"
+_slow33 = _SlowHasher33()
+auth_mod._HASHER = _slow33
+try:
+    _ts33 = [_th33.Thread(target=auth_mod.hash_password, args=("x" * 12,)) for _ in range(16)]
+    [t.start() for t in _ts33]; [t.join() for t in _ts33]
+finally:
+    auth_mod._HASHER = _real_hasher33
+check(f"sixteen hashes at once run at most {auth_mod.MAX_CONCURRENT_HASHES} at a time",
+      1 < _slow33.peak <= auth_mod.MAX_CONCURRENT_HASHES)
+
+print("\n== session token rotation (v0.33) ==")
+from datetime import datetime as _dt33, timedelta as _td33, timezone as _tz33
+import tempfile as _tf33, argparse as _ap33
+import concurrent.futures as _cf
+client.post("/users", json={"username": "rot-user", "password": TEST_PW, "role": "analyst"})
+def _rlogin33():
+    return TestClient(app).post("/auth/login", json={"username": "rot-user", "password": TEST_PW}).json()
+def _me33(token):
+    return TestClient(app).get("/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code
+def _refresh33(token):
+    return TestClient(app).post("/auth/refresh", headers={"Authorization": f"Bearer {token}"})
+def _fp33(token):
+    return auth_mod.token_fingerprint(token)
+def _set33(token, **cols):
+    with db_module.get_conn() as _c:
+        for k, v in cols.items():
+            _c.execute(f"UPDATE sessions SET {k} = ? WHERE token_fp = ?", (v, _fp33(token)))
+        _c.commit()
+def _ago33(seconds):
+    return (_dt33.now(_tz33.utc) - _td33(seconds=seconds)).isoformat()
+def _reuse_alerts33():
+    return client.get("/alerts", params={"category": ["session_token_reuse"]}).json()
+
+_l33 = _rlogin33()
+_t0 = _l33["token"]
+_life33 = (_dt33.fromisoformat(_l33["token_expires_at"]) - _dt33.now(_tz33.utc)).total_seconds()
+check("sign-in says when this token dies (30 minutes) and when to swap it (after 10)",
+      1700 < _life33 <= 1800 and _l33["refresh_after_seconds"] == 600)
+check("while the session itself still lasts 12 hours",
+      11.9 * 3600 < (_dt33.fromisoformat(_l33["expires_at"]) - _dt33.now(_tz33.utc)).total_seconds() <= 12 * 3600)
+
+_r33 = _refresh33(_t0)
+_t1 = _r33.json().get("token")
+check("POST /auth/refresh swaps the token for a new one", _r33.status_code == 200 and _t1 and _t1 != _t0)
+check("the new token works", _me33(_t1) == 200)
+check("the session's end does not move: refreshing cannot make a sign-in last forever",
+      _r33.json()["expires_at"] == _l33["expires_at"])
+check("the old token still works for a few seconds, for requests already on their way",
+      _me33(_t0) == 200)
+_r33b = _refresh33(_t0)
+check("refreshing the old token again straight away is a 409 (a double-click), not an attack",
+      _r33b.status_code == 409 and _me33(_t1) == 200)
+
+_set33(_t0, superseded_at=_ago33(db_module.SESSION_GRACE_SECONDS + 5))
+check("once the grace period is over the old token is refused", _me33(_t0) == 401)
+check("and the session carries on with the new one", _me33(_t1) == 200)
+
+app_module.SELF_MONITOR = True
+_n_reuse33 = len(_reuse_alerts33())
+_r33c = _refresh33(_t0)
+check("refreshing a token that was replaced a while ago is refused",
+      _r33c.status_code == 401 and "already been replaced" in _r33c.json()["detail"])
+check("and ends the whole session: the newest token stops working too", _me33(_t1) == 401)
+_ra33 = _reuse_alerts33()
+check("raising session_token_reuse (high, T1550) naming the account",
+      len(_ra33) == _n_reuse33 + 1 and _ra33[0]["severity"] == "high"
+      and "rot-user" in _ra33[0]["message"]
+      and any(t["id"] == "T1550" for t in _ra33[0]["attack"]))
+
+# A token nobody refreshed in time: the session is simply over, which is not an attack.
+_t2 = _rlogin33()["token"]
+_set33(_t2, token_expires_at=_ago33(1))
+check("a token not refreshed within its life is refused", _me33(_t2) == 401)
+check("and can't be refreshed either", _refresh33(_t2).status_code == 401)
+check("which is an expired session, not reuse: no alert", len(_reuse_alerts33()) == _n_reuse33 + 1)
+app_module.SELF_MONITOR = False
+
+# The session's end caps every token.
+_t3 = _rlogin33()["token"]
+_soon33 = (_dt33.now(_tz33.utc) + _td33(minutes=5)).isoformat()
+_set33(_t3, expires_at=_soon33)
+_r33d = _refresh33(_t3).json()
+check("a token never outlives the session it belongs to",
+      _r33d["token_expires_at"] <= _soon33 and _r33d["refresh_after_seconds"] <= 100)
+_t3b = _r33d["token"]
+_set33(_t3b, expires_at=_ago33(1))
+check("and when the session's time is up, its tokens stop", _me33(_t3b) == 401)
+
+# Signing out ends the session, not just the token presented.
+_t4 = _rlogin33()["token"]
+_t4b = _refresh33(_t4).json()["token"]
+TestClient(app).post("/auth/logout", headers={"Authorization": f"Bearer {_t4b}"})
+check("signing out ends every token of the session, even one still in its grace period",
+      _me33(_t4b) == 401 and _me33(_t4) == 401)
+
+# Changing your password keeps your own session (through its refreshes) and ends the rest.
+_ta = _rlogin33()["token"]
+_tb = _rlogin33()["token"]
+_ta2 = _refresh33(_ta).json()["token"]
+_cp33 = TestClient(app).post("/auth/password", headers={"Authorization": f"Bearer {_ta2}"},
+                             json={"current_password": TEST_PW, "new_password": TEST_PW + "-v2"})
+check("a password change ends the user's other sessions and counts them once each",
+      _cp33.status_code == 200 and _cp33.json()["other_sessions_ended"] == 1
+      and _me33(_tb) == 401 and _me33(_ta2) == 200)
+with db_module.get_conn() as _c:
+    _u33 = db_module.get_user_by_username(_c, "rot-user")
+    _h, _s = auth_mod.hash_password(TEST_PW)
+    db_module.set_password(_c, _u33["id"], _h, _s, must_change=False)
+    _c.commit()
+
+# The live stream follows the session through refreshes.
+_t5 = _rlogin33()["token"]
+_t5b = _refresh33(_t5).json()["token"]
+_set33(_t5, superseded_at=_ago33(db_module.SESSION_GRACE_SECONDS + 5))
+check("a stream opened before a refresh stays open after it",
+      app_module._session_alive(_fp33(_t5)))
+_res33 = []
+def _try_stream33():
+    with TestClient(app).stream("GET", "/stream", headers={"Authorization": f"Bearer {_t5}"}) as _r:
+        _res33.append(_r.status_code)
+_ts33 = _th33.Thread(target=_try_stream33, daemon=True); _ts33.start(); _ts33.join(5)
+check("but a replaced token can't open a new one",
+      not app_module._token_usable(_fp33(_t5)) and _res33 == [401])
+TestClient(app).post("/auth/logout", headers={"Authorization": f"Bearer {_t5b}"})
+check("and signing out closes it", not app_module._session_alive(_fp33(_t5)))
+
+# Two refreshes of one token at the same moment: one wins.
+_t6 = _rlogin33()["token"]
+with _cf.ThreadPoolExecutor(max_workers=8) as _pool:
+    _codes33 = list(_pool.map(lambda _: _refresh33(_t6).status_code, range(8)))
+check("eight simultaneous refreshes of one token: exactly one new token, the rest 409",
+      _codes33.count(200) == 1 and _codes33.count(409) == 7)
+with db_module.get_conn() as _c:
+    _fam33 = _c.execute("SELECT family FROM sessions WHERE token_fp = ?", (_fp33(_t6),)).fetchone()["family"]
+    _live33 = _c.execute("SELECT COUNT(*) FROM sessions WHERE family = ? AND superseded_at IS NULL",
+                         (_fam33,)).fetchone()[0]
+check("so the session has one current token, not a fork", _live33 == 1)
+
+# A disabled account can't keep its session alive by refreshing.
+_t7 = _rlogin33()["token"]
+client.patch("/users/rot-user", json={"disabled": True})
+check("a disabled account's token can't be refreshed", _refresh33(_t7).status_code == 401)
+client.patch("/users/rot-user", json={"disabled": False})
+
+# Sessions from before v0.33 can't rotate, so the upgrade ends them.
+with db_module.get_conn() as _c:
+    _c.execute("INSERT INTO sessions (token_fp, user_id, expires_at) VALUES (?, ?, ?)",
+               ("old-style-session", _u33["id"], (_dt33.now(_tz33.utc) + _td33(hours=5)).isoformat()))
+    _c.commit()
+    db_module._migrate_sessions(_c)
+    _c.commit()
+    _left33 = _c.execute("SELECT COUNT(*) FROM sessions WHERE token_fp = 'old-style-session'").fetchone()[0]
+check("upgrading ends sessions from before rotation existed", _left33 == 0)
+
+# The command line swaps its saved token when it's due.
+_saved_cfg33 = _cli.CONFIG_PATH
+_cli.CONFIG_PATH = _P(_tf33.mkdtemp()) / "config.json"
+for _var in ("SHADOWFAX_TOKEN", "SHADOWFAX_URL", "SHADOWFAX_API_KEY"):
+    os.environ.pop(_var, None)
+_t8 = _rlogin33()["token"]
+_cli.save_config({"url": "http://127.0.0.1:8000", "token": _t8, "refresh_at": 0})
+_set8 = _cli.resolve_settings(_ap33.Namespace(url=None, token=None, api_key=None))
+_cc33 = _cli.Client(_anon_tp, _set8["token"], None)
+_cli.maybe_refresh(_cc33, _set8, "alerts")
+_new8 = _cli.load_config()["token"]
+check("the CLI swaps a saved token once it is due, and saves the new one",
+      _new8 != _t8 and _cc33.token == _new8 and _me33(_new8) == 200
+      and _cli.load_config()["refresh_at"] > _time.time() + 500)
+_cli.maybe_refresh(_cc33, _cli.resolve_settings(_ap33.Namespace(url=None, token=None, api_key=None)), "alerts")
+check("and leaves it alone until the next one is due", _cli.load_config()["token"] == _new8)
+_given33 = _cli.resolve_settings(_ap33.Namespace(url=None, token="given-on-the-command-line", api_key=None))
+check("a token given by flag or environment is never swapped behind its owner's back",
+      _given33["token_saved"] is False)
+_cli.CONFIG_PATH = _saved_cfg33
+with db_module.get_conn() as _c:
+    _c.execute("DELETE FROM login_attempts"); _c.commit()
 
 print("\n== forwarding alerts to a SIEM (v0.31) ==")
 import forward as _fw

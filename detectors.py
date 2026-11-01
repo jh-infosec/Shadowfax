@@ -49,6 +49,8 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "mfa_removed",
     # v0.31: alerts that could not be delivered to the SIEM.
     "forwarding_failed",
+    # v0.33: a session token that had been replaced, presented again.
+    "session_token_reuse",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
@@ -387,6 +389,19 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                     f"two-factor was removed from '{meta.get('attempted_username', '?')}' "
                     + (f"by admin '{meta.get('changed_by', '?')}'" if by_admin
                        else "by its owner")))
+            continue
+
+        # A replaced session token presented again (v0.33). Each refresh swaps
+        # the token, so the old one only comes back if someone else kept a
+        # copy -- from a log, a shared screen, malware, a backup. The session
+        # has already been ended; this tells an analyst it happened and to whom.
+        if e["event_type"] == "session_token_reuse":
+            if e["actor_id"] == AUTH_ACTOR_ID:
+                alerts.append(_mk_alert(e, "high", "session_token_reuse",
+                    f"a session token for '{meta.get('attempted_username', '?')}' was used "
+                    f"to refresh {meta.get('replaced_seconds_ago', '?')}s after it had been "
+                    f"replaced, from {meta.get('source', '?')}; someone else may have had a "
+                    f"copy, so the session was ended"))
             continue
 
         # The SIEM stopped receiving (v0.31). An attacker who can cut the path

@@ -159,8 +159,9 @@ FastAPI dependency on every route, so authorisation lives next to the endpoint
 rather than in the client. Anything that records who acted, such as an alert's
 `acknowledged_by`, is taken from the authenticated session and never from the
 request body: the client cannot claim to be someone else. Passwords are hashed
-(PBKDF2 + per-user salt) and only credential fingerprints are stored, so the
-database never holds a usable secret.
+with argon2id (v0.33; PBKDF2 before that) and only credential fingerprints are
+stored, so the database never holds a usable secret. Session tokens rotate
+(v0.33): each lives 30 minutes and is swapped for a new one before then.
 
 ## Components
 
@@ -179,11 +180,19 @@ same for every known actor.
 
 #### auth.py
 
-Pure, dependency-free authentication primitives: PBKDF2 password hashing and
-verification, opaque session-token and API-key generation, credential
-fingerprinting, and role comparison (`role_at_least`). No database access and
-no FastAPI here, so the crypto is unit-reachable on its own. The storage lives
-in `db.py` and the request wiring in `app.py`.
+Authentication primitives: password hashing and verification, opaque
+session-token and API-key generation, credential fingerprinting, and role
+comparison (`role_at_least`). No database access and no FastAPI here, so the
+crypto is unit-reachable on its own. The storage lives in `db.py` and the
+request wiring in `app.py`.
+
+Passwords (v0.33) are argon2id via `argon2-cffi`, with OWASP's settings
+(m=19 MiB, t=2, p=1). `verify_password` still accepts a pre-v0.33 PBKDF2 hash,
+`needs_rehash` says when a stored hash is weaker than today's, and the login
+path replaces it then, while it holds the plain password. `dummy_verify`
+verifies against a throwaway argon2 hash with the same settings, so a missing
+user costs the same as a real one. A semaphore lets at most four hashes run at
+once, because each holds 19 MiB.
 
 #### attack.py + attack_registry.json
 
@@ -647,9 +656,13 @@ Tables:
   keyed on the alert id. Deliberately not foreign-keyed to `alerts`, so it
   survives the delete-and-reinsert of a rescan.
 - `policy`, a single-row table holding the current policy as JSON
-- `users`, accounts with a role and a PBKDF2 password hash + salt
-- `sessions`, live bearer tokens (stored as a SHA-256 fingerprint) with an
-  expiry, referencing a user
+- `users`, accounts with a role and an argon2id password hash (older rows may
+  hold a PBKDF2 hash and salt until their owner next signs in)
+- `sessions`, bearer tokens (stored as a SHA-256 fingerprint), referencing a
+  user. A session is a `family` of tokens (v0.33): `expires_at` is when the
+  whole session ends, `token_expires_at` when this token dies unless refreshed,
+  and `superseded_at` when a refresh replaced it. Replaced rows are kept until
+  the session ends so that presenting one again can be recognised as reuse.
 - `api_keys`, ingest keys (also stored as a fingerprint) with a display prefix
 
 Also provides alert querying (left-joining `alert_state`), severity counts and
@@ -919,7 +932,7 @@ the severity colours that `constants.js` refers to by variable name.
    **before** the username is looked up, and the strictest decision wins
 3. A refusal returns `429` with `Retry-After` and costs no credential work
 4. Otherwise the password is verified; with no such user, `auth.dummy_verify`
-   spends the same PBKDF2 work so the response time reveals nothing
+   does the same argon2 work so the response time reveals nothing
 5. A failure is recorded, ingested as an event under `shadowfax-auth`, and the
    actor is rescanned -- so `brute_force_auth` fires through the ordinary
    detector path
@@ -965,13 +978,35 @@ longer fire under the new policy disappear.
 
 ### On sign-in
 
-1. `POST /auth/login` verifies the password against the stored PBKDF2 hash
-2. A random bearer token is issued; only its SHA-256 fingerprint is stored,
-   with a 12-hour expiry
+1. `POST /auth/login` verifies the password against the stored hash (and
+   upgrades a PBKDF2 hash to argon2id while it has the password)
+2. A random bearer token is issued; only its SHA-256 fingerprint is stored.
+   The session lasts up to 12 hours (`SHADOWFAX_SESSION_HOURS`); the token
+   itself 30 minutes (`SHADOWFAX_SESSION_IDLE_MINUTES`)
 3. The dashboard keeps the token in `localStorage` and sends it as
    `Authorization: Bearer <token>` on every request
 4. Each protected route resolves the token to a user and checks the role; an
    expired or revoked token yields 401, which returns the dashboard to login
+
+### On a token refresh (v0.33)
+
+1. A third of the way through a token's life the dashboard (or the CLI, before
+   its next command) calls `POST /auth/refresh` with it
+2. Under the write lock, the token's row is classified by `db.token_state`:
+   live, grace (replaced in the last 30 seconds), replaced, idle or ended
+3. Live: a new token joins the same family with a fresh 30 minutes, capped at
+   the session's end, and the old one is marked superseded. It still works for
+   30 seconds, for requests already in flight
+4. Grace: `409`, nothing changes (a retry or a double-click)
+5. Replaced: someone presented a token that was already swapped, so someone
+   else may hold a copy. The whole family is deleted and a
+   `session_token_reuse` event is written under `shadowfax-auth`, which raises a
+   high alert (T1550)
+6. Several dashboard tabs share one token. They take turns with a Web Lock and
+   adopt a token another tab already stored, so they never swap the same one
+   twice
+7. The live stream checks the family, not the token it was opened with, so it
+   survives refreshes and still ends at sign-out
 
 ### On a change (push)
 
@@ -1010,14 +1045,15 @@ change their results. When trace volume makes this hurt, the fix is incremental
 detector state that survives between runs, not a shorter replay. Recorded here
 so it stays a deliberate trade-off.
 
-### Local-development security posture
+### Security posture
 
-Authentication, roles, API keys and CORS restriction now exist (see the
-Authentication principle above), so the endpoints are no longer open. What
-keeps Shadowfax a local-development tool is narrower: passwords use stdlib
-PBKDF2 rather than bcrypt/argon2, tokens are bearer tokens without rotation,
-and the default store is SQLite (PostgreSQL is supported from v0.32). Harden
-these before running it anywhere shared.
+Authentication, roles, API keys, two-factor sign-in and CORS restriction exist
+(see the Authentication principle above). v0.33 closed the two gaps this
+section used to list: passwords are argon2id rather than PBKDF2, and session
+tokens rotate with reuse detection. What remains for a shared deployment is
+operational: terminate TLS in front of it, use PostgreSQL rather than the
+default SQLite for more than one writer, and keep the database and its backups
+private, since the TOTP secrets in it have to be readable.
 
 ### Request limits and ingest budgets
 

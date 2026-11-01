@@ -53,6 +53,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -105,11 +106,37 @@ def resolve_settings(args: argparse.Namespace) -> dict[str, Any]:
     # onwards. A saved credential now goes only to the URL it was saved with;
     # one given explicitly, by flag or environment, goes where it is told.
     same_server = (cfg.get("url") or "").rstrip("/") == url
-    token = (getattr(args, "token", None) or os.environ.get("SHADOWFAX_TOKEN")
-             or (cfg.get("token") if same_server else None))
+    explicit_token = getattr(args, "token", None) or os.environ.get("SHADOWFAX_TOKEN")
+    token = explicit_token or (cfg.get("token") if same_server else None)
     api_key = (getattr(args, "api_key", None) or os.environ.get("SHADOWFAX_API_KEY")
                or (cfg.get("api_key") if same_server else None))
-    return {"url": url, "token": token, "api_key": api_key}
+    return {"url": url, "token": token, "api_key": api_key,
+            # Only a token this CLI saved is one it may swap and save again.
+            "token_saved": bool(token) and not explicit_token}
+
+
+def maybe_refresh(client: "Client", settings: dict[str, Any], command: str) -> None:
+    """Swap the saved session token for a new one when it is due (v0.33).
+
+    Session tokens now live about half an hour and have to be swapped before
+    then. The dashboard does it on a timer; the CLI does it here, before a
+    command, when the time it was told at sign-in has passed. A token that has
+    already run out can't be swapped -- that means signing in again, and the
+    command itself will say so.
+    """
+    if command == "login" or not settings.get("token_saved"):
+        return
+    cfg = load_config()
+    due = cfg.get("refresh_at")
+    if not isinstance(due, (int, float)) or time.time() < due:
+        return
+    status, payload = client.transport.request("POST", "/auth/refresh", None, None,
+                                               {"Authorization": f"Bearer {client.token}"})
+    if status == 200 and isinstance(payload, dict) and payload.get("token"):
+        cfg["token"] = payload["token"]
+        cfg["refresh_at"] = time.time() + int(payload.get("refresh_after_seconds") or 600)
+        save_config(cfg)
+        client.token = payload["token"]
 
 
 # --- transport -------------------------------------------------------------
@@ -351,6 +378,7 @@ def cmd_login(client: Client, args, out) -> int:
     cfg = load_config()
     cfg["url"] = args.resolved_url
     cfg["token"] = payload["token"]
+    cfg["refresh_at"] = time.time() + int(payload.get("refresh_after_seconds") or 600)
     save_config(cfg)
     emit(out, {"user": payload.get("user"), "expires_at": payload.get("expires_at"),
                "config": str(CONFIG_PATH)}, args.json,
@@ -940,6 +968,7 @@ def run(argv: list[str] | None = None, transport=None, out=None, err=None) -> in
     client = Client(transport, settings["token"], settings["api_key"])
 
     try:
+        maybe_refresh(client, settings, args.command)
         return COMMANDS[args.command](client, args, out)
     except ApiError as exc:
         print(f"error: {exc}", file=err)

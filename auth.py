@@ -8,10 +8,10 @@ importable module is what lets the tests reach it directly.
 
 Design notes:
 
-- Passwords are hashed with PBKDF2-HMAC-SHA256 and a per-user salt, using only
-  the standard library. This is a deliberate choice for a local-development
-  tool: no native build step, nothing to install. bcrypt or argon2 would be the
-  upgrade for a real deployment.
+- Passwords are hashed with argon2id (v0.33), using the OWASP-recommended
+  settings: 19 MiB of memory, two passes, one lane. Before v0.33 they were
+  PBKDF2-HMAC-SHA256 with 200,000 rounds; those hashes still verify, and are
+  replaced with argon2id the next time their owner signs in.
 - Session tokens and API keys are random, and only their SHA-256 hash is stored,
   so a leaked database does not hand over usable credentials.
 """
@@ -20,28 +20,79 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import threading
+
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
 # Roles, ordered. A higher rank includes everything a lower rank may do.
 ROLE_RANK: dict[str, int] = {"viewer": 1, "analyst": 2, "admin": 3}
 ROLES = tuple(ROLE_RANK)
 
-PBKDF2_ITERATIONS = 200_000
+PBKDF2_ITERATIONS = 200_000   # the pre-v0.33 scheme; only ever verified now
 API_KEY_PREFIX = "sk_shadowfax_"
+
+# argon2id with OWASP's recommended minimum: m=19 MiB, t=2, p=1. Memory-hard,
+# so guessing on a GPU costs far more than with PBKDF2.
+ARGON2_TIME_COST = 2
+ARGON2_MEMORY_KIB = 19 * 1024
+ARGON2_PARALLELISM = 1
+_HASHER = PasswordHasher(time_cost=ARGON2_TIME_COST, memory_cost=ARGON2_MEMORY_KIB,
+                         parallelism=ARGON2_PARALLELISM)
+# The salt column is kept (and NOT NULL) for old databases; an argon2 hash
+# carries its own salt inside the string, so this marker is all it holds.
+ARGON2_SALT_MARKER = "argon2id"
+
+# Each hash holds 19 MiB while it runs. Forty sign-in requests at once would be
+# most of a gigabyte, so only a few run at a time and the rest wait their turn.
+# This bounds memory; the sign-in throttle bounds how often anyone gets a turn.
+MAX_CONCURRENT_HASHES = 4
+_HASH_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_HASHES)
 
 
 # Passwords
 
-def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
-    """Return (hash_hex, salt_hex). Generates a salt if none is given."""
-    if salt is None:
-        salt = secrets.token_hex(16)
+def _pbkdf2_hex(password: str, salt: str) -> str:
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), PBKDF2_ITERATIONS)
-    return dk.hex(), salt
+    return dk.hex()
+
+
+def is_legacy_hash(stored_hash: str) -> bool:
+    """True for a pre-v0.33 PBKDF2 hash."""
+    return not stored_hash.startswith("$argon2")
+
+
+def hash_password(password: str) -> tuple[str, str]:
+    """Return (hash, salt column value) for a new password."""
+    with _HASH_SLOTS:
+        return _HASHER.hash(password), ARGON2_SALT_MARKER
 
 
 def verify_password(password: str, salt: str, expected_hash: str) -> bool:
-    candidate, _ = hash_password(password, salt)
-    return hmac.compare_digest(candidate, expected_hash)
+    """Check a password against what is stored, in either scheme."""
+    if is_legacy_hash(expected_hash):
+        try:
+            with _HASH_SLOTS:
+                candidate = _pbkdf2_hex(password, salt)
+        except ValueError:          # a salt that is not hex: nothing can match
+            return False
+        return hmac.compare_digest(candidate, expected_hash)
+    try:
+        with _HASH_SLOTS:
+            return _HASHER.verify(expected_hash, password)
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
+        return False
+
+
+def needs_rehash(stored_hash: str) -> bool:
+    """Should this hash be replaced the next time we know the password? Yes for
+    PBKDF2, and for argon2 made with weaker settings than today's."""
+    if is_legacy_hash(stored_hash):
+        return True
+    try:
+        return _HASHER.check_needs_rehash(stored_hash)
+    except InvalidHashError:
+        return True
 
 
 # Password policy (v0.19). Length is what makes a password hard to guess; the
@@ -78,23 +129,23 @@ def generate_password() -> str:
     return secrets.token_urlsafe(18)
 
 
-# A fixed salt used only to burn the same work when no such user exists. It is
-# not a secret and protects nothing by itself -- see dummy_verify().
-_DUMMY_SALT = "00112233445566778899aabbccddeeff"
+# A real argon2 hash of a password nobody knows, made once at start-up with the
+# current settings. It protects nothing; it exists so dummy_verify does the
+# same work a real check does.
+_DUMMY_HASH = _HASHER.hash(secrets.token_urlsafe(24))
 
 
 def dummy_verify(password: str) -> bool:
     """Spend the same time a real verification would, and return False.
 
     Without this, `POST /auth/login` is a user-enumeration oracle: a known
-    username costs a 200,000-round PBKDF2 derivation while an unknown one
-    returns immediately, and the difference is trivially measurable over the
-    network. Running the same derivation against a throwaway salt makes the two
-    paths cost the same, so the response time stops leaking which accounts
-    exist. Always returns False; the return value exists only so callers cannot
-    accidentally optimise the call away.
+    username costs an argon2 verification while an unknown one would return
+    immediately, and the difference is easy to measure over the network.
+    Verifying against a throwaway hash with the same settings makes the two
+    paths cost the same. Always returns False; the return value exists only so
+    callers cannot accidentally optimise the call away.
     """
-    hash_password(password, _DUMMY_SALT)
+    verify_password(password, ARGON2_SALT_MARKER, _DUMMY_HASH)
     return False
 
 

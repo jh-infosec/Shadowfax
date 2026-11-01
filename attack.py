@@ -51,6 +51,8 @@ CATEGORY_TO_TECHNIQUES: dict[str, list[str]] = {
     "admin_account_created": ["T1136"],
     "admin_role_granted": ["T1098"],
     "mfa_removed": ["T1556"],
+    # v0.33: a replaced session token presented again -- someone holds a copy.
+    "session_token_reuse": ["T1550"],
     # destructive_action: technique comes from the matched policy rule, not here.
     # allowlist_violation, blocked_target_access, rate_anomaly: no mapping.
     # permission_violation, undeclared_agent (v0.16): no mapping either. They

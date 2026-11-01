@@ -38,11 +38,114 @@ export function setToken(token) {
   authToken = token || null;
   try {
     if (authToken) localStorage.setItem(TOKEN_KEY, authToken);
-    else localStorage.removeItem(TOKEN_KEY);
+    else {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(REFRESH_AT_KEY);
+    }
   } catch {
     /* storage may be unavailable; the in-memory token still works */
   }
+  if (!authToken) clearTimeout(refreshTimer);
 }
+
+// Token rotation (v0.33). Each token lives about half an hour; the server says
+// when to swap it (`refresh_after_seconds`) and the dashboard does so in the
+// background for as long as it is open. Several tabs share one token through
+// localStorage, so only one of them may swap it at a time: a Web Lock makes
+// them take turns, and a tab that finds the stored token already changed just
+// adopts it. Swapping the same token twice would look exactly like a stolen
+// copy being used, and the server would end the session.
+const REFRESH_AT_KEY = "shadowfax_refresh_at";
+const REFRESH_RETRY_MS = 30000;
+let refreshTimer = null;
+
+function storedRefreshAt() {
+  try {
+    const at = Number(localStorage.getItem(REFRESH_AT_KEY));
+    return Number.isFinite(at) && at > 0 ? at : Date.now();
+  } catch {
+    return Date.now();
+  }
+}
+
+function armRefresh(at) {
+  clearTimeout(refreshTimer);
+  if (!authToken) return;
+  refreshTimer = setTimeout(refreshNow, Math.max(1000, at - Date.now()));
+}
+
+function scheduleRefresh(seconds) {
+  const at = Date.now() + Math.max(1, seconds) * 1000;
+  try {
+    localStorage.setItem(REFRESH_AT_KEY, String(at));
+  } catch {
+    /* in-memory timer still works */
+  }
+  armRefresh(at);
+}
+
+async function refreshOnce() {
+  let stored = null;
+  try {
+    stored = localStorage.getItem(TOKEN_KEY);
+  } catch {
+    stored = null;
+  }
+  if (stored && stored !== authToken) {
+    // Another tab swapped it while this one waited for the lock.
+    authToken = stored;
+    armRefresh(storedRefreshAt());
+    return;
+  }
+  if (!authToken) return;
+  const res = await fetch(`${API_BASE}/auth/refresh`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${authToken}` },
+  });
+  if (res.ok) {
+    const data = await res.json();
+    setToken(data.token);
+    scheduleRefresh(data.refresh_after_seconds);
+  } else if (res.status === 401) {
+    setToken(null);
+    if (onUnauthorized) onUnauthorized();
+  } else if (res.status === 409) {
+    // Already swapped (a retried request); the newer token arrives via storage.
+    armRefresh(Date.now() + 2000);
+  } else {
+    armRefresh(Date.now() + REFRESH_RETRY_MS);
+  }
+}
+
+export async function refreshNow() {
+  try {
+    if (typeof navigator !== "undefined" && navigator.locks) {
+      await navigator.locks.request("shadowfax-token-refresh", refreshOnce);
+    } else {
+      await refreshOnce();
+    }
+  } catch {
+    // Offline or the server restarting: try again shortly. The old token is
+    // still good until it expires.
+    armRefresh(Date.now() + REFRESH_RETRY_MS);
+  }
+}
+
+// Another tab signed in, swapped the token or signed out.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== TOKEN_KEY) return;
+    authToken = e.newValue || null;
+    if (authToken) armRefresh(storedRefreshAt());
+    else {
+      clearTimeout(refreshTimer);
+      if (onUnauthorized) onUnauthorized();
+    }
+  });
+}
+
+// A page loaded with a stored token picks up the schedule where it was left.
+if (authToken) armRefresh(storedRefreshAt());
 
 async function request(path, { headers: extraHeaders, ...options } = {}) {
   const headers = { "Content-Type": "application/json", ...(extraHeaders || {}) };
@@ -79,6 +182,7 @@ export async function login(username, password, second = {}) {
     body: JSON.stringify({ username, password, ...second }),
   });
   setToken(data.token);
+  scheduleRefresh(data.refresh_after_seconds);
   return data.user; // { username, role }
 }
 

@@ -1,5 +1,59 @@
 # Changelog
 
+## Version 0.33.0
+
+Production hardening. Until now the README listed two reasons Shadowfax wasn't
+ready for a shared deployment: passwords were hashed with PBKDF2, and session
+tokens never changed for 12 hours. Both are fixed.
+
+### argon2id passwords
+
+- New passwords are hashed with **argon2id** (`argon2-cffi`) using OWASP's
+  recommended settings: 19 MiB of memory, two passes, one lane. argon2 is
+  memory-hard, so guessing passwords on a GPU costs far more than with PBKDF2.
+- **Nobody has to reset anything.** PBKDF2 hashes from older versions still
+  work, and each one is replaced with argon2id the next time its owner signs
+  in. The same happens automatically if the settings are raised in future.
+- The fake check for a username that doesn't exist now does argon2 work too,
+  so response times still don't reveal which accounts exist.
+- Each hash holds 19 MiB while it runs, so at most four run at once. Without
+  that limit, a burst of sign-in requests could use most of a gigabyte.
+
+### Rotating session tokens
+
+- A sign-in still lasts up to 12 hours, but each **token only lasts 30
+  minutes**. `POST /auth/refresh` swaps it for a new one, and the old one keeps
+  working for 30 seconds so requests already on their way don't fail.
+- The **dashboard swaps its token in the background** every 10 minutes. Tabs
+  share one token, so they take turns using a Web Lock and pick up a token
+  another tab already swapped.
+- The **CLI swaps its saved token** before a command once it's due.
+- **Reuse detection.** If a token that was already swapped is used to refresh
+  again, someone else has a copy of it. Shadowfax can't tell which side is
+  the real user, so it ends the whole session and raises a new high alert,
+  **`session_token_reuse`** (ATT&CK T1550). Detector categories: 28 to **29**.
+  A second refresh within the 30 second grace period gets a `409` instead,
+  so a double-click or a network retry isn't mistaken for an attack.
+- Signing out ends every token in the session, including the one still in its
+  grace period. The live stream follows the session through refreshes.
+- New settings: `SHADOWFAX_SESSION_HOURS` (default 12) and
+  `SHADOWFAX_SESSION_IDLE_MINUTES` (default 30).
+- **Upgrading signs everyone out once.** Sessions from before v0.33 can't
+  rotate, so they're ended when the new version starts.
+
+### Tested
+
+- 874 API checks, passing on SQLite and PostgreSQL. 41 of them are new. They
+  include eight simultaneous refreshes of one token (exactly one wins), an old
+  PBKDF2 account signing in and being upgraded, and the hashing limit under 16
+  parallel requests.
+- 62 browser checks. The new ones swap the token in a real browser and race two
+  tabs against each other, then wait past the grace period to prove both moved
+  to the new token without tripping reuse detection.
+- Every new safeguard was removed once, deliberately, to make sure a test
+  fails without it. One test was missing (opening the live stream with an
+  already-replaced token) and has been added.
+
 ## Version 0.32.0
 
 PostgreSQL support. SQLite is still the default and still needs nothing set up,

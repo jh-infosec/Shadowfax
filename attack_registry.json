@@ -41,6 +41,11 @@
       "tactic": "Persistence",
       "url": "https://attack.mitre.org/techniques/T1136/"
     },
+    "T1550": {
+      "name": "Use Alternate Authentication Material",
+      "tactic": "Defense Evasion",
+      "url": "https://attack.mitre.org/techniques/T1550/"
+    },
     "T1556": {
       "name": "Modify Authentication Process",
       "tactic": "Credential Access",

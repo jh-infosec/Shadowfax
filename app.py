@@ -60,8 +60,26 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.32.0"
-SESSION_TTL_HOURS = 12
+VERSION = "0.33.0"
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive whole number, got {raw!r}")
+    return value
+
+
+# Sessions (v0.33). A sign-in lasts at most SESSION_TTL_HOURS. Within that,
+# each token lives SESSION_IDLE_MINUTES and has to be swapped for a new one
+# (POST /auth/refresh) before then; the dashboard and the CLI do it on their
+# own. A copied token is therefore only good for minutes, and presenting a
+# token that was already swapped is caught as reuse.
+SESSION_TTL_HOURS = _env_positive_int("SHADOWFAX_SESSION_HOURS", 12)
+SESSION_IDLE_MINUTES = _env_positive_int("SHADOWFAX_SESSION_IDLE_MINUTES", 30)
 
 # Sign-in throttling (v0.10). Read once at import, from the environment rather
 # than the detection policy: this is enforcement of Shadowfax's own front door,
@@ -921,11 +939,16 @@ def stream_ticket(authorization: str | None = Header(None),
     return {"ticket": ticket, "expires_in": int(tickets.TTL_SECONDS)}
 
 
+def _token_usable(session_fp: str) -> bool:
+    with db.get_conn() as conn:
+        return db.get_session_user(conn, session_fp) is not None
+
+
 def _session_alive(session_fp: str) -> bool:
     # A must-change session is not a live one for streaming (v0.21): the bearer
     # path used to check only that the session existed.
     with db.get_conn() as conn:
-        user = db.get_session_user(conn, session_fp)
+        user = db.session_family_alive(conn, session_fp)
     return user is not None and _session_restriction(user) is None
 
 
@@ -955,6 +978,10 @@ async def stream(ticket: str | None = None, token: str | None = None,
             session_fp = grant.session_fp
     elif authorization and authorization.lower().startswith("bearer "):
         session_fp = auth.token_fingerprint(authorization[7:].strip())
+        # The stream then follows the session through refreshes, but the token
+        # that opens it has to be one that works now, not one already replaced.
+        if not await asyncio.to_thread(_token_usable, session_fp):
+            session_fp = None
     if session_fp is None or not await asyncio.to_thread(_session_alive, session_fp):
         raise HTTPException(status_code=401, detail="authentication required")
 
@@ -1383,8 +1410,8 @@ def login(req: LoginRequest, request: Request):
     The order below is deliberate. The throttle is consulted *before* the
     username is looked up, and a failure is recorded whether or not the account
     exists, so a caller cannot tell real usernames from imaginary ones by how
-    the endpoint behaves. When there is no such user, `auth.dummy_verify` burns
-    the same PBKDF2 work a real check would, closing the timing side channel
+    the endpoint behaves. When there is no such user, `auth.dummy_verify` does
+    the same argon2 work a real check would, closing the timing side channel
     that a straight early return leaves open.
 
     Every refusal is recorded, and the security-relevant ones are written into
@@ -1396,7 +1423,7 @@ def login(req: LoginRequest, request: Request):
 
     with db.get_conn() as conn:
         # Read the counts and reserve this attempt under one write lock (v0.21).
-        # The check used to read failures, then spend ~0.1s on PBKDF2, then
+        # The check used to read failures, then spend ~0.1s hashing, then
         # write: forty concurrent guesses all read "0 failures" and all got a
         # real password check against a policy of five. Now each attempt is
         # counted -- as a failure, until proven otherwise -- before the slow
@@ -1476,9 +1503,19 @@ def login(req: LoginRequest, request: Request):
             # then the caller has shown it holds the password.)
             raise HTTPException(401, refusal)
 
+        # v0.33: the one moment we hold the plain password, so the moment to
+        # move a pre-v0.33 PBKDF2 hash (or argon2 with older settings) onto
+        # today's argon2id. Nobody has to reset anything.
+        if auth.needs_rehash(user["password_hash"]):
+            new_hash, new_salt = auth.hash_password(req.password)
+            db.upgrade_password_hash(conn, user["id"], new_hash, new_salt)
+
         token = auth.new_session_token()
-        expires = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
-        db.create_session(conn, auth.token_fingerprint(token), user["id"], expires.isoformat())
+        issued = datetime.now(timezone.utc)
+        expires = issued + timedelta(hours=SESSION_TTL_HOURS)
+        token_expires = _token_expiry(issued, expires)
+        db.create_session(conn, auth.token_fingerprint(token), user["id"], expires.isoformat(),
+                          token_expires.isoformat())
         db.record_login_attempt(conn, req.username, source, "success", now)
         # A successful sign-in clears the scope's failures, so a user who
         # mistypes twice and then gets it right carries nothing forward.
@@ -1493,7 +1530,76 @@ def login(req: LoginRequest, request: Request):
                  "totp_enabled": bool(user.get("totp_enabled")),
                  "must_enrol_2fa": _needs_2fa_enrolment(user)},
         "expires_at": expires.isoformat(),
+        **_token_timing(issued, token_expires),
     }
+
+
+def _token_expiry(issued: datetime, session_ends: datetime) -> datetime:
+    return min(issued + timedelta(minutes=SESSION_IDLE_MINUTES), session_ends)
+
+
+def _token_timing(issued: datetime, token_expires: datetime) -> dict[str, Any]:
+    """When this token dies, and when a client should swap it: a third of the
+    way through, so a missed refresh or two still leaves time."""
+    life = max(1, int((token_expires - issued).total_seconds()))
+    return {"token_expires_at": token_expires.isoformat(),
+            "refresh_after_seconds": max(1, life // 3)}
+
+
+@app.post("/auth/refresh")
+def refresh_session(request: Request, authorization: str | None = Header(None)):
+    """Swap a session token for a new one (v0.33).
+
+    The old token keeps working for SESSION_GRACE_SECONDS, so requests already
+    on their way don't fail, and then it is dead. Refreshing a token that was
+    already swapped is the signature of a stolen copy: either the thief or the
+    owner refreshed first, and now the other one is trying. There is no way to
+    tell which is which, so the whole session is ended -- both lose it, the
+    owner signs in again, the thief can't -- and `session_token_reuse` is
+    raised. A second refresh within the grace period is treated as a
+    double-click (409), not an attack.
+    """
+    if not (authorization and authorization.lower().startswith("bearer ")):
+        raise HTTPException(401, "authentication required", headers={"WWW-Authenticate": "Bearer"})
+    old_fp = auth.token_fingerprint(authorization[7:].strip())
+    now = datetime.now(timezone.utc)
+    with db.get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = db.get_session_row(conn, old_fp)
+        state = db.token_state(row, now) if row is not None else "unknown"
+        if row is not None and row["disabled"]:
+            state = "disabled"
+        if state == "grace":
+            conn.commit()
+            raise HTTPException(409, "this token was already refreshed; use the newer one")
+        if state == "replaced":
+            db.delete_session_family(conn, row["family"])
+            superseded = datetime.fromisoformat(row["superseded_at"])
+            if superseded.tzinfo is None:
+                superseded = superseded.replace(tzinfo=timezone.utc)
+            _record_auth_event(conn, "session_token_reuse", row["username"],
+                               _client_source(request), _naive_utc_now(),
+                               replaced_seconds_ago=int((now - superseded).total_seconds()),
+                               session=row["family"][:8])
+            conn.commit()
+            raise HTTPException(401, "session ended: this token had already been replaced, "
+                                     "so a copy of it may be in someone else's hands. "
+                                     "Sign in again.")
+        if state != "live":
+            if row is not None and state in ("ended", "idle"):
+                db.delete_session_family(conn, row["family"])
+            conn.commit()
+            raise HTTPException(401, "session expired; sign in again",
+                                headers={"WWW-Authenticate": "Bearer"})
+        token = auth.new_session_token()
+        session_ends = datetime.fromisoformat(row["expires_at"])
+        if session_ends.tzinfo is None:
+            session_ends = session_ends.replace(tzinfo=timezone.utc)
+        token_expires = _token_expiry(now, session_ends)
+        db.rotate_session(conn, row, auth.token_fingerprint(token), token_expires.isoformat())
+        conn.commit()
+    return {"token": token, "expires_at": session_ends.isoformat(),
+            **_token_timing(now, token_expires)}
 
 
 @app.get("/auth/lockouts")

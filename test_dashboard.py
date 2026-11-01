@@ -120,6 +120,7 @@ def run(url: str, headed: bool) -> int:
             _run_checks(page, url, requested)
             _run_reset_checks(browser, url)
             _run_two_factor_checks(browser, url)
+            _run_rotation_checks(browser, url)
         except Exception as exc:
             # A component that throws on mount takes the whole page with it, and
             # the first thing to notice is a selector that never appears. Report
@@ -470,6 +471,64 @@ def _api(url: str, method: str, path: str, body=None, token: str | None = None):
         method=method)
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read())
+
+
+def _run_rotation_checks(browser, url: str) -> None:
+    """Token rotation (v0.33) in a real browser. The dashboard swaps its token
+    when the server says it's due, and two tabs sharing one token must not both
+    swap it: refreshing a token that was already swapped is what a stolen copy
+    looks like, and the server would end the session. Takes about 40 seconds,
+    because the old token has to outlive its grace period to prove that the
+    second tab really moved on to the new one."""
+    import secrets
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    name, pw = f"dash-rot-{secrets.token_hex(3)}", "rotation-pass-1234"
+    _api(url, "POST", "/users", {"username": name, "password": pw, "role": "analyst"}, admin)
+    reuse_before = len(_api(url, "GET", "/alerts?category=session_token_reuse", None, admin))
+
+    context = browser.new_context(viewport={"width": 1300, "height": 900})
+    first_tab = context.new_page()
+    first_tab.goto(url, wait_until="networkidle")
+    first_tab.fill('input[autocomplete="username"]', name)
+    first_tab.fill('input[type="password"]', pw)
+    first_tab.click('button[type="submit"]')
+    first_tab.wait_for_selector(".topbar", timeout=15000)
+    token_key = "localStorage.getItem('shadowfax_token')"
+    original = first_tab.evaluate(token_key)
+    due_in = first_tab.evaluate("Number(localStorage.getItem('shadowfax_refresh_at')) - Date.now()")
+    check("signing in schedules the first swap, ten minutes ahead", 590_000 < due_in <= 600_000)
+    second_tab = context.new_page()
+    # "load", not "networkidle": a signed-in page holds the live stream open,
+    # so the network is never idle.
+    second_tab.goto(url, wait_until="load")
+    second_tab.wait_for_selector(".topbar", timeout=15000)
+
+    # Tell both tabs the swap is due, and let them race for it.
+    first_tab.evaluate("localStorage.setItem('shadowfax_refresh_at', String(Date.now()))")
+    first_tab.reload(wait_until="load")
+    second_tab.reload(wait_until="load")
+    first_tab.wait_for_timeout(5000)
+    swapped = first_tab.evaluate(token_key)
+    check("the dashboard swaps its token in the background when it's due",
+          bool(swapped) and swapped != original)
+    check("the new token is one the server accepts",
+          _api(url, "GET", "/auth/me", None, swapped)["username"] == name)
+
+    # Past the grace period the original token is dead, so a tab still holding
+    # it would be thrown back to the sign-in screen by its next request.
+    first_tab.wait_for_timeout(35000)
+    search = second_tab.locator('input[placeholder*="actor"]')
+    search.fill("a")
+    second_tab.wait_for_timeout(1500)
+    search.fill("")
+    second_tab.wait_for_timeout(1500)
+    check("two tabs swapping at once end up sharing the new token, both still signed in",
+          second_tab.locator(".topbar").count() == 1
+          and second_tab.locator('input[type="password"]').count() == 0
+          and first_tab.locator(".topbar").count() == 1)
+    check("and the server saw no token reuse",
+          len(_api(url, "GET", "/alerts?category=session_token_reuse", None, admin)) == reuse_before)
+    context.close()
 
 
 def _run_two_factor_checks(browser, url: str) -> None:

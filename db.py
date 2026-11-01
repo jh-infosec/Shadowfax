@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import ledger
 import os
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -123,12 +124,18 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 -- Opaque bearer tokens. Only the token's SHA-256 fingerprint is stored, so the
--- database never holds a usable session token.
+-- database never holds a usable session token. Since v0.33 a session is a
+-- `family` of tokens: each refresh adds a new one and marks the old one
+-- superseded. `expires_at` is when the whole session ends; `token_expires_at`
+-- is when this token dies unless refreshed.
 CREATE TABLE IF NOT EXISTS sessions (
     token_fp TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at TEXT NOT NULL
+    expires_at TEXT NOT NULL,
+    family TEXT,
+    token_expires_at TEXT,
+    superseded_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
@@ -202,6 +209,7 @@ def init_db(path: Path | None = None) -> None:
         conn.executescript(SCHEMA)
         _migrate_ledger(conn)
         _migrate_users(conn)
+        _migrate_sessions(conn)
         conn.commit()
 
 
@@ -232,6 +240,22 @@ def _migrate_users(conn: sqlite3.Connection) -> None:
                       ("totp_last_step", "INTEGER"), ("totp_enabled_at", "TEXT")):
         if col not in cols:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
+
+
+def _migrate_sessions(conn: sqlite3.Connection) -> None:
+    """v0.33: sessions became families of rotating tokens.
+
+    A token issued before then has no family and no short expiry, so it can't
+    take part in rotation. Those sessions are ended: everyone signs in once
+    after the upgrade, and no long-lived token is left behind.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "family" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN family TEXT")
+        conn.execute("ALTER TABLE sessions ADD COLUMN token_expires_at TEXT")
+        conn.execute("ALTER TABLE sessions ADD COLUMN superseded_at TEXT")
+    conn.execute("DELETE FROM sessions WHERE family IS NULL OR token_expires_at IS NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_family ON sessions(family)")
 
 
 def _migrate_legacy_alerts(conn: sqlite3.Connection) -> None:
@@ -733,55 +757,144 @@ def list_users(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 # Authentication: sessions
 
-def create_session(conn: sqlite3.Connection, token_fp: str, user_id: int, expires_at: str) -> None:
+# How long a token keeps working after a refresh replaced it (v0.33), so a
+# request already on its way with the old one doesn't fail.
+SESSION_GRACE_SECONDS = 30
+
+
+def _parse_utc(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def create_session(conn: sqlite3.Connection, token_fp: str, user_id: int, expires_at: str,
+                   token_expires_at: str, family: str | None = None) -> str:
+    """Store a token. A new sign-in starts a new family; a refresh passes the
+    family it belongs to. Returns the family."""
+    family = family or secrets.token_hex(16)
     conn.execute(
-        "INSERT INTO sessions (token_fp, user_id, expires_at) VALUES (?, ?, ?)",
-        (token_fp, user_id, expires_at),
+        "INSERT INTO sessions (token_fp, user_id, expires_at, family, token_expires_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (token_fp, user_id, expires_at, family, token_expires_at),
     )
+    return family
+
+
+def get_session_row(conn: sqlite3.Connection, token_fp: str) -> dict[str, Any] | None:
+    """One token's row with its user, whatever state it is in. For refresh,
+    which has to tell a replaced token from an unknown one."""
+    row = conn.execute(
+        """SELECT s.token_fp, s.family, s.expires_at, s.token_expires_at, s.superseded_at,
+                  u.id, u.username, u.role, u.must_change_password, u.totp_enabled, u.disabled
+           FROM sessions s JOIN users u ON u.id = s.user_id
+           WHERE s.token_fp = ?""",
+        (token_fp,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def token_state(row: dict[str, Any], now: datetime | None = None) -> str:
+    """What a token row is worth right now: 'live', 'grace' (replaced moments
+    ago, still accepted), 'replaced' (replaced longer ago), 'idle' (never
+    refreshed in time) or 'ended' (the session's absolute end has passed)."""
+    now = now or _utc_now()
+    ends = _parse_utc(row.get("expires_at"))
+    if ends is None or ends <= now:
+        return "ended"
+    superseded = _parse_utc(row.get("superseded_at"))
+    if superseded is not None:
+        age = (now - superseded).total_seconds()
+        return "grace" if age <= SESSION_GRACE_SECONDS else "replaced"
+    token_ends = _parse_utc(row.get("token_expires_at"))
+    if token_ends is None or token_ends <= now:
+        return "idle"
+    return "live"
+
+
+def _session_user(row: dict[str, Any]) -> dict[str, Any]:
+    return {"id": row["id"], "username": row["username"], "role": row["role"],
+            "must_change_password": bool(row["must_change_password"]),
+            "totp_enabled": bool(row["totp_enabled"]), "family": row["family"]}
 
 
 def get_session_user(conn: sqlite3.Connection, token_fp: str) -> dict[str, Any] | None:
-    """The user behind a live session token, or None if unknown or expired.
+    """The user behind a token that may be used right now, or None.
 
-    Expired sessions are deleted as they are encountered, so the table does not
-    accumulate dead tokens over time.
+    A session whose time is up, or whose current token was not refreshed in
+    time, is deleted as it is found, so dead tokens don't pile up. A replaced
+    token is kept (until the session ends) so that presenting it to refresh
+    again can be recognised as reuse.
     """
-    row = conn.execute(
-        """SELECT s.expires_at, u.id, u.username, u.role, u.must_change_password,
-                  u.totp_enabled
-           FROM sessions s JOIN users u ON u.id = s.user_id
-           WHERE s.token_fp = ? AND u.disabled = 0""",
-        (token_fp,),
-    ).fetchone()
-    if row is None:
+    row = get_session_row(conn, token_fp)
+    if row is None or row["disabled"]:
         return None
-    try:
-        expired = datetime.fromisoformat(row["expires_at"]) <= _utc_now()
-    except ValueError:
-        expired = True
-    if expired:
-        conn.execute("DELETE FROM sessions WHERE token_fp = ?", (token_fp,))
+    state = token_state(row)
+    if state in ("ended", "idle"):
+        delete_session_family(conn, row["family"])
         conn.commit()
         return None
-    return {"id": row["id"], "username": row["username"], "role": row["role"],
-            "must_change_password": bool(row["must_change_password"]),
-            "totp_enabled": bool(row["totp_enabled"])}
+    if state == "replaced":
+        return None
+    return _session_user(row)
+
+
+def session_family_alive(conn: sqlite3.Connection, token_fp: str) -> dict[str, Any] | None:
+    """The user, if the session this token belongs to is still going, through
+    any number of refreshes. The live stream uses this: it outlives the token
+    it was opened with."""
+    row = get_session_row(conn, token_fp)
+    if row is None or row["disabled"]:
+        return None
+    for r in conn.execute("SELECT token_fp FROM sessions WHERE family = ? AND superseded_at IS NULL",
+                          (row["family"],)).fetchall():
+        current = get_session_row(conn, r["token_fp"])
+        if current is not None and token_state(current) == "live":
+            return _session_user(current)
+    return None
+
+
+def rotate_session(conn: sqlite3.Connection, old: dict[str, Any], new_fp: str,
+                   token_expires_at: str) -> None:
+    """Replace a token with a new one in the same session. The caller holds the
+    write lock, so two refreshes of one token cannot both succeed."""
+    create_session(conn, new_fp, old["id"], old["expires_at"], token_expires_at,
+                   family=old["family"])
+    conn.execute("UPDATE sessions SET superseded_at = ? WHERE token_fp = ?",
+                 (_iso(_utc_now()), old["token_fp"]))
+
+
+def delete_session_family(conn: sqlite3.Connection, family: str | None) -> None:
+    if family:
+        conn.execute("DELETE FROM sessions WHERE family = ?", (family,))
 
 
 def delete_session(conn: sqlite3.Connection, token_fp: str) -> None:
-    conn.execute("DELETE FROM sessions WHERE token_fp = ?", (token_fp,))
+    """Sign out: end the whole session this token belongs to, including tokens
+    it replaced, not only the one presented."""
+    row = conn.execute("SELECT family FROM sessions WHERE token_fp = ?", (token_fp,)).fetchone()
+    if row is not None:
+        delete_session_family(conn, row["family"])
 
 
 def delete_sessions_for_user(conn: sqlite3.Connection, user_id: int,
                              keep_fp: str | None = None) -> int:
     """End every session a user has -- except, optionally, the one asking.
-    Returns how many were ended."""
-    if keep_fp is None:
-        cur = conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
-    else:
-        cur = conn.execute("DELETE FROM sessions WHERE user_id = ? AND token_fp != ?",
-                           (user_id, keep_fp))
-    return cur.rowcount
+    Returns how many sessions were ended."""
+    keep_family = None
+    if keep_fp is not None:
+        row = conn.execute("SELECT family FROM sessions WHERE token_fp = ?", (keep_fp,)).fetchone()
+        keep_family = row["family"] if row is not None else None
+    families = {r["family"] for r in conn.execute(
+        "SELECT family FROM sessions WHERE user_id = ?", (user_id,)).fetchall()}
+    families.discard(keep_family)
+    for fam in families:
+        delete_session_family(conn, fam)
+    return len(families)
 
 
 def set_role(conn: sqlite3.Connection, user_id: int, role: str) -> None:
@@ -921,6 +1034,14 @@ def forward_status(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
 def count_active_admins(conn: sqlite3.Connection) -> int:
     return conn.execute(
         "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0").fetchone()[0]
+
+
+def upgrade_password_hash(conn: sqlite3.Connection, user_id: int, password_hash: str,
+                          salt: str) -> None:
+    """The same password, stored under a stronger hash (v0.33). Unlike
+    set_password, nothing about the password's history changes."""
+    conn.execute("UPDATE users SET password_hash = ?, salt = ? WHERE id = ?",
+                 (password_hash, salt, user_id))
 
 
 def set_password(conn: sqlite3.Connection, user_id: int, password_hash: str, salt: str,

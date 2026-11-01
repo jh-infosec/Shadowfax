@@ -1,5 +1,7 @@
 fastapi>=0.110
 uvicorn>=0.29
 pydantic>=2.6
+# argon2id password hashing (v0.33). Ships prebuilt wheels; nothing to compile.
+argon2-cffi>=23.1
 # Only used when SHADOWFAX_DATABASE_URL points at PostgreSQL; SQLite needs nothing extra.
 psycopg[binary]>=3.1

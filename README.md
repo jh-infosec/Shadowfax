@@ -31,7 +31,7 @@ is not a security boundary and doesn't block anything.
 
 **Detection**
 
-- 28 deterministic detectors, including AI agent tool call analysis (destructive
+- 29 deterministic detectors, including AI agent tool call analysis (destructive
   commands, out of scope actions, privilege escalation, data exfiltration)
 - Alerts are rebuilt from the event history whenever the policy changes, and
   each alert keeps a stable id across rescans
@@ -63,6 +63,8 @@ is not a security boundary and doesn't block anything.
 
 - Runs on SQLite with no setup, or on PostgreSQL for multiple writers
 - Users with admin, analyst and viewer roles, plus API keys for agents
+- argon2id password hashing, and session tokens that rotate every few minutes
+  with stolen-token detection
 - Two-factor sign-in (TOTP) with recovery codes, optionally required for admins
 - Sign-in throttling and lockout that doesn't reveal which usernames exist
 - A hash-chained event ledger, so edits, deletions and reordering are detectable
@@ -484,7 +486,7 @@ with me, so the login is now properly protected.
   things down and never locks, because a whole office or VPN can share one
   address.
 - **No username enumeration.** Failures are counted the same way whether or not
-  the account exists, and a check for a missing user does the same PBKDF2 work
+  the account exists, and a check for a missing user does the same argon2 work
   as a real one, so response times don't give anything away.
 
 ```
@@ -560,7 +562,7 @@ Some details worth knowing:
   Shadowfax's own detectors complete.
 - **A bad envelope is rejected whole,** with the field at fault named, so the
   person writing the other tool finds out what's wrong.
-- **Other tools can't use Shadowfax's own 28 detector categories,** so an alert
+- **Other tools can't use Shadowfax's own 29 detector categories,** so an alert
   reading `destructive_action` always means Shadowfax found it.
 - **Unvalidated findings are marked but not downgraded.** `validated: false`
   means the tool is repeating something the subject said about itself, like a
@@ -630,11 +632,11 @@ ok = hmac.compare_digest(expected, signature) and abs(time.time() - int(ts)) < 3
 
 ## Security
 
-Every endpoint needs authentication. People sign in for a bearer token (12 hour
-sessions) and agents send events with an API key. There are three roles:
-`viewer` can read, `analyst` can acknowledge, assign and edit the policy, and
-`admin` manages users, keys and resets. Passwords are hashed with PBKDF2 and a
-per-user salt, and tokens and keys are only stored as fingerprints.
+Every endpoint needs authentication. People sign in for a bearer token and
+agents send events with an API key. There are three roles: `viewer` can read,
+`analyst` can acknowledge, assign and edit the policy, and `admin` manages
+users, keys and resets. Tokens and keys are only stored as fingerprints, never
+in a usable form.
 
 On a fresh database the first admin comes from `SHADOWFAX_ADMIN_USERNAME` and
 `SHADOWFAX_ADMIN_PASSWORD`. If they aren't set, running from source creates
@@ -642,10 +644,24 @@ On a fresh database the first admin comes from `SHADOWFAX_ADMIN_USERNAME` and
 password and prints it once. Set real credentials before exposing it anywhere.
 
 **Passwords.** At least 12 characters, not the username and not one of the
-obvious ones. Changing yours needs the current password (throttled like sign-in)
-and signs out your other sessions. When an admin resets someone's password, that
-person has to choose a new one before they can do anything else. Changes and
-resets go into the ledger.
+obvious ones. They're hashed with argon2id using the settings OWASP recommends,
+which makes guessing them on a GPU far more expensive than the PBKDF2 hashing
+Shadowfax used before v0.33. Accounts from older versions are moved over the
+next time they sign in, so nobody has to reset anything. Changing your password
+needs the current one (throttled like sign-in) and signs out your other
+sessions. When an admin resets someone's password, that person has to choose a
+new one before they can do anything else. Changes and resets go into the
+ledger.
+
+**Sessions.** A sign-in lasts up to 12 hours, but the token itself only lasts 30
+minutes. The dashboard swaps it for a new one in the background every 10
+minutes, and the CLI does the same before a command, so a copied token is only
+useful for a short time. If a token that has already been swapped is ever used
+to refresh again, someone else must have a copy of it. Shadowfax can't tell
+which side is the real user, so it ends the session for both and raises a high
+`session_token_reuse` alert (T1550). Leave the dashboard closed for more than
+half an hour, or the CLI unused, and you'll need to sign in again. Both times
+can be changed (see Configuration).
 
 **Accounts.** Admins manage users and API keys from the **Accounts** drawer. New
 users get a generated password they must change on first sign-in, and API keys
@@ -680,9 +696,9 @@ without it can only reach the enrolment screen until it's set up.
 - The CLI only sends a saved token to the server it was saved for, and doesn't
   follow redirects.
 
-Password hashing uses the standard library's PBKDF2 rather than bcrypt or
-argon2, and tokens don't rotate. Those are the main reasons I'd still call this a
-portfolio project rather than something to run in production as is.
+For a shared deployment, put HTTPS in front of it, use PostgreSQL, and keep the
+database and its backups private. The two-factor secrets have to be stored in a
+readable form, so anyone who can read the database can read them.
 
 ## Configuration
 
@@ -697,6 +713,8 @@ policy and shouldn't be able to loosen the platform's own protections.
 | `SHADOWFAX_ADMIN_USERNAME` | `admin` | first admin on a fresh database |
 | `SHADOWFAX_ADMIN_PASSWORD` | unset | first admin's password |
 | `SHADOWFAX_CORS_ORIGINS` | dashboard dev server | extra origins allowed to call the API |
+| `SHADOWFAX_SESSION_HOURS` | 12 | longest a sign-in lasts |
+| `SHADOWFAX_SESSION_IDLE_MINUTES` | 30 | how long a token lasts without being swapped |
 | `SHADOWFAX_REQUIRE_ADMIN_2FA` | off | admins must set up two-factor first |
 | `SHADOWFAX_SELF_MONITOR` | on | record attacks on the sign-in page as events |
 | `SHADOWFAX_LOGIN_MAX_FAILURES` | 5 | failures before a scope is locked |
@@ -743,7 +761,7 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 833 checks against the API. To run the same checks on PostgreSQL, set
+That runs 874 checks against the API. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
 
@@ -755,7 +773,7 @@ python demo.py --fast          # put some data on the dashboard first
 python test_dashboard.py
 ```
 
-There are 57 checks, covering things like the alert rows rendering with severity
+There are 62 checks, covering things like the alert rows rendering with severity
 and ATT&CK technique, filters actually filtering, the kill chain being drawn, the
 ledger badge reading verified, the session token never appearing in a URL, and
 the Accounts drawer creating a user whose password really works. They refuse to
@@ -828,6 +846,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
 | 0.28 to 0.30 | Build tool updates, profile drafts, screenshots |
 | 0.31 | Sending alerts to a SIEM |
 | 0.32 | PostgreSQL support |
+| 0.33 | argon2id passwords, rotating session tokens |
 
 Still to do before 1.0:
 
