@@ -1,5 +1,25 @@
 # Changelog
 
+## Version 0.34.1
+
+A fix for something the new PostgreSQL CI run caught.
+
+Events are timestamped to the second, so several often share one. Shadowfax
+sorted them by timestamp alone. SQLite happens to return ties in the order they
+were stored, but PostgreSQL returns them in whatever order they sit on disk,
+and that changes when a row is updated. So on PostgreSQL an actor's timeline,
+and the order the detectors saw same-second events in, could come out
+scrambled. On GitHub's faster machines a test found the newest sign-in failure
+wasn't last.
+
+- Ties are now broken by the order events arrived, everywhere events are read.
+  The alert list breaks ties the same way.
+- A new test stores twelve events in the same second, updates some of them,
+  and checks they still come back in order. It fails on PostgreSQL without the
+  fix.
+- 901 API checks, passing on SQLite and on PostgreSQL set up like CI (Python
+  3.11, `en_US` sorting, password login).
+
 ## Version 0.34.0
 
 PostgreSQL in one command, HTTPS, and a guide to running Shadowfax on a server

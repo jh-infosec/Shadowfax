@@ -791,7 +791,7 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 900 checks against the API. To run the same checks on PostgreSQL, set
+That runs 901 checks against the API. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
 

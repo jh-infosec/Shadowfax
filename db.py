@@ -490,21 +490,26 @@ def known_finding_ids(conn: sqlite3.Connection, tool: str,
     return out
 
 
+# Timestamps go down to the second, so events often share one. `id` breaks the
+# tie in the order they arrived (v0.34.1). SQLite happened to return ties that
+# way anyway; PostgreSQL returns them in whatever order they sit on disk, which
+# changes when a row is updated, so the detectors and the timeline could see
+# same-second events out of order.
 def get_events_for_actor(conn: sqlite3.Connection, actor_id: str) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT * FROM events WHERE actor_id = ? ORDER BY timestamp ASC", (actor_id,)
+        "SELECT * FROM events WHERE actor_id = ? ORDER BY timestamp ASC, id ASC", (actor_id,)
     ).fetchall()
     return [_row_to_event(r) for r in rows]
 
 
 def get_all_events(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = conn.execute("SELECT * FROM events ORDER BY timestamp ASC").fetchall()
+    rows = conn.execute("SELECT * FROM events ORDER BY timestamp ASC, id ASC").fetchall()
     return [_row_to_event(r) for r in rows]
 
 
 def distinct_actors(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     rows = conn.execute(
-        "SELECT DISTINCT actor_id, actor_type FROM events ORDER BY actor_id"
+        "SELECT DISTINCT actor_id, actor_type FROM events ORDER BY actor_id, actor_type"
     ).fetchall()
     return [(r["actor_id"], r["actor_type"]) for r in rows]
 
@@ -606,7 +611,7 @@ def query_alerts(
                    s.note            AS note
             FROM alerts a
             LEFT JOIN alert_state s ON s.alert_id = a.id
-            {where} ORDER BY a.timestamp DESC LIMIT ?""",
+            {where} ORDER BY a.timestamp DESC, a.event_id DESC, a.id ASC LIMIT ?""",
         (*params, limit),
     ).fetchall()
     out = []

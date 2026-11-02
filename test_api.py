@@ -4008,6 +4008,22 @@ if _ci_path.exists():
           _pgstep34 is not None and "demo.py --fast --assert" in _pgstep34["run"]
           and "--no-log-prefix" in _pgstep34["run"])
 
+print("\n== same-second events keep their order (v0.34.1) ==")
+# Timestamps go down to the second. On PostgreSQL, rows that share one came back
+# in whatever order they sat on disk, and an UPDATE moves a row to the end -- CI
+# caught a timeline whose newest event was not last. Ties now break by arrival.
+client.post("/events", json=[{"timestamp": "2026-11-01T10:00:00", "actor_id": "tie-order",
+                              "actor_type": "human", "event_type": "login", "target": f"t{i}",
+                              "metadata": {"seq": i}} for i in range(12)])
+with db_module.get_conn() as _c:
+    _c.execute("UPDATE events SET target = target WHERE id IN "
+                "(SELECT id FROM events WHERE actor_id = 'tie-order' ORDER BY id LIMIT 4)")
+    _c.commit()
+    _all341 = [e["metadata"].get("seq") for e in db_module.get_all_events(_c) if e["actor_id"] == "tie-order"]
+_tl341 = [e["metadata"]["seq"] for e in client.get("/actors/tie-order").json()["events"]]
+check("events in the same second come back in the order they arrived, even after an update",
+      _tl341 == list(range(12)) and _all341 == list(range(12)))
+
 print("\n== reset ==")
 r = client.post("/reset")
 check("POST /reset returns 200", r.status_code == 200)
