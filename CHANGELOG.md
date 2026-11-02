@@ -1,5 +1,48 @@
 # Changelog
 
+## Version 0.35.0
+
+Case notes, so a team can work an investigation together.
+
+### What's new
+
+- **Notes on alerts and incidents.** Click **Note** on an alert, or scroll to
+  **Case notes** in an incident, and write down what you checked and what you
+  concluded. Notes from a colleague appear live while you have the same alert
+  open.
+- **Append-only, and in the ledger.** Notes can't be edited or deleted; a
+  correction is a new note. Each one is an event under Shadowfax's own
+  `shadowfax-case` account, hash-chained like every other event.
+- **Triage is part of the story.** Acknowledging, reopening and assigning an
+  alert now each add a line to its case timeline saying who did it. Before,
+  only the latest state was kept.
+- **Incidents gather their alerts' notes.** An incident's timeline shows its
+  own notes and the notes on each of its alerts, labelled.
+- The alert table shows how many notes each alert has; the incidents list does
+  too.
+- `cli.py notes alert <id>` and `cli.py notes incident <id> --add "..."`.
+- API: `GET` and `POST /alerts/{id}/notes` and `/incidents/{id}/notes`.
+  Analysts and admins write; viewers read.
+
+### Fixed
+
+- **A ledger race on PostgreSQL.** Adding an event takes a lock so that two
+  writers can't both chain onto the same previous entry. It only took the lock
+  if no transaction was open yet. On SQLite reading doesn't open one, but on
+  PostgreSQL it does, so since v0.32 any request that read something before
+  writing an event skipped the lock. With the fix removed, 24 notes written at
+  once fork the ledger on PostgreSQL in every run; with it, they don't.
+
+### Tested
+
+- 930 API checks, on SQLite and on PostgreSQL set up like CI. 29 are new,
+  including notes from 12 analysts at once, forged case events being refused,
+  and an analyst noting eight alerts in a minute not being mistaken for
+  lateral movement.
+- 68 browser checks. The new ones write a note from the alert table, check a
+  colleague's note arrives live and that markup in a note shows as text, check
+  Escape doesn't throw away a half-written note, and note an incident.
+
 ## Version 0.34.1
 
 A fix for something the new PostgreSQL CI run caught.

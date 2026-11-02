@@ -428,7 +428,14 @@ def insert_event(conn: sqlite3.Connection, event: dict[str, Any]) -> int:
     # it, and the ledger forked -- verification then reported tampering that
     # never happened, and hid any real tampering after the fork. BEGIN
     # IMMEDIATE takes the write lock first, so heads are read one at a time.
-    if not conn.in_transaction:
+    #
+    # v0.35: on PostgreSQL the lock is taken even inside a transaction. There a
+    # plain SELECT already opens one (SQLite's does not), so a request that read
+    # something before writing an event skipped the lock entirely. The advisory
+    # lock can be taken again inside the transaction that holds it; SQLite's
+    # BEGIN can't, and there a transaction that has already written holds the
+    # write lock anyway.
+    if not conn.in_transaction or getattr(conn, "relock_in_transaction", False):
         conn.execute("BEGIN IMMEDIATE")
     head = get_ledger_head(conn)
     prev = head["head_hash"]
@@ -729,6 +736,26 @@ def set_policy(conn: sqlite3.Connection, policy: dict[str, Any]) -> None:
 
 def alert_row_count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) AS n FROM alerts").fetchone()["n"]
+
+
+def case_events(conn: sqlite3.Connection, actor_id: str, targets: list[str]) -> list[dict[str, Any]]:
+    """Case notes and updates (v0.35) about the given subjects, in the order
+    they were written."""
+    if not targets:
+        return []
+    marks = ",".join("?" * len(targets))
+    rows = conn.execute(
+        f"SELECT * FROM events WHERE actor_id = ? AND target IN ({marks}) ORDER BY id ASC",
+        (actor_id, *targets)).fetchall()
+    return [_row_to_event(r) for r in rows]
+
+
+def case_note_counts(conn: sqlite3.Connection, actor_id: str, note_type: str) -> dict[str, int]:
+    """How many notes each subject has, keyed `alert:<id>` / `incident:<id>`."""
+    rows = conn.execute(
+        "SELECT target, COUNT(*) AS n FROM events WHERE actor_id = ? AND event_type = ? "
+        "GROUP BY target", (actor_id, note_type)).fetchall()
+    return {r["target"]: r["n"] for r in rows}
 
 
 def get_alert(conn: sqlite3.Connection, alert_id: str) -> dict[str, Any] | None:

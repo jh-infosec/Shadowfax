@@ -482,6 +482,33 @@ def cmd_explain(client: Client, args, out) -> int:
     return EXIT_OK
 
 
+def cmd_notes(client: Client, args, out) -> int:
+    """An alert's or incident's case notes (v0.35); with --add, write one.
+    Notes are append-only, so there is no edit or delete here either."""
+    path = f"/{'alerts' if args.kind == 'alert' else 'incidents'}/{args.target_id}/notes"
+    if args.add is not None:
+        note = client.call("POST", path, body={"body": args.add})
+        emit(out, note, args.json,
+             lambda o, v: print(f"note added by {v.get('author')} at {_short_time(v.get('at'))}", file=o))
+        return EXIT_OK
+    entries = client.call("GET", path)
+    def human(o, v):
+        if not v:
+            print("no notes yet", file=o)
+            return
+        for n in v:
+            on = f" on {n['on']}" if n.get("on") else ""
+            head = f"{_short_time(n.get('at'))}  {n.get('author')}{on}"
+            if n.get("kind") == "note":
+                print(head, file=o)
+                for line in (n.get("body") or "").splitlines():
+                    print(f"    {line}", file=o)
+            else:
+                print(f"{head}: {', '.join(n.get('changes') or [])}", file=o)
+    emit(out, entries, args.json, human)
+    return EXIT_OK
+
+
 def cmd_search(client: Client, args, out) -> int:
     result = client.call("POST", "/search", body={"query": args.query})
     def human(o, v):
@@ -875,6 +902,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("kind", choices=["alert", "incident"])
     sp.add_argument("target_id")
 
+    sp = sub.add_parser("notes", help="an alert's or incident's case notes; --add to write one")
+    sp.add_argument("kind", choices=["alert", "incident"])
+    sp.add_argument("target_id")
+    sp.add_argument("--add", metavar="TEXT", help="add a note (analyst); notes can't be edited later")
+
     sp = sub.add_parser("search", help="natural-language alert search")
     sp.add_argument("query")
 
@@ -938,7 +970,7 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "status": cmd_status, "login": cmd_login, "ingest": cmd_ingest,
     "alerts": cmd_alerts, "check": cmd_check, "incidents": cmd_incidents,
-    "explain": cmd_explain, "search": cmd_search, "actors": cmd_actors,
+    "explain": cmd_explain, "notes": cmd_notes, "search": cmd_search, "actors": cmd_actors,
     "digest": cmd_digest, "verify": cmd_verify, "lockouts": cmd_lockouts, "subjects": cmd_subjects,
     "forwarding": cmd_forwarding,
     "export": cmd_export, "permissions": cmd_permissions,

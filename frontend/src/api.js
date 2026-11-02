@@ -260,6 +260,19 @@ export function explainAlert(id) {
   return request(`/alerts/${encodeURIComponent(id)}/explain`);
 }
 
+// Case notes (v0.35). kind is "alert" or "incident". Append-only: there is no
+// edit or delete, on the server or here.
+export function getNotes(kind, id) {
+  return request(`/${kind === "alert" ? "alerts" : "incidents"}/${encodeURIComponent(id)}/notes`);
+}
+
+export function addNote(kind, id, body) {
+  return request(`/${kind === "alert" ? "alerts" : "incidents"}/${encodeURIComponent(id)}/notes`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
 export function explainIncident(id) {
   return request(`/incidents/${encodeURIComponent(id)}/explain`);
 }

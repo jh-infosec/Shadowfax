@@ -54,6 +54,8 @@ is not a security boundary and doesn't block anything.
 - React dashboard with a live alert table (Server-Sent Events, no refreshing)
 - Actor timelines that show each alert next to the event that caused it
 - Subject pages for files and hosts, grouping what each tool reported
+- Case notes on alerts and incidents, so a team can work an investigation
+  together. Notes are append-only and go into the evidence ledger.
 - A triage digest that ranks open incidents and shows why
 - An optional AI assistant that explains alerts and incidents in plain English
   and turns plain English searches into filters. It never decides anything.
@@ -321,6 +323,8 @@ Some other useful commands:
 
 ```bash
 python cli.py digest                    # ranked triage queue with reasons
+python cli.py notes alert <id>          # an alert's case notes
+python cli.py notes incident <id> --add "Escalated to IR"
 python cli.py digest --plain            # same thing, no language model involved
 python cli.py verify                    # exit 0 if the event ledger is intact
 python cli.py lockouts                  # who is failing to sign in
@@ -763,6 +767,37 @@ policy and shouldn't be able to loosen the platform's own protections.
 
 The SIEM forwarding variables are listed in [Sending alerts to a SIEM](#sending-alerts-to-a-siem).
 
+## Working a case together
+
+An alert says what Shadowfax found. Case notes say what people did about it:
+what they checked, what they concluded, who has it now. Click **Note** on any
+alert in the table, or scroll to **Case notes** in an incident, and write it
+down. Everyone looking at the same alert sees new notes appear as they're
+written.
+
+![Case notes on an alert, with an analyst's note and the acknowledgement recorded below it](docs/screenshots/case-notes.png)
+
+A few deliberate choices:
+
+- **Notes can't be edited or deleted.** A correction is a new note. When an
+  investigation is reviewed afterwards, the record shows what people believed
+  at the time, not a tidied-up version.
+- **Notes are part of the evidence ledger.** Each one is stored as an event
+  under Shadowfax's own `shadowfax-case` account and hash-chained like any
+  other, so changing or removing one breaks the chain.
+- **The author is whoever is signed in.** It's taken from the session, never
+  from what the browser sends.
+- **Triage is recorded in the same timeline.** Acknowledging, reopening and
+  assigning an alert each add a line saying who did it, so a case reads as one
+  story in order.
+- **An incident's timeline includes its alerts' notes**, labelled with which
+  alert each was about.
+
+Analysts and admins can write notes; viewers can read them. A note is plain
+text, up to 4,000 characters, and nothing in it is ever treated as markup. The
+same notes are available from `GET` and `POST /alerts/{id}/notes` and
+`/incidents/{id}/notes`, and from `cli.py notes`.
+
 ## Investigation assistant
 
 The dashboard can explain any alert or incident in plain English, using the
@@ -791,7 +826,7 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 901 checks against the API. To run the same checks on PostgreSQL, set
+That runs 930 checks against the API. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
 
@@ -803,7 +838,7 @@ python demo.py --fast          # put some data on the dashboard first
 python test_dashboard.py
 ```
 
-There are 62 checks, covering things like the alert rows rendering with severity
+There are 68 checks, covering things like the alert rows rendering with severity
 and ATT&CK technique, filters actually filtering, the kill chain being drawn, the
 ledger badge reading verified, the session token never appearing in a URL, and
 the Accounts drawer creating a user whose password really works. They refuse to
@@ -881,11 +916,11 @@ The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
 | 0.32 | PostgreSQL support |
 | 0.33 | argon2id passwords, rotating session tokens |
 | 0.34 | PostgreSQL in one command, HTTPS with Caddy, the deployment guide |
+| 0.35 | Case notes on alerts and incidents |
 
 Still to do before 1.0:
 
 - An Electron desktop app
-- Multi-user support
 
 ## Philosophy
 

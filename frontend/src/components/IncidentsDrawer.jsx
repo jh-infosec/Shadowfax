@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { SEVERITY_COLOUR } from "../constants.js";
 import Explanation from "./Explanation.jsx";
+import CaseNotes from "./CaseNotes.jsx";
 import * as api from "../api.js";
 
-export default function IncidentsDrawer({ onClose }) {
+export default function IncidentsDrawer({ onClose, canWrite }) {
   const [incidents, setIncidents] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -61,6 +62,7 @@ export default function IncidentsDrawer({ onClose }) {
                 <span className="incident-meta">
                   {i.alert_count} alert{i.alert_count !== 1 ? "s" : ""} · {i.start.slice(5, 16).replace("T", " ")}
                   {i.chain && i.chain.escalated && <span className="chain-tag">⛓ chain</span>}
+                  {i.note_count > 0 && <span className="notes-tag">{i.note_count} note{i.note_count !== 1 ? "s" : ""}</span>}
                 </span>
               </button>
             ))}
@@ -141,6 +143,8 @@ export default function IncidentsDrawer({ onClose }) {
                 <button className="btn" style={{ marginTop: 16 }} onClick={copyReport}>
                   {copied ? "Report copied ✓" : "Copy report (Markdown)"}
                 </button>
+
+                <CaseNotes key={selectedId} kind="incident" id={selectedId} canWrite={canWrite} />
               </>
             )}
           </div>

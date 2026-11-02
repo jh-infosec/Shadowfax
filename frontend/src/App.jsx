@@ -13,6 +13,7 @@ import TwoFactorModal from "./components/TwoFactorModal.jsx";
 import SubjectsDrawer from "./components/SubjectsDrawer.jsx";
 import ProfileDraftModal from "./components/ProfileDraftModal.jsx";
 import ExplanationModal from "./components/ExplanationModal.jsx";
+import NotesModal from "./components/NotesModal.jsx";
 import NLSearch from "./components/NLSearch.jsx";
 import Login from "./components/Login.jsx";
 import { SEVERITIES, ACTOR_TYPES } from "./constants.js";
@@ -76,6 +77,7 @@ export default function App() {
   const [draftAgent, setDraftAgent] = useState(null);
   // The alert whose explanation modal is open, or null.
   const [explainAlert, setExplainAlert] = useState(null);
+  const [notesAlert, setNotesAlert] = useState(null);
   // Active natural-language search result (snapshot), or null for the normal
   // filtered list. When set, the table shows these alerts with an interpretation
   // banner; Clear returns to the live filtered view.
@@ -165,7 +167,15 @@ export default function App() {
     let stopped = false;
     let delay = 1000;
     let opened = false;
-    const onChange = () => {
+    const onChange = (ev) => {
+      // A new case note (v0.35): tell any open notes panel, so a colleague's
+      // note appears without reopening it.
+      try {
+        const msg = JSON.parse(ev.data || "{}");
+        if (msg.reason === "note") window.dispatchEvent(new CustomEvent("shadowfax-note", { detail: msg.subject }));
+      } catch {
+        /* not JSON: just refresh */
+      }
       clearTimeout(debounce);
       debounce = setTimeout(() => refreshRef.current(), STREAM_REFRESH_DEBOUNCE_MS);
     };
@@ -240,6 +250,7 @@ export default function App() {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       if (passwordOpen || policyOpen || twoFactorOpen) return;
       if (draftAgent) setDraftAgent(null);
+      else if (notesAlert) setNotesAlert(null);
       else if (explainAlert) setExplainAlert(null);
       else if (accountsOpen) setAccountsOpen(false);
       else if (subjectsOpen) setSubjectsOpen(false);
@@ -252,7 +263,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [passwordOpen, policyOpen, twoFactorOpen, draftAgent, explainAlert, accountsOpen, subjectsOpen, lockoutsOpen, digestOpen,
+  }, [passwordOpen, policyOpen, twoFactorOpen, draftAgent, notesAlert, explainAlert, accountsOpen, subjectsOpen, lockoutsOpen, digestOpen,
       incidentsOpen, selectedActorId]);
 
   const handleLogout = async () => {
@@ -409,6 +420,7 @@ export default function App() {
               onAcknowledge={acknowledgeAlert}
               onAssign={assignAlertToMe}
               onExplain={setExplainAlert}
+              onNotes={setNotesAlert}
               canAct={canAnalyst}
             />
           </div>
@@ -420,7 +432,7 @@ export default function App() {
                      onDraftProfile={canAnalyst ? setDraftAgent : undefined} />
       )}
 
-      {incidentsOpen && <IncidentsDrawer onClose={() => setIncidentsOpen(false)} />}
+      {incidentsOpen && <IncidentsDrawer canWrite={canAnalyst} onClose={() => setIncidentsOpen(false)} />}
 
       {digestOpen && (
         <DigestDrawer
@@ -449,6 +461,10 @@ export default function App() {
 
       {explainAlert && (
         <ExplanationModal alert={explainAlert} onClose={() => setExplainAlert(null)} />
+      )}
+
+      {notesAlert && (
+        <NotesModal alert={notesAlert} canWrite={canAnalyst} onClose={() => setNotesAlert(null)} />
       )}
 
       {policyOpen && policy && (

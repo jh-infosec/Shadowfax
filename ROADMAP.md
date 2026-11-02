@@ -373,7 +373,9 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 - [ ] Electron desktop application
 - [x] PostgreSQL support (`v0.32.0`): set `SHADOWFAX_DATABASE_URL`; SQLite is
       still the default. The whole API suite runs against both.
-- [ ] Multi-user support
+- [x] Multi-user support: accounts and roles (`v0.23`, `v0.24`), two-factor
+      sign-in (`v0.25`), and case notes so a team can work an investigation
+      together (`v0.35.0`).
 - [x] Docker images -- built since `v0.12.0`, published to ghcr.io since `v0.17.0`.
 - [x] SIEM integrations (`v0.31.0`): each new alert forwarded once to a
       signed webhook and/or syslog (CEF or JSON), through a durable outbox with

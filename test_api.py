@@ -4008,6 +4008,135 @@ if _ci_path.exists():
           _pgstep34 is not None and "demo.py --fast --assert" in _pgstep34["run"]
           and "--no-log-prefix" in _pgstep34["run"])
 
+print("\n== case notes (v0.35) ==")
+import cases as _cases
+_alerts35 = client.get("/alerts").json()
+_a35 = _alerts35[0]["id"]
+client.post("/users", json={"username": "note-analyst", "password": TEST_PW, "role": "analyst"})
+client.post("/users", json={"username": "note-viewer", "password": TEST_PW, "role": "viewer"})
+_an35 = as_user("note-analyst", TEST_PW)
+_vw35 = as_user("note-viewer", TEST_PW)
+_head35 = client.get("/ledger/head").json()["entry_count"]
+_r = _an35.post(f"/alerts/{_a35}/notes", json={"body": "  Checked the VPN logs: this was\r\nthe night shift, not an attacker.  "})
+check("an analyst can add a note to an alert", _r.status_code == 200)
+_n35 = _r.json()
+check("the author is whoever is signed in, and the text is kept as written (trimmed)",
+      _n35["author"] == "note-analyst" and _n35["kind"] == "note"
+      and _n35["body"] == "Checked the VPN logs: this was\nthe night shift, not an attacker.")
+check("a viewer can read the notes", [n["body"] for n in _vw35.get(f"/alerts/{_a35}/notes").json()] == [_n35["body"]])
+check("but not write one", _vw35.post(f"/alerts/{_a35}/notes", json={"body": "hello"}).status_code == 403)
+check("an empty note is refused", _an35.post(f"/alerts/{_a35}/notes", json={"body": "   \n "}).status_code == 400)
+check("so is one over 4,000 characters",
+      _an35.post(f"/alerts/{_a35}/notes", json={"body": "x" * 4001}).status_code == 400)
+check("and one with hidden control characters",
+      _an35.post(f"/alerts/{_a35}/notes", json={"body": "ok\x1b[2Jcleared"}).status_code == 400)
+check("a note on an alert that doesn't exist is a 404",
+      _an35.post("/alerts/0123456789abcdef/notes", json={"body": "hi"}).status_code == 404
+      and _an35.get("/alerts/../notes").status_code == 404)
+check("there is no way to edit or delete a note",
+      _an35.put(f"/alerts/{_a35}/notes", json={"body": "x"}).status_code == 405
+      and _an35.delete(f"/alerts/{_a35}/notes").status_code == 405)
+_markup35 = '<img src=x onerror="alert(1)"> **bold**'
+_an35.post(f"/alerts/{_a35}/notes", json={"body": _markup35})
+check("markup is stored as plain text, exactly as typed",
+      client.get(f"/alerts/{_a35}/notes").json()[-1]["body"] == _markup35)
+check("the alert list says how many notes each alert has",
+      next(a for a in client.get("/alerts").json() if a["id"] == _a35)["note_count"] == 2)
+
+# In the ledger, under Shadowfax's own case actor.
+_led35 = client.get("/ledger/verify").json()
+_case_evs = client.get(f"/actors/{_cases.CASE_ACTOR_ID}").json()["events"]
+check("each note is an event in the hash-chained ledger, which still verifies",
+      client.get("/ledger/head").json()["entry_count"] == _head35 + 2 and _led35["ok"] is True
+      and _case_evs[-1]["event_type"] == "case_note" and _case_evs[-1]["metadata"]["author"] == "note-analyst")
+check("nobody can post case events or write as the case actor",
+      client.post("/events", json=[{"timestamp": "2026-11-01T10:00:00", "actor_id": "someone", "actor_type": "human",
+                                    "event_type": "case_note", "target": f"alert:{_a35}",
+                                    "metadata": {"author": "admin", "body": "forged"}}]).status_code == 400
+      and client.post("/events", json=[{"timestamp": "2026-11-01T10:00:00", "actor_id": _cases.CASE_ACTOR_ID,
+                                        "actor_type": "service_account", "event_type": "login",
+                                        "target": "x"}]).status_code == 400)
+
+# Triage changes join the same timeline.
+_an35.patch(f"/alerts/{_a35}/state", json={"acknowledged": True, "assigned_to": "note-analyst"})
+_an35.patch(f"/alerts/{_a35}/state", json={"acknowledged": True})
+_tl35 = client.get(f"/alerts/{_a35}/notes").json()
+_upd35 = [n for n in _tl35 if n["kind"] == "update"]
+check("acknowledging and assigning are recorded in the case timeline, by who did it",
+      len(_upd35) == 1 and _upd35[0]["author"] == "note-analyst"
+      and _upd35[0]["changes"] == ["acknowledged", "assigned to note-analyst"])
+check("a change that changes nothing records nothing", len(_upd35) == 1)
+_an35.patch(f"/alerts/{_a35}/state", json={"acknowledged": False})
+check("reopening is recorded too",
+      client.get(f"/alerts/{_a35}/notes").json()[-1]["changes"] == ["reopened (unacknowledged)"])
+check("notes and changes come back in the order they happened",
+      [n["kind"] for n in client.get(f"/alerts/{_a35}/notes").json()] == ["note", "note", "update", "update"])
+
+# Analysts' activity is never judged as behaviour.
+for _i in range(25):
+    _an35.post(f"/alerts/{_a35}/notes", json={"body": f"busy minute {_i}"})
+# Working down the queue -- one note on each of eight alerts in a minute -- is
+# one account touching eight targets fast: exactly what lateral_movement looks
+# for, if anyone ran the detectors over it.
+_queue35 = [a["id"] for a in _alerts35 if a["id"] != _a35][:8]
+for _qid in _queue35:
+    _an35.post(f"/alerts/{_qid}/notes", json={"body": "triaged"})
+client.put("/policy", json=client.get("/policy").json())   # rescan everything
+check("analysts working down the queue raise no alerts about themselves",
+      len(_queue35) == 8 and client.get("/alerts", params={"actor_id": _cases.CASE_ACTOR_ID}).json() == [])
+
+# Notes survive a rescan: alert ids are stable.
+_pol35 = client.get("/policy").json()
+client.put("/policy", json=_pol35)
+check("notes stay attached after a policy change rescans everything",
+      next(a for a in client.get("/alerts").json() if a["id"] == _a35)["note_count"] == 27)
+
+# Incidents.
+_inc35 = next(i for i in client.get("/incidents").json() if _a35 not in i["alert_ids"])
+_inc_alert35 = _inc35["alert_ids"][0]
+_an35.post(f"/alerts/{_inc_alert35}/notes", json={"body": "First alert of the incident: confirmed malicious."})
+_r = _an35.post(f"/incidents/{_inc35['id']}/notes", json={"body": "Escalating to the IR team."})
+check("an incident can have notes of its own", _r.status_code == 200)
+_itl35 = client.get(f"/incidents/{_inc35['id']}/notes").json()
+check("its timeline also shows the notes on its alerts, labelled with the alert",
+      [n["body"] for n in _itl35] == ["First alert of the incident: confirmed malicious.", "Escalating to the IR team."]
+      and _itl35[0]["on"] and _itl35[0]["subject_kind"] == "alert" and _itl35[1]["on"] is None)
+check("the incident list counts the incident's own notes",
+      next(i for i in client.get("/incidents").json() if i["id"] == _inc35["id"])["note_count"] == 1)
+check("a note on an unknown incident is a 404",
+      _an35.post("/incidents/0123456789abcdef/notes", json={"body": "hi"}).status_code == 404
+      and client.get("/incidents/0123456789abcdef/notes").status_code == 404)
+
+# Notes are data, not monitoring: written with self-monitoring off too.
+check("self-monitoring off does not stop notes", app_module.SELF_MONITOR is False
+      and len(client.get(f"/incidents/{_inc35['id']}/notes").json()) == 2)
+
+# A must-change session can't write notes.
+_mc35 = client.post("/users", json={"username": "note-reset", "role": "analyst", "generate": True}).json()
+_mcc = TestClient(app)
+_mcc.headers["Authorization"] = "Bearer " + TestClient(app).post(
+    "/auth/login", json={"username": "note-reset", "password": _mc35["password"]}).json()["token"]
+check("a session that must change its password can't write notes",
+      _mcc.post(f"/alerts/{_a35}/notes", json={"body": "hi"}).status_code == 403)
+
+# Many analysts at once: every note lands and the ledger holds.
+def _note35(i):
+    return _an35.post(f"/alerts/{_inc_alert35}/notes", json={"body": f"parallel {i}"}).status_code
+with _cf.ThreadPoolExecutor(max_workers=12) as _pool:
+    _codes35 = list(_pool.map(_note35, range(24)))
+check("24 notes written at once all land, and the ledger still verifies",
+      _codes35.count(200) == 24 and client.get("/ledger/verify").json()["ok"] is True)
+
+# The command line.
+_code, _out, _ = run_cli(["notes", "alert", _inc_alert35, "--add", "From the CLI."])
+check("`shadowfax notes alert <id> --add` writes a note", _code == 0 and "note added by admin" in _out)
+_code, _out, _ = run_cli(["notes", "incident", _inc35["id"]])
+check("`shadowfax notes incident <id>` prints the timeline with who wrote what",
+      _code == 0 and "Escalating to the IR team." in _out and "From the CLI." in _out
+      and "admin" in _out)
+_code, _out, _ = run_cli(["notes", "alert", _a35, "--json"])
+check("and --json gives the machine form", _code == 0 and json.loads(_out)[0]["author"] == "note-analyst")
+
 print("\n== same-second events keep their order (v0.34.1) ==")
 # Timestamps go down to the second. On PostgreSQL, rows that share one came back
 # in whatever order they sat on disk, and an UPDATE moves a row to the end -- CI

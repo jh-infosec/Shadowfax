@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { SEVERITY_COLOUR, SEVERITY_ORDER } from "../constants.js";
 
-export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAssign, onExplain, canAct }) {
+export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAssign, onExplain, onNotes, canAct }) {
   const [sortKey, setSortKey] = useState("timestamp");
   const [sortDir, setSortDir] = useState("desc");
 
@@ -144,7 +144,15 @@ export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAss
                   </button>
                 )
               )}
-              {!canAct && !a.acknowledged && !a.assigned_to && (
+              {/* Case notes (v0.35): the count, or a way to start one. */}
+              {(a.note_count > 0 || canAct) && (
+                <button className={`notes-btn${a.note_count ? " has-notes" : ""}`}
+                        title="Case notes: what people checked and decided"
+                        onClick={() => onNotes(a)}>
+                  {a.note_count ? `Notes · ${a.note_count}` : "Note"}
+                </button>
+              )}
+              {!canAct && !a.acknowledged && !a.assigned_to && !a.note_count && (
                 <span className="status-none">—</span>
               )}
             </td>

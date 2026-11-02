@@ -132,6 +132,10 @@ class Cursor:
 class Connection:
     """The subset of sqlite3.Connection that db.py and app.py use."""
 
+    # BEGIN IMMEDIATE becomes an advisory lock, which may be taken again inside
+    # the transaction that holds it; db.insert_event relies on that (v0.35).
+    relock_in_transaction = True
+
     def __init__(self, url: str, serial_tables: frozenset[str], password: str | None = None):
         import psycopg
         # A password given separately (v0.34, from a file) is never written

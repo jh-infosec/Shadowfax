@@ -41,6 +41,7 @@ import assistant
 import attack
 import auth
 import bus
+import cases
 import correlate
 import db
 import detectors
@@ -61,7 +62,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.34.1"
+VERSION = "0.35.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -114,6 +115,9 @@ RESERVED_EVENT_TYPES = {
     INGEST_THROTTLED: "nothing -- Shadowfax records these itself",
     "alerts_retired": "nothing -- Shadowfax records these itself",
     "forward_failed": "nothing -- Shadowfax records these itself",
+    # v0.35: case notes and triage changes, written by the notes endpoints.
+    cases.NOTE: "POST /alerts/{alert_id}/notes or POST /incidents/{incident_id}/notes",
+    cases.UPDATE: "nothing -- Shadowfax records these itself",
 }
 
 # Recorded sign-in attempts are operational state for the throttle, not
@@ -142,7 +146,8 @@ SELF_TARGET = "shadowfax_login"
 # The platform's own actors (v0.21). Only Shadowfax writes their timelines: an
 # ingest client posting a "password_reset ... reset_by: admin" event under
 # shadowfax-auth produced an entry indistinguishable from a real one.
-RESERVED_ACTORS = frozenset({SELF_ACTOR_ID, INGEST_ACTOR_ID, forward.FORWARD_ACTOR_ID})
+RESERVED_ACTORS = frozenset({SELF_ACTOR_ID, INGEST_ACTOR_ID, forward.FORWARD_ACTOR_ID,
+                             cases.CASE_ACTOR_ID})
 
 
 def _refuse_reserved_actor(actor_id: str) -> None:
@@ -882,8 +887,12 @@ def list_alerts(
     identity: dict = Depends(require_role("viewer")),
 ):
     with db.get_conn() as conn:
-        return db.query_alerts(conn, severity, actor_type, actor_id, category,
-                               search, since, until, limit)
+        alerts = db.query_alerts(conn, severity, actor_type, actor_id, category,
+                                 search, since, until, limit)
+        counts = db.case_note_counts(conn, cases.CASE_ACTOR_ID, cases.NOTE)
+    for a in alerts:
+        a["note_count"] = counts.get(cases.subject_key("alert", a["id"]), 0)
+    return alerts
 
 
 @app.patch("/alerts/{alert_id}/state")
@@ -897,7 +906,8 @@ def update_alert_state(alert_id: str, update: AlertStateUpdate,
     from the request body.
     """
     with db.get_conn() as conn:
-        if db.get_alert(conn, alert_id) is None:
+        before = db.get_alert(conn, alert_id)
+        if before is None:
             raise HTTPException(404, f"no alert with id '{alert_id}'")
         state = db.set_alert_state(
             conn,
@@ -907,6 +917,12 @@ def update_alert_state(alert_id: str, update: AlertStateUpdate,
             assigned_to=update.assigned_to,
             note=update.note,
         )
+        # v0.35: who did what to the case, in the ledger beside the notes.
+        changes = cases.describe_state_change(before, state)
+        if changes:
+            db.insert_event(conn, cases.update_event(
+                "alert", alert_id, identity["username"], changes,
+                _naive_utc_now().isoformat()))
         conn.commit()
     bus.publish({"type": "change", "reason": "alert_state", "alert_id": alert_id})
     return state
@@ -1208,9 +1224,96 @@ def list_incidents(identity: dict = Depends(require_role("viewer"))):
     with db.get_conn() as conn:
         policy = db.get_policy(conn) or DEFAULT_POLICY
         alerts = db.query_alerts(conn, limit=100_000)
+        counts = db.case_note_counts(conn, cases.CASE_ACTOR_ID, cases.NOTE)
     window = policy.get("correlation_window_minutes", 30)
     chain_min = policy.get("attack_chain_min_stages", 3)
-    return correlate.correlate(alerts, window, chain_min)
+    incidents = correlate.correlate(alerts, window, chain_min)
+    for i in incidents:
+        i["note_count"] = counts.get(cases.subject_key("incident", i["id"]), 0)
+    return incidents
+
+
+# Case notes (v0.35)
+
+class NoteRequest(BaseModel):
+    body: str = Field(max_length=cases.MAX_NOTE_CHARS * 2)
+
+
+def _incident_and_members(conn, incident_id: str) -> tuple[dict | None, list[dict]]:
+    policy = db.get_policy(conn) or DEFAULT_POLICY
+    alerts = db.query_alerts(conn, limit=100_000)
+    incidents = correlate.correlate(alerts, policy.get("correlation_window_minutes", 30),
+                                    policy.get("attack_chain_min_stages", 3))
+    incident = next((i for i in incidents if i["id"] == incident_id), None)
+    if incident is None:
+        return None, []
+    by_id = {a["id"]: a for a in alerts}
+    return incident, [by_id[aid] for aid in incident["alert_ids"] if aid in by_id]
+
+
+def _check_subject_id(subject_id: str) -> None:
+    if not cases.valid_subject_id(subject_id):
+        raise HTTPException(404, "no such alert or incident")
+
+
+def _add_note(kind: str, subject_id: str, req: NoteRequest, identity: dict) -> dict:
+    body, problem = cases.clean_body(req.body)
+    if problem:
+        raise HTTPException(400, problem)
+    with db.get_conn() as conn:
+        if kind == "alert":
+            if db.get_alert(conn, subject_id) is None:
+                raise HTTPException(404, f"no alert with id '{subject_id}'")
+        elif _incident_and_members(conn, subject_id)[0] is None:
+            raise HTTPException(404, f"no incident with id '{subject_id}'")
+        event = cases.note_event(kind, subject_id, identity["username"], body,
+                                 _naive_utc_now().isoformat())
+        event_id = db.insert_event(conn, event)
+        conn.commit()
+    bus.publish({"type": "change", "reason": "note", "subject": cases.subject_key(kind, subject_id)})
+    return cases.timeline([{**event, "id": event_id}])[0]
+
+
+@app.get("/alerts/{alert_id}/notes")
+def alert_notes(alert_id: str, identity: dict = Depends(require_role("viewer"))):
+    """The case timeline for one alert: notes and triage changes, oldest first.
+    Readable even after the alert itself has been retired, because what people
+    wrote about it is still part of the record."""
+    _check_subject_id(alert_id)
+    with db.get_conn() as conn:
+        events = db.case_events(conn, cases.CASE_ACTOR_ID, [cases.subject_key("alert", alert_id)])
+    return cases.timeline(events)
+
+
+@app.post("/alerts/{alert_id}/notes")
+def add_alert_note(alert_id: str, req: NoteRequest,
+                   identity: dict = Depends(require_role("analyst"))):
+    """Add a note to an alert. Append-only: a correction is a new note."""
+    _check_subject_id(alert_id)
+    return _add_note("alert", alert_id, req, identity)
+
+
+@app.get("/incidents/{incident_id}/notes")
+def incident_notes(incident_id: str, identity: dict = Depends(require_role("viewer"))):
+    """An incident's case timeline: notes on the incident itself, plus the notes
+    and triage changes on each of its alerts, labelled with the alert."""
+    _check_subject_id(incident_id)
+    with db.get_conn() as conn:
+        incident, members = _incident_and_members(conn, incident_id)
+        labels = {cases.subject_key("alert", a["id"]): f"{a['severity']} {a['category']}"
+                  for a in members}
+        targets = [cases.subject_key("incident", incident_id), *labels]
+        events = db.case_events(conn, cases.CASE_ACTOR_ID, targets)
+    if incident is None and not events:
+        raise HTTPException(404, f"no incident with id '{incident_id}'")
+    return cases.timeline(events, labels)
+
+
+@app.post("/incidents/{incident_id}/notes")
+def add_incident_note(incident_id: str, req: NoteRequest,
+                      identity: dict = Depends(require_role("analyst"))):
+    _check_subject_id(incident_id)
+    return _add_note("incident", incident_id, req, identity)
 
 
 @app.get("/incidents/{incident_id}")

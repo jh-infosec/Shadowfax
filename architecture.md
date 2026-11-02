@@ -414,6 +414,19 @@ last-admin check and the two-factor step are still read and written by one
 writer at a time. There is one set of queries; the API suite runs against both
 databases.
 
+#### cases.py
+
+Case notes (v0.35). Pure helpers: `clean_body` (trim, 4,000 characters, no
+control characters other than newline and tab), `note_event` and
+`update_event` (the events written under the `shadowfax-case` actor, targeted
+`alert:<id>` or `incident:<id>`), `describe_state_change` (what a triage
+change actually did, in words, or nothing) and `timeline` (entries for the
+dashboard and CLI, oldest first). Notes are events rather than rows in a table
+of their own, so they are hash-chained, append-only and covered by
+`/ledger/verify` with no extra code. The detector loop skips the case actor
+entirely: an analyst noting eight alerts in a minute would otherwise look like
+lateral movement.
+
 #### forward.py
 
 Alert forwarding (v0.31). `Config.from_env()` reads the destinations (refusing
@@ -1224,7 +1237,7 @@ tickets.py              limits.py               manifest.py
 ratelimit.py            timeutil.py             recover.py
 totp.py                 subjects.py             profile_draft.py
 forward.py              screenshots.py          docs/screenshots/*.png
-pgcompat.py
+pgcompat.py             cases.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml      docker-compose.postgres.yml             Caddyfile
 docs/deployment.md

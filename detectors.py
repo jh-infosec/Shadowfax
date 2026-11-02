@@ -60,7 +60,9 @@ AUTH_ACTOR_ID = "shadowfax-auth"
 FORWARD_ACTOR_ID = "shadowfax-forward"
 # Shadowfax's own actors are quiet for weeks by design; going quiet and coming
 # back is not a dormancy signal for them, whatever an older policy lists.
-PLATFORM_ACTORS = frozenset({AUTH_ACTOR_ID, INGEST_ACTOR_ID, FORWARD_ACTOR_ID})
+# v0.35: case notes and triage changes (cases.CASE_ACTOR_ID).
+CASE_ACTOR_ID = "shadowfax-case"
+PLATFORM_ACTORS = frozenset({AUTH_ACTOR_ID, INGEST_ACTOR_ID, FORWARD_ACTOR_ID, CASE_ACTOR_ID})
 
 
 def external_alert_identity(tool: str, finding_id: str, actor_id: str = "") -> str:
@@ -316,6 +318,11 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 "undeclared_agent", permissions.undeclared_message(e["actor_id"])))
 
     for e in events:
+        # Case notes (v0.35) are what analysts wrote about alerts, not behaviour
+        # to judge: twenty notes in a busy minute is a team at work, not a
+        # rate anomaly, and a note at 3am is not off-hours access.
+        if e["actor_id"] == CASE_ACTOR_ID:
+            continue
         ts = timeutil.parse(e["timestamp"])
         meta = e.get("metadata") or {}
 

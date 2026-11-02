@@ -141,7 +141,9 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .attack-badge:hover { border-color: var(--accent); filter: brightness(1.15); }
 
 /* Per-alert analyst state: acknowledge / assign controls in the Status column */
-.status-cell { white-space: nowrap; }
+/* v0.35: wraps, so ack, assignee and notes never run off the table's edge. */
+.status-cell { white-space: normal; min-width: 150px; max-width: 220px; line-height: 2; }
+.status-cell > * { white-space: nowrap; }
 .ack-btn, .assign-btn {
   font-size: 10.5px; padding: 2px 8px; border-radius: 4px;
   background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
@@ -705,3 +707,38 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   background: var(--bg); border: 1px solid var(--border-soft); border-radius: 5px;
   padding: 10px; font-family: var(--mono); font-size: 11.5px; overflow-x: auto; margin: 0;
 }
+
+/* --- Case notes (v0.35) --- */
+.notes-btn {
+  margin-left: 6px; font-size: 10.5px; padding: 2px 8px; border-radius: 4px;
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.notes-btn:hover { border-color: var(--accent); color: var(--accent); }
+.notes-btn.has-notes { color: var(--accent); border-color: var(--accent); text-transform: none; letter-spacing: 0; }
+.notes-tag { margin-left: 6px; font-size: 10.5px; color: var(--accent); }
+.notes-modal { width: min(640px, 94vw); }
+.case-notes { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 12px; }
+.case-notes-title {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); margin-bottom: 8px;
+}
+.case-empty { font-size: 12.5px; color: var(--muted); margin-bottom: 10px; }
+.case-timeline { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.case-entry { border-left: 2px solid var(--border); padding: 2px 0 2px 10px; }
+.case-entry.note { border-left-color: var(--accent); }
+.case-entry-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 11.5px; }
+.case-author { font-weight: 700; color: var(--text); }
+.case-time { font-family: var(--mono); color: var(--muted); }
+.case-on { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 6px; }
+.case-body { font-size: 13px; color: var(--text); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
+.case-change { font-size: 12px; color: var(--muted); font-style: italic; margin-top: 2px; }
+.case-compose { display: flex; flex-direction: column; gap: 6px; }
+.case-input {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 10px; font: inherit; font-size: 13px;
+}
+.case-input:focus { outline: none; border-color: var(--accent); }
+.case-compose-foot { display: flex; justify-content: space-between; align-items: center; }
+.case-count { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }

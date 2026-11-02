@@ -87,6 +87,25 @@ def main(argv: list[str] | None = None) -> int:
     if not _api(args.url, "GET", "/api-keys", None, token):
         _api(args.url, "POST", "/api-keys", {"label": "ci-harness"}, token)
         _api(args.url, "POST", "/api-keys", {"label": "recon-agent fleet"}, token)
+    # v0.35: a short case on the worst alert -- an analyst's note, the admin
+    # taking it, and the admin's reply -- so the notes screenshot shows a team.
+    if "a.reyes" not in existing:
+        _api(args.url, "POST", "/users", {"username": "a.reyes", "password": "analyst-pass-2026",
+                                          "role": "analyst"}, token)
+    analyst = _api(args.url, "POST", "/auth/login",
+                   {"username": "a.reyes", "password": "analyst-pass-2026"})["token"]
+    case = next(a for a in _api(args.url, "GET", "/alerts?actor_id=recon-agent-3", None, token)
+                if a["category"] == "permission_violation")
+    if not _api(args.url, "GET", f"/alerts/{case['id']}/notes", None, token):
+        _api(args.url, "POST", f"/alerts/{case['id']}/notes", {"body": (
+            "Pulled the agent's run log. The nc call followed a page it fetched during recon, "
+            "which told it to open a reverse shell. Looks like prompt injection, not the operator.")},
+            analyst)
+        _api(args.url, "PATCH", f"/alerts/{case['id']}/state",
+             {"acknowledged": True, "assigned_to": "a.reyes"}, token)
+        _api(args.url, "POST", f"/alerts/{case['id']}/notes", {"body": (
+            "Agreed. Removing nc and bash from its tools and re-running the engagement "
+            "under the drafted profile.")}, token)
     OUT.mkdir(parents=True, exist_ok=True)
     shots: list[str] = []
 
@@ -126,6 +145,13 @@ def main(argv: list[str] | None = None) -> int:
         page.wait_for_timeout(400)
         save(page.locator(".draft-modal"), "profile-draft")
         page.keyboard.press("Escape")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
+        page.locator(".table-wrap tbody tr", has_text=case["message"][:40]).first \
+            .locator(".notes-btn").click()
+        page.wait_for_selector(".notes-modal .case-entry.update", timeout=10000)
+        page.wait_for_timeout(400)
+        save(page.locator(".notes-modal"), "case-notes")
         page.keyboard.press("Escape")
         search.fill("")
         page.wait_for_timeout(800)

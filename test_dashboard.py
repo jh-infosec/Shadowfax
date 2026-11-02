@@ -121,6 +121,7 @@ def run(url: str, headed: bool) -> int:
             _run_reset_checks(browser, url)
             _run_two_factor_checks(browser, url)
             _run_rotation_checks(browser, url)
+            _run_case_notes_checks(browser, url)
         except Exception as exc:
             # A component that throws on mount takes the whole page with it, and
             # the first thing to notice is a selector that never appears. Report
@@ -471,6 +472,62 @@ def _api(url: str, method: str, path: str, body=None, token: str | None = None):
         method=method)
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read())
+
+
+def _run_case_notes_checks(browser, url: str) -> None:
+    """Case notes (v0.35): write one on an alert from the table, see a
+    colleague's arrive live in a second tab, check markup shows as text, and
+    add one to an incident."""
+    import secrets
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    context = browser.new_context(viewport={"width": 1400, "height": 900})
+    page = context.new_page()
+    page.goto(url, wait_until="networkidle")
+    page.fill('input[autocomplete="username"]', USERNAME)
+    page.fill('input[type="password"]', PASSWORD)
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".table-wrap tbody tr", timeout=15000)
+
+    page.locator(".table-wrap tbody tr").first.locator(".notes-btn").click()
+    page.wait_for_selector(".notes-modal .case-notes", timeout=10000)
+    message = page.inner_text(".notes-modal .explain-modal-msg").strip()
+    alert_id = next(a["id"] for a in _api(url, "GET", "/alerts?limit=500", None, admin)
+                    if a["message"] == message)
+    text = f"Checked with the owner, expected maintenance ({secrets.token_hex(3)})"
+    page.fill(".notes-modal .case-input", text)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    check("Escape does not throw away a half-written note",
+          page.locator(".notes-modal").count() == 1 and page.input_value(".notes-modal .case-input") == text)
+    page.click(".notes-modal button:has-text('Add note')")
+    page.wait_for_selector(f".notes-modal .case-body:has-text('{text}')", timeout=10000)
+    entry = page.locator(".notes-modal .case-entry.note").last
+    check("a note added from the table appears with who wrote it",
+          text in entry.inner_text() and USERNAME in entry.locator(".case-author").inner_text())
+    stored = _api(url, "GET", f"/alerts/{alert_id}/notes", None, admin)
+    check("and the server has it, under the signed-in user",
+          stored and stored[-1]["body"] == text and stored[-1]["author"] == USERNAME)
+
+    # A colleague writes while this one is open: it appears without reopening.
+    markup = "<b>not bold</b> <img src=x onerror=alert(1)>"
+    _api(url, "POST", f"/alerts/{alert_id}/notes", {"body": markup}, admin)
+    page.wait_for_timeout(2500)
+    check("a note someone else writes appears live, shown as text, not markup",
+          markup in page.locator(".notes-modal .case-entry.note").last.inner_text()
+          and page.locator(".notes-modal .case-body b").count() == 0)
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(1500)
+    check("the alert's row now shows how many notes it has",
+          page.locator(".notes-btn.has-notes").count() >= 1)
+
+    page.click("text=Incidents")
+    page.wait_for_selector(".incident-detail .case-notes", timeout=10000)
+    inc_text = f"Escalated to IR ({secrets.token_hex(3)})"
+    page.fill(".incident-detail .case-input", inc_text)
+    page.click(".incident-detail button:has-text('Add note')")
+    page.wait_for_selector(f".incident-detail .case-body:has-text('{inc_text}')", timeout=10000)
+    check("an incident can be noted from the incidents drawer", True)
+    context.close()
 
 
 def _run_rotation_checks(browser, url: str) -> None:
