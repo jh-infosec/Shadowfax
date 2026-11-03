@@ -53,6 +53,12 @@ CATEGORY_TO_TECHNIQUES: dict[str, list[str]] = {
     "mfa_removed": ["T1556"],
     # v0.33: a replaced session token presented again -- someone holds a copy.
     "session_token_reuse": ["T1550"],
+    # v0.36: prompt injection. These are MITRE ATLAS techniques (AML.*), the
+    # AI-specific counterpart to ATT&CK; ATLAS's tactic names match ATT&CK's,
+    # so they sit on the same kill chain.
+    "prompt_injection": ["AML.T0051.001"],
+    "injection_followed": ["AML.T0051.001", "AML.T0053"],
+    "tool_definition_changed": ["AML.T0110"],
     # destructive_action: technique comes from the matched policy rule, not here.
     # allowlist_violation, blocked_target_access, rate_anomaly: no mapping.
     # permission_violation, undeclared_agent (v0.16): no mapping either. They

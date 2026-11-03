@@ -144,7 +144,9 @@ export default function IncidentsDrawer({ onClose, canWrite }) {
                   {copied ? "Report copied ✓" : "Copy report (Markdown)"}
                 </button>
 
-                <CaseNotes key={selectedId} kind="incident" id={selectedId} canWrite={canWrite} />
+                {/* Its own key: two siblings keyed alike (this and the Explanation
+                    above) left a stale copy behind when switching incidents. */}
+                <CaseNotes key={`notes-${selectedId}`} kind="incident" id={selectedId} canWrite={canWrite} />
               </>
             )}
           </div>

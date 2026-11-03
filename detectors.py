@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import attack
 import envelope
+import injection
 import manifest
 import permissions
 import timeutil
@@ -51,6 +52,9 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "forwarding_failed",
     # v0.33: a session token that had been replaced, presented again.
     "session_token_reuse",
+    # v0.36: prompt injection in what an agent reads, an agent acting on it,
+    # and a tool rewritten under the same name.
+    "prompt_injection", "injection_followed", "tool_definition_changed",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
@@ -149,7 +153,8 @@ def _external_alert(event: dict, meta: dict) -> dict | None:
 
 
 def _mk_alert(event: dict, severity: str, category: str, message: str,
-              discriminator: str = "", technique_ids: list[str] | None = None) -> dict:
+              discriminator: str = "", technique_ids: list[str] | None = None,
+              evidence: str | None = None) -> dict:
     # ATT&CK techniques: use the ids the detector supplied (destructive rules
     # carry their own), otherwise fall back to the category's mapping. Ids are
     # resolved against the shared registry; unknown ones are dropped.
@@ -166,6 +171,11 @@ def _mk_alert(event: dict, severity: str, category: str, message: str,
         "message": message,
         "target": event["target"],
         "attack": techniques,
+        # v0.36: a quote of what triggered it, when that is text the agent read
+        # (an injected instruction). Kept out of the message on purpose: the
+        # message is Shadowfax's own words, and the investigation assistant
+        # fences evidence as untrusted.
+        **({"evidence": evidence} if evidence else {}),
     }
 
 
@@ -305,6 +315,15 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
     current_manifest: tuple[str, ...] | None = None
     excess_reported: set[str] = set()
     unlisted_reported: set[str] = set()
+    # Prompt injection (v0.36): what the agent itself had used before reading
+    # anything (its own targets, URLs, paths); content that carried injected
+    # instructions, with the indicators in it the agent hadn't used yet; the
+    # latest fingerprint of each tool's definition; tools already reported.
+    own_indicators: set[str] = set()
+    injected: list[tuple[dict, set[str], str, datetime]] = []
+    tool_definitions: dict[str, str] = {}
+    poisoned_reported: set[str] = set()
+    injection_window = timedelta(minutes=policy.get("prompt_injection_window_minutes", 60))
 
     def report_undeclared(e: dict) -> None:
         nonlocal undeclared_reported
@@ -446,6 +465,43 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
         # action, so like a finding it skips the behavioural heuristics below --
         # an agent restarting forty times would otherwise trip rate_anomaly on
         # its own paperwork.
+        # What came back to the agent (v0.36). A result is not an action: the
+        # behavioural detectors and the permission checks judge the call that
+        # fetched it, not the content. Here the content is read for
+        # instructions aimed at the agent.
+        if e["event_type"] == injection.EVENT_TYPE:
+            text = injection.content_of(e)
+            found = injection.scan(text)
+            if found:
+                hidden = any(f["marker"] == "hidden text" for f in found)
+                tool = (meta.get("tool") or "a tool")
+                alerts.append(_mk_alert(e, "high" if hidden else "medium", "prompt_injection",
+                    f"content returned to the agent by {tool} from "
+                    f"{injection.source_of(e)[:120] or 'an unnamed source'} contains "
+                    f"instructions aimed at an AI ({injection.summary(found)})",
+                    evidence=injection.evidence(found)[:400]))
+                fresh = injection.planted(injection.indicators(text), own_indicators)
+                injected.append((e, fresh, injection.summary(found), ts))
+            continue
+
+        # Acting on it (v0.36): a call that uses something which first appeared
+        # in injected content. Checked before the call's own indicators join
+        # what the agent is known to have used.
+        if e["event_type"] == "tool_call":
+            text = injection.call_text(e)
+            for src, fresh, markers, src_ts in reversed(injected):
+                if ts - src_ts > injection_window:
+                    continue
+                hit = next((i for i in sorted(fresh, key=len, reverse=True) if i in text), None)
+                if hit:
+                    alerts.append(_mk_alert(e, "critical", "injection_followed",
+                        f"called {meta.get('tool') or 'a tool'} with '{hit[:120]}', which first "
+                        f"appeared in content returned to it at {src['timestamp']} that contained "
+                        f"instructions aimed at an AI ({markers}); the agent looks to be "
+                        f"following instructions planted in what it read"))
+                    break
+            own_indicators.update(injection.indicators(text))
+
         if e["event_type"] == manifest.EVENT_TYPE:
             tools = manifest.tools_of(e)
             if tools is None:
@@ -470,6 +526,25 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                     alerts.append(_mk_alert(e, "low", "capability_drift",
                         f"manifest added {len(added)} tool(s) since the previous one: "
                         f"{manifest.listing(added)}"))
+            # Tool poisoning (v0.36): same name, new definition. Compared with
+            # the last fingerprint seen for that tool, so a tool dropped from
+            # one manifest and brought back rewritten is still caught.
+            definitions = manifest.definitions_of(e)
+            for name in sorted(definitions):
+                before = tool_definitions.get(name)
+                if before is not None and before != definitions[name]:
+                    alerts.append(_mk_alert(e, "high", "tool_definition_changed",
+                        f"tool '{name}' kept its name but its description or input schema "
+                        f"changed since an earlier manifest; check the new definition before "
+                        f"trusting the agent's use of it", discriminator=name))
+            tool_definitions.update(definitions)
+            for name, markers in sorted(manifest.poisoned_of(e).items()):
+                if name not in poisoned_reported:
+                    poisoned_reported.add(name)
+                    alerts.append(_mk_alert(e, "high", "prompt_injection",
+                        f"the definition of tool '{name}' contains instructions aimed at "
+                        f"the agent ({', '.join(markers)}); a tool's description is read "
+                        f"by the model on every call", discriminator=f"tool:{name}"))
             current_manifest = tools
             unlisted_reported.clear()
             continue

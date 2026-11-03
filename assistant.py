@@ -146,6 +146,11 @@ def build_alert_brief(alert: dict[str, Any], events: list[dict[str, Any]]) -> di
             "emitter_verified_this": bool(alert.get("validated")),
             "emitter_evidence": alert.get("evidence")}
            if alert.get("source_tool") else {}),
+        # v0.36: a native alert's evidence is a quote of text the agent read,
+        # such as an injected instruction. It is about to be shown to a model,
+        # which is precisely what it was written to manipulate.
+        **({"quoted_content": alert["evidence"]}
+           if alert.get("evidence") and not alert.get("source_tool") else {}),
     }
 
 
@@ -255,6 +260,8 @@ def _untrusted_fields(brief: dict[str, Any]) -> list[str]:
     # other field Shadowfax did not produce itself.
     if brief.get("emitter_evidence"):
         out.append(str(brief["emitter_evidence"]))
+    if brief.get("quoted_content"):
+        out.append(str(brief["quoted_content"]))
     # de-duplicate, preserve order
     seen: set[str] = set()
     uniq: list[str] = []

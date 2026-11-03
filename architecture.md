@@ -395,6 +395,10 @@ latest manifest assessed, plus what was added and removed. In the detector a
 manifest event, like a finding, skips the behavioural heuristics and the
 permission target check -- it is a declaration, not an action. Excess tools are
 reported once each across manifests; unlisted calls once per tool per manifest.
+Since v0.36 each tool's description and input schema are also fingerprinted
+and scanned with `injection.scan`, so a tool that keeps its name but changes
+its definition raises `tool_definition_changed`, and one whose description
+carries instructions for the model raises `prompt_injection`.
 
 #### pgcompat.py
 
@@ -426,6 +430,22 @@ of their own, so they are hash-chained, append-only and covered by
 `/ledger/verify` with no extra code. The detector loop skips the case actor
 entirely: an analyst noting eight alerts in a minute would otherwise look like
 lateral movement.
+
+#### injection.py
+
+Prompt injection (v0.36). Pure helpers the detector and `manifest.py` share:
+`scan` finds instruction-like text addressed to a model (six narrow marker
+patterns, not words like "password") and hidden text (Unicode tag characters,
+decoded, or a run of zero-width characters), and scans the decoded text too;
+`indicators` pulls out the URLs, hosts, IPv4 addresses and file paths an agent
+would have to reuse to act on the content; `planted` keeps only those the agent
+had not already used, ignoring links back to a host it was already working
+with. In the detector a `tool_result` event is scanned and remembered, never
+judged as an action; a later `tool_call` that uses a planted indicator within
+`prompt_injection_window_minutes` (60 by default) raises `injection_followed`.
+The follow-through check is the stronger signal, because however an
+instruction is worded, an agent acting on it has to use what it was given.
+Alerts quote the evidence, and `assistant.py` fences that quote as untrusted.
 
 #### forward.py
 
@@ -1237,7 +1257,8 @@ tickets.py              limits.py               manifest.py
 ratelimit.py            timeutil.py             recover.py
 totp.py                 subjects.py             profile_draft.py
 forward.py              screenshots.py          docs/screenshots/*.png
-pgcompat.py             cases.py
+pgcompat.py             cases.py                injection.py
+demo_gif.py             docs/demo.gif
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml      docker-compose.postgres.yml             Caddyfile
 docs/deployment.md

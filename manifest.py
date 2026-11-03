@@ -45,6 +45,11 @@ up. Only names are kept -- descriptions and schemas are dropped, because the
 comparison needs nothing else and a schema is where a long injected instruction
 would hide.
 
+v0.36 keeps two things about them, still never the text itself: a fingerprint
+of each tool's description and schema, so a tool that keeps its name but is
+quietly rewritten is caught (`tool_definition_changed`, tool poisoning); and
+the names of any prompt-injection markers found in them (see injection.py).
+
 Validation is strict, as for the findings envelope: an item that is not one of
 those shapes rejects the whole manifest, naming the path. Taking the tools we
 recognise and dropping the rest would turn "we could not parse this" into "the
@@ -65,6 +70,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+import injection
 import permissions
 
 EVENT_TYPE = "capability_manifest"
@@ -93,11 +99,17 @@ class Manifest:
     tools: tuple[str, ...]          # sorted, unique
     servers: tuple[str, ...]        # MCP servers named, sorted
     observed_at: str | None
+    # v0.36: tool name -> fingerprint of its description and schema, for tools
+    # that have either; and tools whose definitions carry injection markers.
+    definitions: tuple[tuple[str, str], ...] = ()
+    poisoned: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     @property
     def digest(self) -> str:
-        """Identifies the tool set, so an unchanged manifest is recognised."""
-        return hashlib.sha256("\n".join(self.tools).encode()).hexdigest()[:16]
+        """Identifies the tool set and its definitions, so an unchanged manifest
+        is recognised and a rewritten tool is not."""
+        parts = list(self.tools) + [f"{n}={fp}" for n, fp in self.definitions]
+        return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
 # -- parsing ---------------------------------------------------------------------
@@ -124,6 +136,30 @@ def _tool_name(item: Any, path: str) -> str:
     return name
 
 
+def _tool_definition(item: Any) -> tuple[str, Any]:
+    """(description, schema) for a tool object; ("", None) for a bare name."""
+    if not isinstance(item, dict):
+        return "", None
+    if item.get("type") == "function" and isinstance(item.get("function"), dict):
+        fn = item["function"]
+        return str(fn.get("description") or ""), fn.get("parameters")
+    return (str(item.get("description") or ""),
+            item.get("input_schema", item.get("inputSchema")))
+
+
+def _definition_facts(name: str, item: Any, fingerprints: dict[str, str],
+                      poisoned: dict[str, tuple[str, ...]]) -> None:
+    description, schema = _tool_definition(item)
+    if not description and schema is None:
+        return
+    canonical = json.dumps({"description": description, "schema": schema},
+                           sort_keys=True, default=str)
+    fingerprints[name] = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    found = injection.scan(description + "\n" + json.dumps(schema, default=str))
+    if found:
+        poisoned[name] = tuple(f["marker"] for f in found)
+
+
 def _tool_list(value: Any, path: str) -> list[Any]:
     # Accept a tools/list result ({"tools": [...]}) or the bare array.
     if isinstance(value, dict) and set(value) <= {"tools", "nextCursor"} and "tools" in value:
@@ -144,8 +180,12 @@ def parse(doc: Any) -> Manifest:
         raise ManifestError("needs \"tools\", \"mcp_servers\", or both (either may be empty)")
 
     names: set[str] = set()
+    fingerprints: dict[str, str] = {}
+    poisoned: dict[str, tuple[str, ...]] = {}
     for i, item in enumerate(_tool_list(doc.get("tools", []), "tools")):
-        names.add(_tool_name(item, f"tools[{i}]"))
+        name = _tool_name(item, f"tools[{i}]")
+        names.add(name)
+        _definition_facts(name, item, fingerprints, poisoned)
 
     servers = doc.get("mcp_servers", {})
     if not isinstance(servers, dict):
@@ -156,7 +196,9 @@ def parse(doc: Any) -> Manifest:
             raise ManifestError("a server name must be 1-64 letters, digits, '.', '-' or "
                                 "'_', and may not contain '__' (the namespace separator)", where)
         for i, item in enumerate(_tool_list(listing, where)):
-            names.add(f"mcp__{server}__{_tool_name(item, f'{where}[{i}]')}")
+            name = f"mcp__{server}__{_tool_name(item, f'{where}[{i}]')}"
+            names.add(name)
+            _definition_facts(name, item, fingerprints, poisoned)
 
     if len(names) > MAX_TOOLS:
         raise ManifestError(f"{len(names):,} tools; a manifest may list at most {MAX_TOOLS:,}")
@@ -170,7 +212,8 @@ def parse(doc: Any) -> Manifest:
         except ValueError:
             raise ManifestError("must be an ISO 8601 timestamp", "observed_at")
 
-    return Manifest(tuple(sorted(names)), tuple(sorted(servers)), observed)
+    return Manifest(tuple(sorted(names)), tuple(sorted(servers)), observed,
+                    tuple(sorted(fingerprints.items())), tuple(sorted(poisoned.items())))
 
 
 def to_event(manifest: Manifest, actor_id: str, actor_type: str,
@@ -192,8 +235,25 @@ def to_event(manifest: Manifest, actor_id: str, actor_type: str,
         # Read on the timeline as "capability_manifest -> 4 configured tools".
         "target": f"{len(manifest.tools)} configured tool{'' if len(manifest.tools) == 1 else 's'}",
         "metadata": {"tools": list(manifest.tools), "mcp_servers": list(manifest.servers),
-                     "digest": manifest.digest},
+                     "digest": manifest.digest,
+                     # v0.36: fingerprints and marker names only, never the text.
+                     "definitions": dict(manifest.definitions),
+                     "poisoned": {name: list(m) for name, m in manifest.poisoned}},
     }
+
+
+def definitions_of(event: dict[str, Any]) -> dict[str, str]:
+    """Tool name -> definition fingerprint, from a stored manifest event."""
+    defs = (event.get("metadata") or {}).get("definitions")
+    return {k: v for k, v in defs.items() if isinstance(k, str) and isinstance(v, str)} \
+        if isinstance(defs, dict) else {}
+
+
+def poisoned_of(event: dict[str, Any]) -> dict[str, list[str]]:
+    """Tool name -> injection markers found in its definition."""
+    found = (event.get("metadata") or {}).get("poisoned")
+    return {k: [str(m) for m in v] for k, v in found.items() if isinstance(v, list)} \
+        if isinstance(found, dict) else {}
 
 
 def tools_of(event: dict[str, Any]) -> tuple[str, ...] | None:

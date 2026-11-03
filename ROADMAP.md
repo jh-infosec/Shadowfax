@@ -273,7 +273,9 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 - [x] Screenshots in the README (`v0.30.0`), for people who will not run
       anything: seven, all produced by `screenshots.py` from a real instance
       after the replay, so they are regenerated rather than redrawn.
-- [ ] An animated capture of the replay itself, alerts arriving live.
+- [x] An animated capture of the replay itself, alerts arriving live
+      (`v0.36.0`): `demo_gif.py` records `docs/demo.gif`, the first thing in
+      the README.
 
 ---
 
@@ -386,3 +388,7 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       Shadowfax and PostgreSQL with a generated database password, Caddy adds
       HTTPS, and `docs/deployment.md` covers backups, ledger anchoring and
       upgrades. CI runs it the way the guide does.
+- [x] Prompt-injection detection (`v0.36.0`): instructions aimed at an AI in
+      what a tool returned, the agent then using what that content planted,
+      and tool definitions that change or carry instructions. Mapped to MITRE
+      ATLAS.

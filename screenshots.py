@@ -127,8 +127,9 @@ def main(argv: list[str] | None = None) -> int:
         save(page, "dashboard")
 
         page.click("text=Incidents")
+        page.wait_for_selector(".drawer .incident-row", timeout=10000)
+        page.locator(".incident-row", has_text="demo-agent-1").first.click()
         page.wait_for_selector(".drawer .kill-chain", timeout=10000)
-        page.locator(".drawer li, .incident-row, .drawer tr").first.click()
         page.wait_for_timeout(800)
         save(page, "incident-kill-chain")
         page.click(".drawer-close")

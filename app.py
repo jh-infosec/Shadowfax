@@ -62,7 +62,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.35.0"
+VERSION = "0.36.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -1171,7 +1171,8 @@ def post_manifest(agent_id: str, doc: dict[str, Any], response: Response,
         "profile": resolution.name,
         "excess": [t for t in assessed if t["severity"]],
         "alerts": _alerts_for(identity, [a for a in alerts if a["category"] in
-                   ("excess_capability", "capability_drift", "undeclared_agent")]),
+                   ("excess_capability", "capability_drift", "undeclared_agent",
+                    "tool_definition_changed", "prompt_injection")]),
     }
 
 

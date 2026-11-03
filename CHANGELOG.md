@@ -1,5 +1,55 @@
 # Changelog
 
+## Version 0.36.0
+
+Prompt-injection detection, and a demo GIF at the top of the README.
+
+### What's new
+
+- **Instructions hidden in what an agent reads.** Agents can now report what a
+  tool gave back to them as a `tool_result` event (the page it fetched, the
+  file it opened, the email it read). If that content has text aimed at an AI
+  rather than a person ("ignore your previous instructions", "note to the AI
+  assistant", a fake system prompt) or invisible Unicode tag characters
+  smuggling text in, Shadowfax raises `prompt_injection`. Hidden text is
+  decoded and quoted in the alert so you can read what the agent was told.
+- **Catching an agent that obeys.** If, within an hour of reading injected
+  content, the agent calls a tool with a URL, host, IP address or file path
+  that first appeared in that content, Shadowfax raises `injection_followed`
+  at critical. This is the stronger signal: however the instruction was worded,
+  acting on it means using what it supplied.
+- **Tool poisoning.** Agent manifests now record a fingerprint of each tool's
+  description and input schema. A tool that keeps its name but changes its
+  definition raises `tool_definition_changed`, and a tool whose description
+  carries instructions for the model raises `prompt_injection`.
+- **MITRE ATLAS.** The three new alerts map to ATLAS techniques AML.T0051.001
+  (indirect prompt injection), AML.T0053 (AI agent tool invocation) and
+  AML.T0110 (AI agent tool poisoning), checked against ATLAS 2026.10. They
+  sit in the same kill chain as the ATT&CK techniques.
+- **The assistant treats quoted content as untrusted.** When it explains a
+  prompt-injection alert, the quoted text is fenced off as data, so the
+  injection can't steer the explanation.
+- **A new act in the demo.** A research agent reads a poisoned web page, then
+  sends data to the address the page planted, and its search tool is quietly
+  rewritten. The demo now has four acts and checks 15 expectations.
+- **A demo GIF.** The README now opens with the scripted attack playing out on
+  the live dashboard. `python demo_gif.py` records it again (it needs ffmpeg).
+- Shadowfax now has 32 detector categories.
+
+### Fixed
+
+- Switching between incidents could leave two notes panels on screen, because
+  two parts of the drawer shared a React key. Each part now has its own key,
+  and a browser test switches between incidents to check.
+
+### Tested
+
+- 952 API checks, on SQLite and on PostgreSQL set up like CI. The new ones
+  cover the detection end to end, a harmless page that mentions the same
+  phrases, an agent that acts too late to count, hidden text in an email, and
+  poisoned and rewritten tool definitions.
+- 69 browser checks.
+
 ## Version 0.35.0
 
 Case notes, so a team can work an investigation together.

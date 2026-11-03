@@ -527,6 +527,17 @@ def _run_case_notes_checks(browser, url: str) -> None:
     page.click(".incident-detail button:has-text('Add note')")
     page.wait_for_selector(f".incident-detail .case-body:has-text('{inc_text}')", timeout=10000)
     check("an incident can be noted from the incidents drawer", True)
+    # Switching incidents must swap the panels, not leave the last one's behind.
+    rows = page.locator(".incident-row")
+    if rows.count() > 1:
+        rows.nth(1).click()
+        page.wait_for_timeout(1200)
+        rows.nth(0).click()
+        page.wait_for_timeout(1200)
+    check("switching between incidents leaves exactly one explain button and one notes panel",
+          page.locator(".incident-detail button:has-text('Explain this incident')").count() == 1
+          and page.locator(".incident-detail .case-notes").count() == 1
+          and page.locator(f".incident-detail .case-body:has-text('{inc_text}')").count() == 1)
     context.close()
 
 
