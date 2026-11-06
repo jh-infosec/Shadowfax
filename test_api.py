@@ -1535,8 +1535,11 @@ check("docker compose, for local use, still chooses its credentials explicitly",
 _pkg_version = json.loads(_P("frontend/package.json").read_text(encoding="utf-8"))["version"]
 _cl_version = _re.search(r"^## Version (\S+)", _P("CHANGELOG.md").read_text(encoding="utf-8"),
                          _re.M).group(1)
-check("the API, the dashboard and the changelog state the same version",
-      app_module.VERSION == _pkg_version == _cl_version)
+_desk_version = json.loads(_P("desktop/package.json").read_text(encoding="utf-8"))["version"]
+_desk_lock = json.loads(_P("desktop/package-lock.json").read_text(encoding="utf-8"))
+check("the API, the dashboard, the desktop app and the changelog state the same version",
+      app_module.VERSION == _pkg_version == _desk_version == _cl_version
+      == _desk_lock["version"] == _desk_lock["packages"][""]["version"])
 
 # -- how publishing is wired -------------------------------------------------------
 _ci_path = _P(".github/workflows/ci.yml")
@@ -1554,10 +1557,23 @@ else:
           _pub.get("if") == "github.event_name == 'release'")
     check("publishing waits for the test suite and the end-to-end replay",
           set(_pub.get("needs", [])) == {"checks", "container"})
-    check("only the publish job may write packages",
+    _drel = _ci["jobs"].get("desktop-release", {})
+    check("only the publish job may write packages, and only the desktop release job may "
+          "add files to a release (v0.38)",
           _ci.get("permissions") == {"contents": "read"}
           and _pub.get("permissions", {}).get("packages") == "write"
-          and all("permissions" not in j for n, j in _ci["jobs"].items() if n != "publish"))
+          and _drel.get("permissions") == {"contents": "write"}
+          and all("permissions" not in j for n, j in _ci["jobs"].items()
+                  if n not in ("publish", "desktop-release")))
+    check("desktop installers are attached only for a release, after every check passed, "
+          "and only if the tag matches the app's version",
+          _drel.get("if") == "github.event_name == 'release'"
+          and set(_drel.get("needs", [])) == {"checks", "container", "desktop", "desktop-windows"}
+          and "does not match the desktop app" in " ".join(str(x) for x in _drel["steps"]))
+    _dsk = " ".join(str(st) for st in _ci["jobs"]["desktop"]["steps"])
+    check("every push runs the desktop app end to end and checks its package",
+          "npm run e2e" in _dsk and "test/packaged.js" in _dsk
+          and "Install it silently" in " ".join(str(st) for st in _ci["jobs"]["desktop-windows"]["steps"]))
     _steps = " ".join(str(st) for st in _pub.get("steps", []))
     check("the release tag is checked against the version in the code before pushing",
           _steps.index("does not match the version") < _steps.index("build-push-action"))
@@ -4668,6 +4684,51 @@ check("check tests the URL and key without sending an event",
       and sfa.check_connection(_cfg37("x"), transport=_AgentTP("sk_shadowfax_wrong"), out=_out37) == 1
       and "refused the API key" in _out37.getvalue())
 _sh37.rmtree(_mcpdir37, ignore_errors=True)
+
+print("\n== the desktop app (v0.38) ==")
+# The app itself is tested by desktop/test (unit, end to end in Electron, and
+# the packaged build) in CI's desktop jobs. These are the checks that need no
+# Electron, so a broken package or a weakened setting fails every run.
+_D38 = _P("desktop")
+_main38 = (_D38 / "main.js").read_text(encoding="utf-8")
+_pkg38 = json.loads((_D38 / "package.json").read_text(encoding="utf-8"))
+_files38 = set(_pkg38["build"]["files"])
+_reqs38 = set(_re.findall(r'require\("\./([\w-]+)"\)', _main38))
+_pages38 = set(_re.findall(r'path\.join\(__dirname, "([\w.-]+)"\)', _main38))
+_assets38 = set(_re.findall(r'path\.join\(__dirname, "build", "([\w.-]+)"\)', _main38))
+_html38 = (_D38 / "connect.html").read_text(encoding="utf-8")
+_linked38 = set(_re.findall(r'(?:src|href)="([\w.-]+\.(?:js|css))"', _html38))
+check("every file the app loads is in the installer's file list (a missing one only shows "
+      "up as a blank window on someone's PC)",
+      {f"{r}.js" for r in _reqs38} | _pages38 | {f"build/{a}" for a in _assets38} | _linked38 <= _files38
+      and all((_D38 / f).exists() for f in _files38) and {"preload.js", "connect.html"} <= _pages38)
+check("every page runs isolated and sandboxed, with no Node.js and no webviews",
+      all(s in _main38 for s in ("contextIsolation: true", "sandbox: true", "nodeIntegration: false",
+                                 "webviewTag: false", "app.enableSandbox()"))
+      and "nodeIntegration: true" not in _main38 and "contextIsolation: false" not in _main38)
+check("navigation is locked to the server, new windows are refused, certificate errors aren't overridden",
+      all(s in _main38 for s in ('"will-navigate"', '"will-redirect"', "setWindowOpenHandler",
+                                 '{ action: "deny" }', '"will-attach-webview"'))
+      and "certificate-error" not in _main38 and "ignore-certificate-errors" not in _main38)
+_fuses38 = _pkg38["build"]["electronFuses"]
+check("the packaged app can't be run as Node.js, inspected, or loaded from outside its archive",
+      _fuses38["runAsNode"] is False and _fuses38["enableNodeCliInspectArguments"] is False
+      and _fuses38["enableNodeOptionsEnvironmentVariable"] is False
+      and _fuses38["onlyLoadAppFromAsar"] is True and _fuses38["enableEmbeddedAsarIntegrityValidation"] is True)
+check("the connect page allows only its own script and styles",
+      "default-src 'none'; script-src 'self'; style-src 'self'" in _html38
+      and "innerHTML" not in (_D38 / "connect.js").read_text(encoding="utf-8"))
+check("the settings file never holds a password or token",
+      not _re.search(r"token|password|api_key", (_D38 / "settings.js").read_text(encoding="utf-8").split("class Settings")[1], _re.I))
+_dash38 = _P("frontend/src/App.jsx").read_text(encoding="utf-8")
+check("the dashboard only talks to the app when the app is there",
+      "desktopBridge()" in _dash38 and "if (!bridge) return" in _dash38
+      and "window.shadowfaxDesktop" in _P("frontend/src/desktop.js").read_text(encoding="utf-8"))
+check("the icons are real PNGs, drawn by a script that compiles",
+      all((_D38 / "build" / n).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n" for n in ("icon.png", "tray.png", "badge.png"))
+      and compile((_D38 / "make_icons.py").read_text(encoding="utf-8"), "make_icons.py", "exec") is not None)
+check("the server image leaves the desktop app out",
+      "\ndesktop\n" in _P(".dockerignore").read_text(encoding="utf-8"))
 
 print("\n== same-second events keep their order (v0.34.1) ==")
 # Timestamps go down to the second. On PostgreSQL, rows that share one came back

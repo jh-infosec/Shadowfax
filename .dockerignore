@@ -5,6 +5,9 @@
 frontend/node_modules
 frontend/dist
 
+# The desktop app (v0.38) runs on people's computers, not in the server image.
+desktop
+
 # Local state. A database copied into an image would ship someone's events --
 # and, worse, would look like seed data to whoever ran it.
 *.db

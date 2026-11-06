@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Nothing but this page's own script and styles may load here. -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'none'; base-uri 'none'" />
+    <title>Shadowfax</title>
+    <link rel="stylesheet" href="connect.css" />
+  </head>
+  <body>
+    <main>
+      <div class="brand">
+        <div class="radar"><div class="ring"></div><div class="sweep"></div><div class="dot"></div></div>
+        <div>
+          <div class="name">SHADOWFAX</div>
+          <div class="sub">desktop</div>
+        </div>
+      </div>
+
+      <h1>Connect to your Shadowfax</h1>
+      <form id="form" autocomplete="off">
+        <label for="address">Server address</label>
+        <div class="row">
+          <input id="address" type="text" spellcheck="false" placeholder="http://localhost:8000" />
+          <button id="connect" type="submit">Connect</button>
+        </div>
+      </form>
+      <p class="hint">Running Shadowfax with Docker on this computer? The address is
+        <span class="mono">http://localhost:8000</span>.</p>
+
+      <div id="status" class="status" role="status" aria-live="polite" hidden></div>
+      <div id="warning" class="warning" hidden>
+        <p>This address isn't encrypted (http, not https), so your password would cross the
+          network readable by anyone on it. Fine on a private lab network; not over the internet.</p>
+        <button id="anyway" type="button">Connect anyway</button>
+      </div>
+
+      <section id="recent-box" hidden>
+        <h2>Recent</h2>
+        <ul id="recent"></ul>
+      </section>
+    </main>
+    <script src="connect.js"></script>
+  </body>
+</html>

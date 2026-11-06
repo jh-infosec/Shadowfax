@@ -88,6 +88,7 @@ is not a security boundary and doesn't block anything.
   on itself
 - Sends alerts to a SIEM over a signed webhook or syslog (CEF or JSON)
 - Per-credential ingest budgets and request size limits
+- A desktop app for Windows and Linux, with notifications for new critical alerts
 - One command Docker setup, plus a signed image published to ghcr.io
 - A one command PostgreSQL and HTTPS setup, with a deployment guide covering
   backups and upgrades
@@ -478,6 +479,62 @@ decorator doesn't fit.
 
 `python shadowfax_agent.py check` tests the connection without sending
 anything, and `python shadowfax_agent.py flush` sends whatever is waiting.
+
+## Desktop app
+
+Shadowfax also comes as a desktop app for Windows and Linux. It opens your
+Shadowfax server's dashboard in a window of its own and adds what a browser tab
+can't:
+
+- **A notification for every new critical or high alert,** even with the window
+  minimised. Click one and that agent opens in the dashboard. A burst of alerts
+  shows the first three and then one "and 12 more", not fifteen pop-ups.
+- **The open critical count** in the window title and on the taskbar icon.
+- **It stays in the system tray** when you close the window, so the
+  notifications keep coming. Quit from the tray icon's menu.
+- **It remembers your servers,** so next time it opens straight onto the last
+  one.
+
+It doesn't carry its own copy of the dashboard. It shows the one your server
+serves, so the two can never be different versions, and it works with Shadowfax
+in Docker on the same computer or on a server somewhere else.
+
+![The desktop app's connect window, with a recently used server](docs/screenshots/desktop-connect.png)
+
+**Installing.** Download `Shadowfax-Desktop-…-win-x64.exe` (or the Linux
+`.AppImage`) from the [Releases](https://github.com/jh-infosec/Shadowfax/releases)
+page and run it. The installer isn't code-signed yet, so Windows SmartScreen may
+say "Windows protected your PC"; click **More info**, then **Run anyway**. When
+the app opens, give it your server's address (`http://localhost:8000` for Docker
+on the same computer) and sign in as usual.
+
+**How it's locked down.** A desktop app built on a web browser can do a lot more
+damage than a web page if it's careless, so this one is built like a browser that
+can only visit one site:
+
+- Pages are sandboxed and get no access to the computer: no Node.js, and context
+  isolation on.
+- The window only ever shows your server. Any other link opens in your normal
+  browser, and only if it's a web link: a link that would start a program
+  (`file:`, `ms-msdt:` and the like) goes nowhere.
+- The dashboard can ask the app for three things (show a notification, set the
+  count, open an alert), only from your server's page, and every request is
+  checked and its text cleaned.
+- HTTPS certificate errors are never overridden, and a plain `http://` address
+  on another computer gets a warning before your password crosses the network.
+- The installed app can't be turned into a Node.js interpreter or attached to
+  with a debugger (Electron's "fuses"), and every build checks that.
+- Its settings file holds server addresses only. Your sign-in stays in the
+  dashboard's own storage, as it would in a browser.
+
+To run or build it from source:
+
+```bash
+cd desktop
+npm ci
+npm start              # run it
+npm run dist:win       # build the Windows installer (on Windows)
+```
 
 ## Agent permissions
 
@@ -1017,7 +1074,7 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 990 checks against the API. To run the same checks on PostgreSQL, set
+That runs 1,001 checks against the API. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
 
@@ -1034,6 +1091,21 @@ and ATT&CK technique, filters actually filtering, the kill chain being drawn, th
 ledger badge reading verified, the session token never appearing in a URL, and
 the Accounts drawer creating a user whose password really works. They refuse to
 run against an empty instance. Add `--headed` to watch the browser.
+
+The desktop app has three sets of tests of its own: unit tests for its rules,
+end-to-end tests that drive the real app against a running server, and checks
+on the packaged build.
+
+```bash
+cd desktop
+npm test                                   # the rules, no Electron needed
+SHADOWFAX_URL=http://127.0.0.1:8000 npm run e2e
+```
+
+The end-to-end tests check things like a `file:` link never reaching the
+system, a page that tries to navigate away staying put, a new critical alert
+arriving as a notification while the app is open, and the settings file never
+holding a password.
 
 The demo doubles as an end-to-end test. With `--assert`, every expectation it
 prints is checked and the run fails if any detection didn't happen:
@@ -1059,6 +1131,11 @@ starts the PostgreSQL compose setup exactly as the deployment guide does,
 replays the attack against that too, restarts it to check nothing is lost, and
 takes a backup.
 
+Two more jobs cover the desktop app. **desktop** starts a server from the same
+commit, runs the app's tests against it under a virtual screen, then builds the
+Linux package and checks it. **desktop-windows** builds the Windows installer
+on Windows, installs it silently and checks what landed.
+
 ### Releasing
 
 Publishing a release on GitHub (**Releases → Draft a new release**, with a tag
@@ -1067,7 +1144,9 @@ checks the tag matches the version in `app.py`, `frontend/package.json` and the
 changelog, pushes the image to `ghcr.io/jh-infosec/shadowfax`, signs it with
 Sigstore cosign (no stored key, it uses the job's GitHub identity), then pulls
 it back and checks it starts properly. Pushing to `main` never publishes
-anything. A release marked as a pre-release never becomes `:latest`.
+anything. A release marked as a pre-release never becomes `:latest`. The same release
+gets the desktop installers attached, once every job has passed and the tag
+matches the desktop app's version too.
 
 The first time, GitHub makes the package private. Make it public once under
 **your profile → Packages → shadowfax → Package settings → Change visibility**.
@@ -1083,8 +1162,10 @@ python demo_gif.py           # records docs/demo.gif (needs ffmpeg)
 The script adds a bit of data of its own (two scanners reporting on one host, a
 few accounts and a user with two-factor on) so every screen has something on
 it, so use an instance you don't mind adding to. The GIF script runs the demo
-itself and resets the data first, so run it last. The tests check that every
-image in this README exists and is a real PNG or GIF.
+itself and resets the data first, so run it last. The desktop app's connect
+window is taken by its own end-to-end test: set `SFX_SCREENSHOT` to
+`docs/screenshots/desktop-connect.png` when running `npm run e2e`. The tests
+check that every image in this README exists and is a real PNG or GIF.
 
 ## Roadmap
 
@@ -1112,10 +1193,12 @@ The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
 | 0.35 | Case notes on alerts and incidents |
 | 0.36 | Prompt-injection detection mapped to MITRE ATLAS, the demo GIF |
 | 0.37 | Connecting real agents: Claude Code hooks, an MCP proxy, a Python decorator |
+| 0.38 | The desktop app for Windows and Linux |
 
-Still to do before 1.0:
+Everything on the original list for 1.0 is done. Still open:
 
-- An Electron desktop app
+- Code-signing the desktop installer, so Windows stops warning about it
+- Threat intelligence feeds
 
 ## Philosophy
 

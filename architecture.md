@@ -487,6 +487,46 @@ The API key is read from `~/.shadowfax/agent.json` (mode 0600) or the
 environment, and deliberately never written into Claude Code's settings, whose
 `env` block every shell the agent opens inherits.
 
+#### desktop/ (Shadowfax Desktop)
+
+The desktop app (v0.38), Electron. It ships no copy of the dashboard: the
+window loads the server's own origin, so the app and the dashboard can't drift
+apart in version, and the dashboard needs no build of its own for the desktop.
+
+- **main.js** owns windows, navigation, permissions, notifications and the
+  tray. Two windows: a local connect page, and the dashboard for one server
+  origin. Every web contents gets the same guards (`web-contents-created`):
+  `will-navigate` and `will-redirect` keep it on its allowed URL, new windows
+  are always denied, `will-attach-webview` is refused, and anything leaving is
+  handed to `shell.openExternal` only if `security.isSafeExternal` says it's a
+  plain web link. Permission requests are denied except clipboard writes from
+  the dashboard's origin. `app.enableSandbox()` sandboxes every renderer.
+- **preload.js** is the dashboard's only bridge: `notify`, `setBadge`,
+  `onOpenAlert`, exposed only when the page's origin is the one the window was
+  opened for (passed in `additionalArguments`). main.js checks every IPC
+  message again: the sender must be that window's main frame at that origin,
+  and the payload must pass `security.validateNotification` (a 16-hex alert id,
+  critical or high, text stripped of control, bidi and tag characters, length
+  capped). `NotificationGate` drops repeats and holds a burst for one summary.
+- **connect.html / connect.js / connect-preload.js** is a static page under a
+  strict CSP (`default-src 'none'`). It can only ask main.js to check, open or
+  forget an address; main.js only opens an origin that passed
+  `server-check.checkServer` in the last two minutes, so the page can't skip
+  the check.
+- **settings.js** keeps recent servers in a JSON file in the app's data folder,
+  sanitised on load. No credentials: the sign-in stays in the dashboard page's
+  own storage for that origin.
+- **frontend/src/desktop.js** is the dashboard's half. Only when
+  `window.shadowfaxDesktop` exists, it reads critical and high alerts on each
+  stream change; the first read only learns what exists, later ones notify
+  what's new and unacknowledged.
+
+Packaging is electron-builder with fuses set (`runAsNode`, the inspector
+arguments and `NODE_OPTIONS` off; asar-only loading with integrity checks).
+Because those fuses also stop Playwright driving the packaged app,
+`test/packaged.js` checks it from outside over the Chrome DevTools protocol,
+and checks the fuses directly.
+
 #### forward.py
 
 Alert forwarding (v0.31). `Config.from_env()` reads the destinations (refusing
@@ -1299,6 +1339,13 @@ totp.py                 subjects.py             profile_draft.py
 forward.py              screenshots.py          docs/screenshots/*.png
 pgcompat.py             cases.py                injection.py
 demo_gif.py             docs/demo.gif           shadowfax_agent.py
+
+desktop/package.json    desktop/package-lock.json
+desktop/main.js         desktop/preload.js      desktop/connect-preload.js
+desktop/security.js     desktop/settings.js     desktop/server-check.js
+desktop/connect.html    desktop/connect.js      desktop/connect.css
+desktop/make_icons.py   desktop/build/*.png     desktop/test/*.js
+frontend/src/desktop.js
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml      docker-compose.postgres.yml             Caddyfile
 docs/deployment.md

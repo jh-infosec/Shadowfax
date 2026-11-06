@@ -18,6 +18,7 @@ import NLSearch from "./components/NLSearch.jsx";
 import Login from "./components/Login.jsx";
 import { SEVERITIES, ACTOR_TYPES } from "./constants.js";
 import * as api from "./api.js";
+import { createAlertWatcher, desktopBridge } from "./desktop.js";
 
 // How long to wait after the last keystroke before searching, so typing
 // fires a single request instead of one per character.
@@ -152,6 +153,29 @@ export default function App() {
     refresh();
   }, [refresh, ready]);
 
+  // Shadowfax Desktop (v0.38): notify new critical and high alerts and keep the
+  // open-critical count on the window. Does nothing in a browser.
+  const desktopCheckRef = useRef(null);
+  useEffect(() => {
+    if (!ready) return undefined;
+    const bridge = desktopBridge();
+    if (!bridge) return undefined;
+    const watcher = createAlertWatcher({
+      bridge,
+      fetchAlerts: api.getAlerts,
+      onOpen: (actorId) => setSelectedActorId(actorId),
+    });
+    desktopCheckRef.current = watcher.check;
+    watcher.check();
+    // Changes arrive over the stream; this only covers a stream that is down.
+    const timer = setInterval(watcher.check, 60000);
+    return () => {
+      clearInterval(timer);
+      desktopCheckRef.current = null;
+      bridge.setBadge(0);
+    };
+  }, [ready]);
+
   // Live updates over Server-Sent Events, replacing the old poll loop. The
   // stream carries a lightweight "change" signal; the dashboard re-queries with
   // its own filters, so per-client filtering stays server-side.
@@ -177,7 +201,10 @@ export default function App() {
         /* not JSON: just refresh */
       }
       clearTimeout(debounce);
-      debounce = setTimeout(() => refreshRef.current(), STREAM_REFRESH_DEBOUNCE_MS);
+      debounce = setTimeout(() => {
+        refreshRef.current();
+        if (desktopCheckRef.current) desktopCheckRef.current();
+      }, STREAM_REFRESH_DEBOUNCE_MS);
     };
     const schedule = () => {
       if (stopped) return;
@@ -200,7 +227,10 @@ export default function App() {
         setConnected(true);
         delay = 1000;
         // Anything that changed while disconnected was never signalled.
-        if (opened) refreshRef.current();
+        if (opened) {
+          refreshRef.current();
+          if (desktopCheckRef.current) desktopCheckRef.current();
+        }
         opened = true;
       };
       es.addEventListener("change", onChange);

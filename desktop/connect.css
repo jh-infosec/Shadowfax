@@ -1,0 +1,58 @@
+:root {
+  --bg: #0b0f17;
+  --panel: #111827;
+  --line: #1f2937;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --bad: #f87171;
+  --warn: #fbbf24;
+  --good: #34d399;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { padding: 32px 36px; }
+.brand { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+.name { font-weight: 700; font-size: 18px; letter-spacing: 0.06em; }
+.sub { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+.radar { position: relative; width: 34px; height: 34px; border-radius: 50%;
+  border: 1px solid rgba(56, 189, 248, 0.5); overflow: hidden; }
+.radar .ring { position: absolute; inset: 8px; border-radius: 50%; border: 1px solid rgba(56, 189, 248, 0.35); }
+.radar .sweep { position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(from 0deg, rgba(56, 189, 248, 0.45), transparent 25%);
+  animation: spin 3s linear infinite; }
+.radar .dot { position: absolute; top: 9px; left: 21px; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .radar .sweep { animation: none; } }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 18px; }
+h2 { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0.08em;
+  text-transform: uppercase; margin: 28px 0 8px; }
+label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.row { display: flex; gap: 8px; }
+input { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--text); font: 14px ui-monospace, Consolas, monospace; }
+input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+button { padding: 10px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent);
+  color: #04121c; font-weight: 600; cursor: pointer; font-size: 14px; }
+button:disabled { opacity: 0.6; cursor: default; }
+button:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+.hint { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+.mono { font-family: ui-monospace, Consolas, monospace; color: var(--text); }
+.status { margin-top: 18px; padding: 10px 12px; border-radius: 8px; background: var(--panel);
+  border: 1px solid var(--line); overflow-wrap: anywhere; }
+.status.error { border-color: rgba(248, 113, 113, 0.5); color: #fecaca; }
+.status.ok { border-color: rgba(52, 211, 153, 0.5); color: #bbf7d0; }
+.warning { margin-top: 18px; padding: 12px; border-radius: 8px; border: 1px solid rgba(251, 191, 36, 0.5);
+  background: rgba(251, 191, 36, 0.08); }
+.warning p { margin: 0 0 10px; color: #fde68a; }
+.warning button { background: transparent; color: var(--warn); border-color: var(--warn); }
+ul { list-style: none; margin: 0; padding: 0; }
+li { display: flex; gap: 6px; margin-bottom: 6px; }
+.server { flex: 1; min-width: 0; text-align: left; background: var(--panel); color: var(--text);
+  border-color: var(--line); font: 13px ui-monospace, Consolas, monospace; font-weight: 400;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.server:hover { border-color: var(--accent); }
+.forget { background: transparent; color: var(--muted); border-color: var(--line); padding: 10px 12px; }
+.forget:hover { color: var(--bad); border-color: var(--bad); }

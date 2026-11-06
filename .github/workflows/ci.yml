@@ -1,6 +1,6 @@
 # Shadowfax CI (v0.13; publishing from v0.17; signing from v0.20).
 #
-# Three jobs, answering three different questions.
+# The jobs, and the question each one answers.
 #
 #   checks     Does the engine behave? 300+ assertions in-process, plus a
 #              dashboard build, because a broken component is a broken product
@@ -11,6 +11,11 @@
 #              real HTTP, asserting that the detections the README claims
 #              actually happen. A README that says `docker compose up` and a
 #              Dockerfile nobody builds is a promise with nothing behind it.
+#
+#   desktop    (v0.38) The desktop app: unit tests, the real app end to end
+#              against this commit's server, then the Linux package built and
+#              checked. desktop-windows builds the Windows installer on Windows
+#              and installs it. On a release, desktop-release attaches both.
 #
 #   publish    Only when a GitHub release is published. Only after both jobs
 #              above have passed on that exact commit. Pushes the image to
@@ -266,6 +271,168 @@ jobs:
       - name: Container log
         if: always()
         run: docker logs shadowfax
+
+  desktop:
+    name: Desktop app, end to end
+    # v0.38. The real Electron app against a real server started from this
+    # commit, under a virtual screen: the connect window, the dashboard, the
+    # navigation lock, notifications. Then the Linux package is built and
+    # checked from outside, because the packaged app switches off the inspector
+    # the end-to-end tests drive it through.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SHADOWFAX_URL: http://127.0.0.1:8000
+      SHADOWFAX_ADMIN_USERNAME: admin
+      SHADOWFAX_ADMIN_PASSWORD: desktop-ci-pass-1
+      # GitHub's Ubuntu machines can't create Chromium's sandbox for Electron.
+      # Pages stay sandboxed by their own settings; see desktop/main.js.
+      SFX_NO_SANDBOX: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/package-lock.json
+
+      - name: Build the dashboard the server will serve
+        run: npm ci --no-audit --no-fund && VITE_API_BASE= npm run build
+        working-directory: frontend
+
+      - name: Start Shadowfax from this commit
+        run: |
+          pip install -r requirements.txt
+          nohup python -m uvicorn app:app --port 8000 > server.log 2>&1 &
+          for _ in $(seq 1 30); do curl -fsS "$SHADOWFAX_URL/healthz" > /dev/null && break; sleep 1; done
+          curl -fsS "$SHADOWFAX_URL/healthz"
+
+      - name: Install the desktop app's dependencies
+        working-directory: desktop
+        run: |
+          npm ci --no-audit --no-fund
+          node node_modules/electron/install.js
+
+      - name: Unit tests
+        run: npm test
+        working-directory: desktop
+
+      - name: End-to-end tests
+        run: xvfb-run -a npm run e2e
+        working-directory: desktop
+
+      - name: Build the Linux package
+        run: npm run dist:linux
+        working-directory: desktop
+
+      - name: Check the packaged app
+        run: xvfb-run -a node test/packaged.js dist/linux-unpacked/shadowfax-desktop
+        working-directory: desktop
+
+      - name: Server log, if anything failed
+        if: failure()
+        run: tail -n 100 server.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux
+          path: desktop/dist/*.AppImage
+          retention-days: 14
+
+  desktop-windows:
+    name: Desktop app, Windows installer
+    # Built on Windows, where the installer is meant to run, then installed
+    # silently and checked, so a broken installer fails here and not on
+    # someone's PC.
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          node node_modules/electron/install.js
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build the installer
+        run: npm run dist:win
+
+      - name: Install it silently and check what landed
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist -Filter "Shadowfax-Desktop-*-win-x64.exe" | Select-Object -First 1
+          $target = Join-Path $env:RUNNER_TEMP "ShadowfaxInstall"
+          Start-Process -FilePath $installer.FullName -ArgumentList "/S", "/D=$target" -Wait
+          $exe = Join-Path $target "Shadowfax.exe"
+          if (-not (Test-Path $exe)) { throw "the installer didn't put Shadowfax.exe in $target" }
+          if (-not (Test-Path (Join-Path $target "Uninstall Shadowfax.exe"))) { throw "no uninstaller was installed" }
+          $info = (Get-Item $exe).VersionInfo
+          Write-Host "installed $($info.ProductName) $($info.ProductVersion)"
+          if ($info.ProductName -ne "Shadowfax") { throw "the installed program doesn't say it's Shadowfax" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: desktop/dist/Shadowfax-Desktop-*-win-x64.exe
+          retention-days: 14
+
+  desktop-release:
+    name: Attach the desktop installers to the release
+    # Releases only, after every other check on that commit has passed. The
+    # only job allowed to write to the repository, and only to add files to the
+    # release that started it.
+    if: github.event_name == 'release'
+    needs: [checks, container, desktop, desktop-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The release tag matches the desktop app's version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          desktop=$(python3 -c "import json; print(json.load(open('desktop/package.json'))['version'])")
+          echo "tag ${TAG} | desktop/package.json ${desktop}"
+          if [ "${desktop}" != "${TAG#v}" ]; then
+            echo "::error::release ${TAG} does not match the desktop app's version"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+
+      - name: Upload them to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          ls -la installers
+          gh release upload "$TAG" installers/* --clobber --repo "$GITHUB_REPOSITORY"
 
   publish:
     name: Publish the image to ghcr.io

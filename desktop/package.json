@@ -1,0 +1,46 @@
+{
+  "name": "shadowfax-desktop",
+  "productName": "Shadowfax",
+  "version": "0.38.0",
+  "description": "Shadowfax's dashboard as a desktop app, with notifications for new critical alerts.",
+  "author": "jh-infosec",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/unit.test.js",
+    "e2e": "node test/e2e.js",
+    "dist:win": "electron-builder --win nsis --publish never",
+    "dist:linux": "electron-builder --linux AppImage --publish never"
+  },
+  "devDependencies": {
+    "electron": "45.2.2",
+    "electron-builder": "26.18.0",
+    "playwright-core": "1.64.1"
+  },
+  "build": {
+    "appId": "io.github.jhinfosec.shadowfax",
+    "productName": "Shadowfax",
+    "artifactName": "Shadowfax-Desktop-${version}-${os}-${arch}.${ext}",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": [
+      "main.js", "preload.js", "connect-preload.js", "security.js", "settings.js",
+      "server-check.js", "connect.html", "connect.js", "connect.css",
+      "build/icon.png", "build/tray.png", "build/badge.png"
+    ],
+    "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
+    "win": { "target": "nsis", "icon": "build/icon.png" },
+    "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true },
+    "linux": { "target": "AppImage", "category": "Utility", "icon": "build/icon.png" },
+    "publish": null
+  }
+}

@@ -372,7 +372,11 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 
 ## Version 1.0
 
-- [ ] Electron desktop application
+- [x] Electron desktop application (`v0.38.0`): Windows and Linux, built and
+      checked by CI. Opens the server's own dashboard, adds notifications for new
+      critical and high alerts, the open critical count, and a tray icon. Locked
+      to one origin, sandboxed, with Electron fuses on.
+- [ ] Code-sign the Windows installer, so SmartScreen stops warning about it.
 - [x] PostgreSQL support (`v0.32.0`): set `SHADOWFAX_DATABASE_URL`; SQLite is
       still the default. The whole API suite runs against both.
 - [x] Multi-user support: accounts and roles (`v0.23`, `v0.24`), two-factor

@@ -1,5 +1,41 @@
 # Changelog
 
+## Version 0.38.0
+
+The desktop app, the last item on the roadmap for 1.0.
+
+### What's new
+
+- **Shadowfax Desktop, for Windows and Linux.** It opens your server's own
+  dashboard in a window of its own, so it always matches the server's version,
+  and works with Shadowfax on the same computer or anywhere else.
+- **Notifications for new critical and high alerts,** live, even with the window
+  minimised. Clicking one opens that agent. Alerts that were already there when
+  the app opened aren't replayed, and a burst shows three and then one summary.
+- **The open critical count** in the window title and on the taskbar, and a tray
+  icon that keeps the app running when the window is closed.
+- **A connect window** that checks an address before opening it and says what's
+  wrong in plain words: nothing there, something that isn't Shadowfax, or a
+  Shadowfax that isn't serving its dashboard. It remembers recent servers, and
+  warns before sending a password over plain http to another computer.
+- **Locked down like a browser that can only visit one site.** Sandboxed pages
+  with no Node.js, navigation locked to the server, other links sent to your
+  normal browser only if they're web links, no permission prompts granted, a
+  three-function bridge whose every call is checked, and Electron fuses that
+  stop the installed app being run as Node.js or attached to with a debugger.
+- **Installers built by CI.** Every push builds the Linux package and checks
+  it, and builds the Windows installer on Windows, installs it silently and
+  checks it. A release gets both attached.
+- The connector `shadowfax_agent.py` reports version 0.38.0 to match.
+
+### Tested
+
+- 1,001 API checks, on SQLite and on PostgreSQL. The new ones include every
+  file the desktop app loads being in the installer, and the sandbox and fuse
+  settings staying on.
+- The desktop app's own tests: 10 unit tests, 26 end-to-end checks that drive
+  the real app against a running server, and 6 checks on the packaged build.
+
 ## Version 0.37.0
 
 Connecting real agents. Until now an agent's activity only reached Shadowfax if
