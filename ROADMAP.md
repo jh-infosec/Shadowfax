@@ -392,3 +392,7 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       what a tool returned, the agent then using what that content planted,
       and tool definitions that change or carry instructions. Mapped to MITRE
       ATLAS.
+- [x] Connecting real agents (`v0.37.0`): `shadowfax_agent.py`, one file with
+      no dependencies, reports Claude Code through hooks, any MCP client through
+      a proxy, and Python agents through a decorator. Fail-open, with a local
+      spool while Shadowfax is down.

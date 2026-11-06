@@ -54,6 +54,15 @@ is not a security boundary and doesn't block anything.
 - Ingest findings from other tools through a shared JSON format, and export
   Shadowfax's own findings in the same format
 
+**Connecting agents**
+
+- One file with no dependencies that reports what a real agent does, without
+  changing the agent
+- Claude Code hooks, a proxy for any MCP client (Claude Desktop, Cursor and the
+  rest), and a decorator for your own Python tools
+- Never gets in the agent's way, and keeps events in a local spool while
+  Shadowfax is down
+
 **Investigation**
 
 - React dashboard with a live alert table (Server-Sent Events, no refreshing)
@@ -369,6 +378,106 @@ python cli.py forwarding --test         # send a test alert to the SIEM
 Passwords are always prompted for and never passed as flags, so they don't end
 up in your shell history. Use `--url`, `SHADOWFAX_URL` or the saved config to
 point the CLI at a different server.
+
+## Connecting your agents
+
+Shadowfax can only watch what it's told about. `shadowfax_agent.py` is a single
+file that reports what a real agent does, without you changing the agent. It
+only needs Python 3.9 or newer, nothing to install, so copy it onto whatever
+machine runs the agent.
+
+First, make an API key for the agent: sign in as an admin, open **Accounts**,
+and click **New API key**. Then save the key on the agent's machine and check
+it works:
+
+```bash
+python shadowfax_agent.py configure --url http://your-shadowfax:8000 --api-key sk_shadowfax_...
+```
+
+```
+Saved to /home/you/.shadowfax/agent.json (readable only by you).
+Connected to http://your-shadowfax:8000 as agent 'ai-agent-laptop'. The ledger has 69 entries.
+```
+
+The agent is named after the computer unless you pass `--agent-id`. Give it a
+[permission profile](#agent-permissions) under that name to say what it's for.
+
+### Claude Code
+
+```bash
+python shadowfax_agent.py claude-code --write ~/.claude/settings.json
+```
+
+That adds two hooks to Claude Code's settings and leaves everything else in
+the file alone (the old file is kept as `settings.json.bak`). Restart Claude
+Code. From then on, every tool it uses is reported as a `tool_call`, and what
+the tool gave back as a `tool_result`, so a poisoned web page or file is caught
+the moment Claude reads it. Leave out `--write` to just print the settings.
+The same hooks work for agents built on the Claude Agent SDK.
+
+![A Claude Code session reading a poisoned changelog and then running the curl it asked for, as alerts in Shadowfax](docs/screenshots/claude-code.png)
+
+### Any MCP client
+
+Claude Desktop, Cursor and most other agent tools connect to MCP servers. Put
+the proxy in front of a server by changing the command that starts it. For
+example, in Claude Desktop's `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "python",
+      "args": ["C:\\tools\\shadowfax_agent.py", "mcp-proxy", "--server", "github", "--",
+               "npx", "-y", "@modelcontextprotocol/server-github"]
+    }
+  }
+}
+```
+
+The proxy passes every message through unchanged and reports the server's tool
+list, each call and each result. Because it sees the tool list, it also catches
+a server that rewrites one of its tools between runs (`tool_definition_changed`)
+or hides instructions in a tool's description. If Claude Code hooks are already
+reporting the calls, add `--manifest-only` so they aren't counted twice.
+
+### Your own Python agent
+
+```python
+from shadowfax_agent import Reporter
+
+sfx = Reporter("research-agent-1")
+
+@sfx.tool
+def fetch(url: str) -> str:
+    ...
+```
+
+Each call to a decorated tool is reported with its arguments, and what it
+returned is scanned like any other result. `sfx.tool_call(...)`,
+`sfx.tool_result(...)` and `sfx.manifest(...)` are there for anything the
+decorator doesn't fit.
+
+### What it promises
+
+- **It never gets in the agent's way.** Shadowfax watches, it doesn't block. The
+  hook always exits cleanly and prints nothing, and the proxy forwards every
+  message before it looks at it.
+- **Nothing is lost when Shadowfax is down.** Events wait in
+  `~/.shadowfax/spool` and are sent next time, oldest first.
+- **The key stays out of the agent's reach, as far as it can.** It's read from
+  `~/.shadowfax/agent.json` (readable only by you), never put into the settings
+  the agent's own shell inherits. An agent running as you could still read that
+  file, so give each agent its own key. A key can only send events, and each
+  one has an ingest budget.
+- **It sends what the tools did, not what you asked.** Your prompts and the
+  model's replies are not reported.
+- **Large results are cut to fit.** A result over about 15 KB keeps its start
+  and its end, so an instruction hidden at the bottom of a long page is still
+  seen. Something hidden in the middle of a very long page can be cut out.
+
+`python shadowfax_agent.py check` tests the connection without sending
+anything, and `python shadowfax_agent.py flush` sends whatever is waiting.
 
 ## Agent permissions
 
@@ -908,7 +1017,7 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 952 checks against the API. To run the same checks on PostgreSQL, set
+That runs 990 checks against the API. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
 
@@ -1002,6 +1111,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
 | 0.34 | PostgreSQL in one command, HTTPS with Caddy, the deployment guide |
 | 0.35 | Case notes on alerts and incidents |
 | 0.36 | Prompt-injection detection mapped to MITRE ATLAS, the demo GIF |
+| 0.37 | Connecting real agents: Claude Code hooks, an MCP proxy, a Python decorator |
 
 Still to do before 1.0:
 

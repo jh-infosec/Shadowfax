@@ -1,5 +1,59 @@
 # Changelog
 
+## Version 0.37.0
+
+Connecting real agents. Until now an agent's activity only reached Shadowfax if
+someone wrote code to send it. `shadowfax_agent.py` is that code, written once.
+
+### What's new
+
+- **`shadowfax_agent.py`, one file with no dependencies.** Copy it onto the
+  machine that runs the agent, run `configure` with the URL and an API key, and
+  it checks the connection.
+- **Claude Code.** `python shadowfax_agent.py claude-code --write
+  ~/.claude/settings.json` adds two hooks and keeps the rest of the file. Every
+  tool Claude Code uses is then reported as a call and its result, so a poisoned
+  page or file raises `prompt_injection`, and Claude acting on it
+  `injection_followed`. A URL inside a shell command is picked out too, so a
+  `curl` to somewhere outside the engagement scope is caught like a web fetch.
+  Also works for agents built on the Claude Agent SDK.
+- **Any MCP client.** `mcp-proxy` sits between a client such as Claude Desktop
+  or Cursor and an MCP server, passes every message through unchanged, and
+  reports the server's tool list, each call and each result. A server that
+  rewrites one of its tools between runs raises `tool_definition_changed`.
+- **Your own Python agent.** `Reporter` sends events from a background thread,
+  and its `@tool` decorator reports a function's calls and what it returned.
+  Async functions work too.
+- **It never gets in the agent's way.** The hook always exits cleanly and prints
+  nothing. When Shadowfax can't be reached, events wait in a local spool and go
+  next time, oldest first.
+- **The API key stays out of the agent's settings.** It's kept in
+  `~/.shadowfax/agent.json`, readable only by you, never in the environment the
+  agent's own shell inherits.
+- **Partial manifests.** A manifest marked `"partial": true` updates only the
+  MCP servers it names and keeps the rest of the agent's tool list. Without
+  this, a proxy reporting one server's tools would have made every other tool
+  the agent used look unlisted.
+
+### Fixed
+
+- **Lateral movement fired on ordinary agent work.** Connecting a coding agent
+  tripped `lateral_movement` within minutes: it counted every file the agent
+  edited and every website it read as a separate "target". A tool call now only
+  counts when it reaches a machine on the internal network (a private address,
+  or a name like `db01` or `build.corp`). File and resource access by other
+  events counts as before.
+
+### Tested
+
+- 990 API checks, on SQLite and on PostgreSQL set up like CI. The 38 new ones
+  feed the hook the JSON Claude Code sends, run the proxy against a real MCP
+  server process and check the client gets back exactly what the server sent,
+  take Shadowfax offline and check nothing is lost, and check the hook never
+  prints or fails.
+- 16 deliberate bugs were planted in the new code, one at a time, to make sure
+  the tests notice. All 16 were caught.
+
 ## Version 0.36.0
 
 Prompt-injection detection, and a demo GIF at the top of the README.

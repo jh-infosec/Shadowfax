@@ -62,7 +62,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.36.0"
+VERSION = "0.37.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -1150,7 +1150,12 @@ def post_manifest(agent_id: str, doc: dict[str, Any], response: Response,
         previous = [e for e in history if e["event_type"] == manifest.EVENT_TYPE]
         latest_digest = ((previous[-1].get("metadata") or {}).get("digest")
                          if previous else None)
-        changed = latest_digest != parsed.digest
+        # v0.37: a partial manifest (one MCP server's tools, from a proxy) is
+        # folded into the previous one, so it can't erase the agent's other tools.
+        parsed = manifest.merge(previous[-1] if previous else None, parsed)
+        changed = (latest_digest != parsed.digest
+                   # the same tools, now known to be the whole list
+                   or (parsed.complete and bool(previous) and not manifest.is_complete(previous[-1])))
         alerts: list[dict[str, Any]] = []
         if changed:
             db.insert_event(conn, manifest.to_event(parsed, agent_id, actor_type))
@@ -1168,6 +1173,7 @@ def post_manifest(agent_id: str, doc: dict[str, Any], response: Response,
         "digest": parsed.digest,
         "tools": len(parsed.tools),
         "mcp_servers": list(parsed.servers),
+        "complete": parsed.complete,
         "profile": resolution.name,
         "excess": [t for t in assessed if t["severity"]],
         "alerts": _alerts_for(identity, [a for a in alerts if a["category"] in

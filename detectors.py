@@ -241,6 +241,19 @@ def _tool_call_destination(event: dict, meta: dict) -> tuple[str | None, int | N
             int(port) if isinstance(port, int) else None)
 
 
+_INTERNAL_SUFFIXES = (".local", ".internal", ".lan", ".corp", ".home.arpa", ".intranet")
+
+
+def _internal_host(host: str) -> bool:
+    """Whether a destination is on the internal network: a private address, or
+    a name that only resolves inside one (no dot, or an internal suffix)."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "." not in host or host.endswith(_INTERNAL_SUFFIXES)
+    return (ip.is_private or ip.is_link_local) and not ip.is_loopback
+
+
 def _scope_violation(event: dict, meta: dict, scope: dict) -> str | None:
     """Message describing how a tool call left the engagement scope, or None."""
     host, port = _tool_call_destination(event, meta)
@@ -313,6 +326,9 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
     # tools already reported as excess (once each), and the unlisted tools
     # already reported against the current manifest.
     current_manifest: tuple[str, ...] | None = None
+    # v0.37: a manifest built from partial ones only speaks for its servers.
+    manifest_complete = True
+    manifest_servers: tuple[str, ...] = ()
     excess_reported: set[str] = set()
     unlisted_reported: set[str] = set()
     # Prompt injection (v0.36): what the agent itself had used before reading
@@ -496,7 +512,7 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 if hit:
                     alerts.append(_mk_alert(e, "critical", "injection_followed",
                         f"called {meta.get('tool') or 'a tool'} with '{hit[:120]}', which first "
-                        f"appeared in content returned to it at {src['timestamp']} that contained "
+                        f"appeared in content returned to it at {str(src['timestamp'])[:19]} that contained "
                         f"instructions aimed at an AI ({markers}); the agent looks to be "
                         f"following instructions planted in what it read"))
                     break
@@ -546,6 +562,8 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                         f"the agent ({', '.join(markers)}); a tool's description is read "
                         f"by the model on every call", discriminator=f"tool:{name}"))
             current_manifest = tools
+            manifest_complete = manifest.is_complete(e)
+            manifest_servers = tuple(str(s) for s in (meta.get("mcp_servers") or []))
             unlisted_reported.clear()
             continue
 
@@ -639,8 +657,18 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
 
         # lateral movement. A completion_claim is a report, not a target
         # access, so it does not count toward distinct targets touched.
-        if e["event_type"] != "completion_claim":
-            recent_targets.append((ts, e["target"]))
+        #
+        # v0.37: a tool call counts only when it reaches a machine on the
+        # internal network. Its target is usually a file, a command or a search
+        # query, and an agent editing six files, or researching six websites, is
+        # doing its job, not moving between systems. Found by connecting a real
+        # coding agent, which tripped this within minutes of starting.
+        spot = e["target"]
+        if e["event_type"] == "tool_call":
+            host, _port = _tool_call_destination(e, meta)
+            spot = host if host and _internal_host(host) else None
+        if e["event_type"] != "completion_claim" and spot is not None:
+            recent_targets.append((ts, spot))
             window = timedelta(minutes=policy.get("lateral_movement_window_minutes", 15))
             while recent_targets and ts - recent_targets[0][0] > window:
                 recent_targets.popleft()
@@ -678,6 +706,7 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
             # manifest.
             called = str(meta.get("tool") or "").strip()
             if (current_manifest is not None and called
+                    and (manifest_complete or manifest.covers(called, manifest_servers))
                     and called.lower() not in unlisted_reported
                     and not manifest.is_listed(called, current_manifest)):
                 unlisted_reported.add(called.lower())

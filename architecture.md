@@ -395,6 +395,11 @@ latest manifest assessed, plus what was added and removed. In the detector a
 manifest event, like a finding, skips the behavioural heuristics and the
 permission target check -- it is a declaration, not an action. Excess tools are
 reported once each across manifests; unlisted calls once per tool per manifest.
+Since v0.37 a manifest may be `"partial": true`: it names MCP servers only and
+`merge()` folds it into the previous manifest, replacing just those servers'
+tools and definitions. The stored result records whether it is `complete`; one
+built only from partial manifests judges unlisted calls only for tools on the
+servers it names, because it can't speak for the rest.
 Since v0.36 each tool's description and input schema are also fingerprinted
 and scanned with `injection.scan`, so a tool that keeps its name but changes
 its definition raises `tool_definition_changed`, and one whose description
@@ -446,6 +451,41 @@ judged as an action; a later `tool_call` that uses a planted indicator within
 The follow-through check is the stronger signal, because however an
 instruction is worded, an agent acting on it has to use what it was given.
 Alerts quote the evidence, and `assistant.py` fences that quote as untrusted.
+
+#### shadowfax_agent.py
+
+The agent connector (v0.37), and the only file meant to run somewhere other
+than the Shadowfax server: on whatever machine runs the agent. So it is one file
+using only the standard library, and nothing in it imports Shadowfax's own
+modules. Three ways in, all producing the ordinary `tool_call`, `tool_result`
+and manifest traffic the API already accepts, through the ordinary API-key
+ingest path, so nothing on the server had to trust it more than any other
+client:
+
+- **Claude Code hooks.** `PostToolUse` becomes the call and its result at one
+  timestamp, call first, so the detector never sees a result before the call
+  that fetched it. `PostToolUseFailure` becomes the call marked failed. The
+  hook always exits 0 and prints nothing: in Claude Code, exit code 2 blocks the
+  tool and stdout can be read as instructions, and a monitor must do neither.
+  The hook block is written in exec form (`command` plus `args`) so no shell
+  parses the paths.
+- **An MCP stdio proxy.** Relays newline-delimited JSON-RPC between client and
+  server byte for byte, observing a copy. A request is observed before it is
+  forwarded, so its response can never arrive first. `tools/list` results become
+  partial manifests (all pages of a listing together).
+- **`Reporter`.** A queue and a background thread for in-process agents, with a
+  decorator for tool functions.
+
+Delivery is fail-open with a spool: anything that can't be sent (unreachable,
+429, 5xx, a key that may yet be fixed) is appended to `~/.shadowfax/spool` and
+sent first next time; anything the server refuses outright (400, 413, 422) is
+dropped and logged, so one bad event can't block the spool forever. Parallel
+hook runs claim the spool by renaming it, so it is never sent twice. Results are
+trimmed to fit the metadata limit by keeping the start and end of the text.
+
+The API key is read from `~/.shadowfax/agent.json` (mode 0600) or the
+environment, and deliberately never written into Claude Code's settings, whose
+`env` block every shell the agent opens inherits.
 
 #### forward.py
 
@@ -1258,7 +1298,7 @@ ratelimit.py            timeutil.py             recover.py
 totp.py                 subjects.py             profile_draft.py
 forward.py              screenshots.py          docs/screenshots/*.png
 pgcompat.py             cases.py                injection.py
-demo_gif.py             docs/demo.gif
+demo_gif.py             docs/demo.gif           shadowfax_agent.py
 demo.py                 test_dashboard.py       Dockerfile
 docker-compose.yml      docker-compose.postgres.yml             Caddyfile
 docs/deployment.md

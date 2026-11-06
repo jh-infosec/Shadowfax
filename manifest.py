@@ -78,7 +78,7 @@ EVENT_TYPE = "capability_manifest"
 MAX_TOOLS = 1000
 MAX_NAME_LENGTH = 200
 SERVER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-TOP_LEVEL_KEYS = frozenset({"tools", "mcp_servers", "observed_at"})
+TOP_LEVEL_KEYS = frozenset({"tools", "mcp_servers", "observed_at", "partial"})
 
 # How many tool names an alert message spells out before saying "+N more".
 SHOWN_IN_MESSAGE = 6
@@ -103,6 +103,11 @@ class Manifest:
     # that have either; and tools whose definitions carry injection markers.
     definitions: tuple[tuple[str, str], ...] = ()
     poisoned: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # v0.37: a partial manifest updates only the MCP servers it names (what a
+    # proxy in front of one server can see); `complete` says whether the merged
+    # result is known to be the agent's whole tool list.
+    partial: bool = False
+    complete: bool = True
 
     @property
     def digest(self) -> str:
@@ -178,6 +183,15 @@ def parse(doc: Any) -> Manifest:
         raise ManifestError(f"unknown key {unknown[0]!r}; expected tools, mcp_servers, observed_at")
     if "tools" not in doc and "mcp_servers" not in doc:
         raise ManifestError("needs \"tools\", \"mcp_servers\", or both (either may be empty)")
+    partial = doc.get("partial", False)
+    if not isinstance(partial, bool):
+        raise ManifestError("must be true or false", "partial")
+    if partial and ("tools" in doc or not doc.get("mcp_servers")):
+        # A partial manifest replaces named servers' tools and nothing else, so
+        # it can only name servers: a bare tool belongs to no server it could
+        # replace.
+        raise ManifestError("a partial manifest updates named MCP servers only: give "
+                            "\"mcp_servers\" and no \"tools\"", "partial")
 
     names: set[str] = set()
     fingerprints: dict[str, str] = {}
@@ -213,7 +227,44 @@ def parse(doc: Any) -> Manifest:
             raise ManifestError("must be an ISO 8601 timestamp", "observed_at")
 
     return Manifest(tuple(sorted(names)), tuple(sorted(servers)), observed,
-                    tuple(sorted(fingerprints.items())), tuple(sorted(poisoned.items())))
+                    tuple(sorted(fingerprints.items())), tuple(sorted(poisoned.items())),
+                    partial=partial, complete=not partial)
+
+
+def _server_of(tool: str) -> str | None:
+    if tool.startswith("mcp__"):
+        parts = tool.split("__")
+        if len(parts) >= 3:
+            return parts[1]
+    return None
+
+
+def merge(previous: dict[str, Any] | None, update: Manifest) -> Manifest:
+    """A partial manifest folded into the agent's previous manifest (v0.37).
+
+    The servers the update names are replaced; every other tool, server and
+    definition is carried over. The result is complete only if the previous
+    one was: two proxies each reporting their own server still don't add up to
+    the agent's whole configuration. A full manifest is returned unchanged.
+    """
+    if not update.partial:
+        return update
+    replaced = set(update.servers)
+    prev_tools = tools_of(previous) if previous is not None else None
+    if prev_tools is None:
+        prev_tools = ()
+    meta = (previous or {}).get("metadata") or {}
+    prev_complete = previous is not None and meta.get("complete", True) is not False
+    keep = lambda name: _server_of(name) not in replaced
+    tools = {t for t in prev_tools if keep(t)} | set(update.tools)
+    servers = {s for s in meta.get("mcp_servers", []) if isinstance(s, str)} | replaced
+    definitions = {n: fp for n, fp in definitions_of(previous or {}).items() if keep(n)}
+    definitions.update(dict(update.definitions))
+    poisoned = {n: tuple(m) for n, m in poisoned_of(previous or {}).items() if keep(n)}
+    poisoned.update(dict(update.poisoned))
+    return Manifest(tuple(sorted(tools)), tuple(sorted(servers)), update.observed_at,
+                    tuple(sorted(definitions.items())), tuple(sorted(poisoned.items())),
+                    partial=True, complete=prev_complete)
 
 
 def to_event(manifest: Manifest, actor_id: str, actor_type: str,
@@ -238,7 +289,10 @@ def to_event(manifest: Manifest, actor_id: str, actor_type: str,
                      "digest": manifest.digest,
                      # v0.36: fingerprints and marker names only, never the text.
                      "definitions": dict(manifest.definitions),
-                     "poisoned": {name: list(m) for name, m in manifest.poisoned}},
+                     "poisoned": {name: list(m) for name, m in manifest.poisoned},
+                     # v0.37: false when built only from partial manifests, so
+                     # tools outside the servers it names are not "unlisted".
+                     "complete": manifest.complete},
     }
 
 
@@ -254,6 +308,19 @@ def poisoned_of(event: dict[str, Any]) -> dict[str, list[str]]:
     found = (event.get("metadata") or {}).get("poisoned")
     return {k: [str(m) for m in v] for k, v in found.items() if isinstance(v, list)} \
         if isinstance(found, dict) else {}
+
+
+def is_complete(event: dict[str, Any]) -> bool:
+    """Whether a stored manifest is the agent's whole tool list. Manifests from
+    before v0.37 were always whole."""
+    return (event.get("metadata") or {}).get("complete", True) is not False
+
+
+def covers(tool: str, servers: tuple[str, ...]) -> bool:
+    """Whether a called tool belongs to one of these MCP servers, by its
+    namespaced name."""
+    server = _server_of(tool.strip())
+    return server is not None and server in servers
 
 
 def tools_of(event: dict[str, Any]) -> tuple[str, ...] | None:
