@@ -210,6 +210,40 @@ CREATE TABLE IF NOT EXISTS forward_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_forward_due ON forward_outbox(status, next_attempt_at);
 
+-- v0.39: threat intelligence feeds and the indicators they list. Indicators
+-- are retired, never deleted, while their feed exists, so an alert raised for
+-- an address that was listed at the time survives the feed dropping it.
+CREATE TABLE IF NOT EXISTS intel_feeds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,            -- remote | manual
+    url TEXT,                      -- may hold {env:SHADOWFAX_INTEL_*}; never a key
+    format TEXT NOT NULL,
+    field TEXT,
+    severity TEXT NOT NULL,
+    attack TEXT NOT NULL DEFAULT '[]',
+    description TEXT,
+    refresh_minutes INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    created_by TEXT,
+    last_attempt_at TEXT,
+    last_success_at TEXT,
+    last_error TEXT,
+    last_dropped INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS intel_indicators (
+    feed_id INTEGER NOT NULL,
+    value TEXT NOT NULL,
+    kind TEXT NOT NULL,            -- ip | cidr | domain | url
+    first_listed TEXT NOT NULL,
+    last_listed TEXT NOT NULL,
+    retired_at TEXT,
+    PRIMARY KEY (feed_id, value)
+);
+CREATE INDEX IF NOT EXISTS idx_intel_value ON intel_indicators(value);
+
 -- v0.25: two-factor recovery codes. Fingerprints only; each works once.
 CREATE TABLE IF NOT EXISTS recovery_codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1287,3 +1321,136 @@ def _parse_ts(value: str) -> datetime | None:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed
+
+
+# -- threat intelligence (v0.39) ----------------------------------------------------
+
+INTEL_FEED_COLUMNS = ("name", "kind", "url", "format", "field", "severity", "attack",
+                      "description", "refresh_minutes", "enabled")
+
+
+def intel_feeds(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every feed, with how many indicators it lists now and has retired."""
+    rows = conn.execute("SELECT * FROM intel_feeds ORDER BY id").fetchall()
+    counts: dict[int, tuple[int, int]] = {}
+    for r in conn.execute(
+            """SELECT feed_id,
+                      SUM(CASE WHEN retired_at IS NULL THEN 1 ELSE 0 END) AS active,
+                      SUM(CASE WHEN retired_at IS NULL THEN 0 ELSE 1 END) AS retired
+               FROM intel_indicators GROUP BY feed_id"""):
+        counts[int(r["feed_id"])] = (int(r["active"] or 0), int(r["retired"] or 0))
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["enabled"] = bool(d["enabled"])
+        try:
+            d["attack"] = json.loads(d.get("attack") or "[]")
+        except ValueError:
+            d["attack"] = []
+        d["listed"], d["retired"] = counts.get(int(d["id"]), (0, 0))
+        out.append(d)
+    return out
+
+
+def intel_feed(conn: sqlite3.Connection, feed_id: int) -> dict[str, Any] | None:
+    return next((f for f in intel_feeds(conn) if f["id"] == feed_id), None)
+
+
+def intel_feed_create(conn: sqlite3.Connection, rec: dict[str, Any], by: str) -> int:
+    cols = [c for c in INTEL_FEED_COLUMNS if c in rec]
+    values = [json.dumps(rec[c]) if c == "attack" else (int(rec[c]) if c == "enabled" else rec[c])
+              for c in cols]
+    cur = conn.execute(
+        f"INSERT INTO intel_feeds ({', '.join(cols)}, created_at, created_by) "
+        f"VALUES ({', '.join('?' for _ in cols)}, ?, ?)",
+        values + [_iso(_naive_now()), by])
+    return int(cur.lastrowid)
+
+
+def intel_feed_update(conn: sqlite3.Connection, feed_id: int, changes: dict[str, Any]) -> None:
+    """Change a feed's settings and bump its version, so cached indexes are rebuilt."""
+    sets, values = [], []
+    for c, v in changes.items():
+        if c not in INTEL_FEED_COLUMNS:
+            continue
+        sets.append(f"{c} = ?")
+        values.append(json.dumps(v) if c == "attack" else (int(v) if c == "enabled" else v))
+    sets.append("version = version + 1")
+    conn.execute(f"UPDATE intel_feeds SET {', '.join(sets)} WHERE id = ?", values + [feed_id])
+
+
+def intel_feed_delete(conn: sqlite3.Connection, feed_id: int) -> None:
+    conn.execute("DELETE FROM intel_indicators WHERE feed_id = ?", (feed_id,))
+    conn.execute("DELETE FROM intel_feeds WHERE id = ?", (feed_id,))
+
+
+def intel_feed_status(conn: sqlite3.Connection, feed_id: int, attempted: str,
+                      succeeded: str | None, error: str | None, dropped: int | None) -> None:
+    if succeeded:
+        conn.execute("""UPDATE intel_feeds SET last_attempt_at = ?, last_success_at = ?,
+                            last_error = NULL, last_dropped = ? WHERE id = ?""",
+                     (attempted, succeeded, int(dropped or 0), feed_id))
+    else:
+        conn.execute("UPDATE intel_feeds SET last_attempt_at = ?, last_error = ? WHERE id = ?",
+                     (attempted, error, feed_id))
+
+
+def intel_replace(conn: sqlite3.Connection, feed_id: int, listed: dict[str, str],
+                  now: str) -> dict[str, int]:
+    """Make a feed's indicators what it lists now: new ones added, ones it no
+    longer lists retired (kept, with the time they left), returning ones
+    re-listed. Returns the counts; bumps the feed's version if anything changed."""
+    current = {r["value"]: r["retired_at"] for r in conn.execute(
+        "SELECT value, retired_at FROM intel_indicators WHERE feed_id = ?", (feed_id,))}
+    added = [v for v in listed if v not in current]
+    revived = [v for v in listed if v in current and current[v] is not None]
+    gone = [v for v, retired in current.items() if retired is None and v not in listed]
+    conn.executemany(
+        """INSERT INTO intel_indicators (feed_id, value, kind, first_listed, last_listed, retired_at)
+           VALUES (?, ?, ?, ?, ?, NULL)
+           ON CONFLICT (feed_id, value) DO UPDATE SET last_listed = excluded.last_listed,
+                                                      retired_at = NULL, kind = excluded.kind""",
+        [(feed_id, v, k, now, now) for v, k in listed.items()])
+    conn.executemany(
+        "UPDATE intel_indicators SET retired_at = ? WHERE feed_id = ? AND value = ? AND retired_at IS NULL",
+        [(now, feed_id, v) for v in gone])
+    if added or revived or gone:
+        conn.execute("UPDATE intel_feeds SET version = version + 1 WHERE id = ?", (feed_id,))
+    return {"added": len(added), "relisted": len(revived), "retired": len(gone),
+            "listed": len(listed)}
+
+
+def intel_version(conn: sqlite3.Connection) -> tuple:
+    """Changes whenever anything that matching depends on changes."""
+    return tuple((int(r["id"]), int(r["enabled"]), int(r["version"]), r["severity"])
+                 for r in conn.execute("SELECT id, enabled, version, severity FROM intel_feeds ORDER BY id"))
+
+
+def intel_listings(conn: sqlite3.Connection) -> list[Any]:
+    """Every indicator of every enabled feed, with its feed's name and severity."""
+    return conn.execute(
+        """SELECT i.feed_id, f.name AS feed_name, f.severity, f.attack, i.kind, i.value,
+                  i.first_listed, i.retired_at
+           FROM intel_indicators i JOIN intel_feeds f ON f.id = i.feed_id
+           WHERE f.enabled = 1
+           ORDER BY i.feed_id, i.value""").fetchall()
+
+
+def intel_lookup(conn: sqlite3.Connection, values: list[str]) -> list[dict[str, Any]]:
+    if not values:
+        return []
+    marks = ", ".join("?" for _ in values)
+    return [dict(r) for r in conn.execute(
+        f"""SELECT f.id AS feed_id, f.name AS feed, f.enabled, i.kind, i.value, i.first_listed,
+                   i.last_listed, i.retired_at
+            FROM intel_indicators i JOIN intel_feeds f ON f.id = i.feed_id
+            WHERE i.value IN ({marks}) ORDER BY f.id, i.value""", values)]
+
+
+def intel_indicators(conn: sqlite3.Connection, feed_id: int, limit: int = 200,
+                     include_retired: bool = False) -> list[dict[str, Any]]:
+    where = "" if include_retired else " AND retired_at IS NULL"
+    return [dict(r) for r in conn.execute(
+        f"""SELECT value, kind, first_listed, last_listed, retired_at FROM intel_indicators
+            WHERE feed_id = ?{where} ORDER BY value LIMIT ?""", (feed_id, limit))]
+

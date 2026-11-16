@@ -3,7 +3,7 @@ import { SEVERITIES, ACTOR_TYPES, SEVERITY_COLOUR } from "../constants.js";
 
 export default function Sidebar({ filters, onFiltersChange, categories, onOpenPolicy,
                                   canEditPolicy, onOpenIncidents, onOpenDigest, onOpenSubjects,
-                                  onOpenLockouts, canSeeLockouts, onOpenAccounts }) {
+                                  onOpenLockouts, canSeeLockouts, onOpenAccounts, onOpenIntel }) {
   const toggle = (group, value) => {
     const set = new Set(filters[group]);
     set.has(value) ? set.delete(value) : set.add(value);
@@ -97,6 +97,9 @@ export default function Sidebar({ filters, onFiltersChange, categories, onOpenPo
         </button>
         <button className="btn" style={{ width: "100%" }} onClick={onOpenSubjects}>
           Subjects
+        </button>
+        <button className="btn" style={{ width: "100%" }} onClick={onOpenIntel}>
+          Threat intel
         </button>
       </div>
 

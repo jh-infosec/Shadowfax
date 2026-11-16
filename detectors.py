@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import attack
 import envelope
 import injection
+import intel
 import manifest
 import permissions
 import timeutil
@@ -55,6 +56,8 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     # v0.36: prompt injection in what an agent reads, an agent acting on it,
     # and a tool rewritten under the same name.
     "prompt_injection", "injection_followed", "tool_definition_changed",
+    # v0.39: an agent reaching something a threat intelligence feed lists.
+    "threat_intel_match",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
@@ -66,7 +69,12 @@ FORWARD_ACTOR_ID = "shadowfax-forward"
 # back is not a dormancy signal for them, whatever an older policy lists.
 # v0.35: case notes and triage changes (cases.CASE_ACTOR_ID).
 CASE_ACTOR_ID = "shadowfax-case"
-PLATFORM_ACTORS = frozenset({AUTH_ACTOR_ID, INGEST_ACTOR_ID, FORWARD_ACTOR_ID, CASE_ACTOR_ID})
+# v0.39: changes to threat intelligence feeds, recorded for the audit trail.
+INTEL_ACTOR_ID = "shadowfax-intel"
+PLATFORM_ACTORS = frozenset({AUTH_ACTOR_ID, INGEST_ACTOR_ID, FORWARD_ACTOR_ID, CASE_ACTOR_ID,
+                             INTEL_ACTOR_ID})
+# Where an event that isn't a tool call names the address it reached or came from.
+_INTEL_FIELDS = ("url", "host", "ip", "domain", "source_ip", "dest_ip", "destination", "remote_addr")
 
 
 def external_alert_identity(tool: str, finding_id: str, actor_id: str = "") -> str:
@@ -254,6 +262,57 @@ def _internal_host(host: str) -> bool:
     return (ip.is_private or ip.is_link_local) and not ip.is_loopback
 
 
+def _intel_observed(event: dict, meta: dict) -> set[str]:
+    """The URLs, hosts and addresses an event reached (or, for a sign-in, came
+    from), as text for intel.Index.match."""
+    found: set[str] = set()
+    if event["event_type"] == "tool_call":
+        found |= injection.indicators(injection.call_text(event))
+        host, _ = _tool_call_destination(event, meta)
+        if host:
+            found.add(host)
+    else:
+        target = str(event.get("target") or "").strip()
+        if target:
+            found.add(target.lower())
+        for key in _INTEL_FIELDS:
+            if isinstance(meta.get(key), str) and meta[key].strip():
+                found.add(meta[key].strip().lower())
+    return found
+
+
+def _intel_alerts(event: dict, meta: dict, ts: datetime, index: "intel.Index") -> list[dict]:
+    """One alert per listed indicator the event reached, at the highest severity
+    any enabled feed gives it."""
+    by_value: dict[str, list] = {}
+    for m in index.match(_intel_observed(event, meta), ts):
+        by_value.setdefault(m.listing.value, []).append(m)
+    out = []
+    for value in sorted(by_value):
+        hits = by_value[value]
+        feeds = sorted({m.listing.feed for m in hits})
+        severity = max((m.listing.severity for m in hits), key=lambda s: intel.SEVERITY_RANK.get(s, 0))
+        attack = sorted({t for m in hits for t in m.listing.attack})
+        first = min(m.listing.first_listed for m in hits)
+        retired = [m.listing.retired_at for m in hits if m.listing.retired_at]
+        observed = hits[0].observed
+        verb = "reached" if event["event_type"] == "tool_call" else "involved"
+        when = ""
+        first_ts = timeutil.parse(first)
+        if ts < first_ts:
+            when = (f"; it was listed only later, on {first[:10]}, so this happened before the "
+                    f"feed knew it was bad")
+        elif retired and len(retired) == len(hits):
+            when = f"; it was listed then, and dropped from the feed on {max(retired)[:10]}"
+        kind = hits[0].listing.kind
+        what = {"ip": "address", "cidr": "network", "domain": "domain", "url": "URL"}.get(kind, kind)
+        listed_as = "" if value == observed else f" (listed as the {what} {value[:160]})"
+        out.append(_mk_alert(event, severity, intel.CATEGORY,
+            f"{verb} '{observed[:160]}'{listed_as}, which is on {', '.join(feeds)}{when}",
+            discriminator=f"intel:{value}", technique_ids=attack))
+    return out
+
+
 def _scope_violation(event: dict, meta: dict, scope: dict) -> str | None:
     """Message describing how a tool call left the engagement scope, or None."""
     host, port = _tool_call_destination(event, meta)
@@ -292,8 +351,13 @@ def _scope_violation(event: dict, meta: dict, scope: dict) -> str | None:
     return None
 
 
-def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[dict[str, Any]]:
-    """events must already be sorted ascending by timestamp and belong to one actor."""
+def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any],
+                  intel_index: "intel.Index | None" = None) -> list[dict[str, Any]]:
+    """events must already be sorted ascending by timestamp and belong to one actor.
+
+    `intel_index` (v0.39) is the listed indicators of every enabled threat
+    intelligence feed; alerts are then a pure function of (events, policy,
+    indicators)."""
     alerts: list[dict[str, Any]] = []
 
     last_seen: datetime | None = None
@@ -356,7 +420,7 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
         # Case notes (v0.35) are what analysts wrote about alerts, not behaviour
         # to judge: twenty notes in a busy minute is a team at work, not a
         # rate anomaly, and a note at 3am is not off-hours access.
-        if e["actor_id"] == CASE_ACTOR_ID:
+        if e["actor_id"] in (CASE_ACTOR_ID, INTEL_ACTOR_ID):
             continue
         ts = timeutil.parse(e["timestamp"])
         meta = e.get("metadata") or {}
@@ -697,6 +761,12 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any]) -> list[
                 dest = "external" if external else "internal"
                 alerts.append(_mk_alert(e, sev, "exfiltration_volume",
                     f"{size:,} bytes transferred to {dest} destination (threshold {threshold:,})"))
+
+        # Threat intelligence (v0.39): something this event reached is on a feed.
+        # Matched if it was listed at the time, or listed only later: the agent
+        # getting there before the feed did is the case that matters most.
+        if intel_index is not None and len(intel_index) and e["actor_id"] not in PLATFORM_ACTORS:
+            alerts.extend(_intel_alerts(e, meta, ts, intel_index))
 
         # agent tool calls: destructive actions and engagement-scope breaches
         if e["event_type"] == "tool_call":

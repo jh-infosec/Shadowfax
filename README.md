@@ -33,10 +33,12 @@ is not a security boundary and doesn't block anything.
 
 **Detection**
 
-- 32 deterministic detectors, including AI agent tool call analysis (destructive
+- 33 deterministic detectors, including AI agent tool call analysis (destructive
   commands, out of scope actions, privilege escalation, data exfiltration)
 - Prompt-injection detection: instructions hidden in what an agent reads, the
   agent acting on them, and tools rewritten under the same name
+- Threat intelligence feeds and team watchlists, checked against everything
+  agents reach, including what they reached before an entry was listed
 - Alerts are rebuilt from the event history whenever the policy changes, and
   each alert keeps a stable id across rescans
 - Every alert is mapped to MITRE ATT&CK techniques, or MITRE ATLAS for
@@ -699,6 +701,62 @@ The honest limit: a careful attacker can write an injection that reads like
 normal prose, and these markers won't see it. `injection_followed` will still
 catch the agent acting on it, as long as it reuses something from the content.
 
+## Threat intelligence
+
+Security teams and researchers publish lists of known-bad infrastructure:
+botnet command servers, links that serve malware, networks run by criminals.
+Shadowfax checks everything an agent reaches against the lists you switch on,
+and raises `threat_intel_match` when one is on them.
+
+Open **Threat intel** in the sidebar. An admin can add:
+
+- **A feed from a preset.** Three well-known free ones are built in:
+  [Feodo Tracker](https://feodotracker.abuse.ch/) (botnet command servers),
+  [Spamhaus DROP](https://www.spamhaus.org/blocklists/do-not-route-or-peer/)
+  (networks run by criminals) and [URLhaus](https://urlhaus.abuse.ch/)
+  (malware download links). URLhaus needs a free abuse.ch account key, which
+  goes in the server's environment as `SHADOWFAX_INTEL_ABUSECH_KEY`.
+- **Any other feed,** by its https address: one entry per line, CSV, or JSON.
+- **A watchlist of your own:** addresses, networks, domains or full URLs your
+  team wants to know about, typed straight in.
+
+Feeds refresh every six hours on their own, or when you click **Refresh now**.
+Analysts can look any address up to see which list it's on.
+
+![The Threat intel drawer with two feeds and a team watchlist](docs/screenshots/threat-intel.png)
+
+How it decides:
+
+- **It goes back over what already happened.** When a feed or watchlist gains
+  an entry, past activity is checked too. If an agent reached a server last
+  week that a feed only lists today, you get an alert saying it happened before
+  the listing, which is often how a compromise is found.
+- **Nothing is forgotten.** Feeds drop entries all the time. A dropped entry is
+  kept with the date it left, so an alert from when it was listed doesn't
+  vanish. Reaching it after it was dropped isn't flagged.
+- **A domain covers its subdomains; a URL is only that URL.** Malware is often
+  hosted on shared services, so a listed link on a code-hosting site doesn't
+  make the whole site bad.
+- **Reading isn't reaching.** An address that only appears in a page the agent
+  read isn't a match; that's what the prompt-injection checks are for.
+- **Switching a feed off removes its alerts,** like changing the policy does.
+  Every change to a feed goes into the evidence ledger with who made it.
+
+Because a feed can be added from the dashboard, the server is careful about
+what it downloads. Feeds must be https and on a public address, so the server
+can't be pointed at something inside your own network. The connection goes to
+the address that was checked, redirects aren't followed, and downloads are
+capped at 25 MB. An account key is written into the address as
+`{env:SHADOWFAX_INTEL_NAME}`: it comes from the server's environment, is never
+stored or shown, and only `SHADOWFAX_INTEL_` variables can be used that way, so
+a feed address can't read out the database password. Entries that would match
+your own internal network or a huge share of the internet are dropped, so a
+broken or tampered feed can't bury the alert table.
+
+The presets point at the addresses the providers published in November 2026.
+Providers do change them (abuse.ch started requiring a key for most downloads
+in October 2026), and when that happens the feed shows why its refresh failed.
+
 ## Evidence integrity
 
 There's not much point asking whether an agent's behaviour can be trusted if the
@@ -840,7 +898,7 @@ Some details worth knowing:
   Shadowfax's own detectors complete.
 - **A bad envelope is rejected whole,** with the field at fault named, so the
   person writing the other tool finds out what's wrong.
-- **Other tools can't use Shadowfax's own 32 detector categories,** so an alert
+- **Other tools can't use Shadowfax's own 33 detector categories,** so an alert
   reading `destructive_action` always means Shadowfax found it.
 - **Unvalidated findings are marked but not downgraded.** `validated: false`
   means the tool is repeating something the subject said about itself, like a
@@ -1010,6 +1068,9 @@ policy and shouldn't be able to loosen the platform's own protections.
 | `SHADOWFAX_MAX_EVENTS_PER_REQUEST` | 1000 | events or findings per request |
 | `SHADOWFAX_MAX_METADATA_BYTES` | 16 KiB | metadata per event |
 | `SHADOWFAX_INGEST_EVENTS_PER_MINUTE` | 6000 | ingest budget per credential |
+| `SHADOWFAX_INTEL_FETCH` | on | download threat intelligence feeds; watchlists work either way |
+| `SHADOWFAX_INTEL_ALLOW_PRIVATE` | off | let feeds be fetched from your own network, or over plain http (labs only) |
+| `SHADOWFAX_INTEL_` anything | unset | account keys for feeds, used as `{env:SHADOWFAX_INTEL_NAME}` in a feed address |
 | `ANTHROPIC_API_KEY` | unset | lets a model write explanations and translate searches |
 | `SHADOWFAX_LLM_MODEL` | built in | which model to use |
 
@@ -1074,7 +1135,7 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 1,001 checks against the API. To run the same checks on PostgreSQL, set
+That runs 1,046 checks against the API. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
 
@@ -1086,7 +1147,7 @@ python demo.py --fast          # put some data on the dashboard first
 python test_dashboard.py
 ```
 
-There are 69 checks, covering things like the alert rows rendering with severity
+There are 75 checks, covering things like the alert rows rendering with severity
 and ATT&CK technique, filters actually filtering, the kill chain being drawn, the
 ledger badge reading verified, the session token never appearing in a URL, and
 the Accounts drawer creating a user whose password really works. They refuse to
@@ -1194,11 +1255,11 @@ The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
 | 0.36 | Prompt-injection detection mapped to MITRE ATLAS, the demo GIF |
 | 0.37 | Connecting real agents: Claude Code hooks, an MCP proxy, a Python decorator |
 | 0.38 | The desktop app for Windows and Linux |
+| 0.39 | Threat intelligence feeds and watchlists |
 
 Everything on the original list for 1.0 is done. Still open:
 
 - Code-signing the desktop installer, so Windows stops warning about it
-- Threat intelligence feeds
 
 ## Philosophy
 

@@ -48,6 +48,7 @@ import detectors
 import digest as digest_mod
 import envelope
 import forward
+import intel
 import ledger
 import limits
 import manifest
@@ -62,7 +63,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.38.0"
+VERSION = "0.39.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -118,6 +119,8 @@ RESERVED_EVENT_TYPES = {
     # v0.35: case notes and triage changes, written by the notes endpoints.
     cases.NOTE: "POST /alerts/{alert_id}/notes or POST /incidents/{incident_id}/notes",
     cases.UPDATE: "nothing -- Shadowfax records these itself",
+    # v0.39: changes to threat intelligence feeds.
+    "intel_feed_change": "nothing -- Shadowfax records these itself",
 }
 
 # Recorded sign-in attempts are operational state for the throttle, not
@@ -147,7 +150,7 @@ SELF_TARGET = "shadowfax_login"
 # ingest client posting a "password_reset ... reset_by: admin" event under
 # shadowfax-auth produced an entry indistinguishable from a real one.
 RESERVED_ACTORS = frozenset({SELF_ACTOR_ID, INGEST_ACTOR_ID, forward.FORWARD_ACTOR_ID,
-                             cases.CASE_ACTOR_ID})
+                             cases.CASE_ACTOR_ID, detectors.INTEL_ACTOR_ID})
 
 
 def _refuse_reserved_actor(actor_id: str) -> None:
@@ -253,7 +256,12 @@ async def lifespan(app: FastAPI):
     _FORWARD_READY = True
     FORWARD_WORKER = forward.Worker(FORWARD, VERSION, db.get_conn, _record_forward_failure)
     FORWARD_WORKER.start()
+    intel_stop = threading.Event()
+    if INTEL_FETCH:
+        threading.Thread(target=_intel_loop, args=(intel_stop,), name="shadowfax-intel",
+                         daemon=True).start()
     yield
+    intel_stop.set()
     FORWARD_WORKER.stop()
 
 
@@ -589,7 +597,7 @@ def allow_ingest(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any
 def _rescan_actor(conn: sqlite3.Connection, actor_id: str) -> list[dict[str, Any]]:
     policy = db.get_policy(conn) or DEFAULT_POLICY
     events = db.get_events_for_actor(conn, actor_id)
-    alerts = detectors.run_for_actor(events, policy)
+    alerts = detectors.run_for_actor(events, policy, _intel_index(conn))
     db.replace_alerts_for_actor(conn, actor_id, alerts)
     # Queued in the same transaction as the alerts themselves, so a crash
     # between the two cannot lose one (v0.31).
@@ -2319,6 +2327,332 @@ def delete_api_key(key_id: int, request: Request,
                            key_label=existing["label"])
         conn.commit()
     return {"status": "deleted"}
+
+
+# Threat intelligence feeds (v0.39; see intel.py)
+#
+# Feeds can be added from the dashboard, unlike forwarding destinations, which
+# is why intel.fetch only goes to public https addresses it has checked. A lab
+# that hosts its own feed inside its network can allow that with
+# SHADOWFAX_INTEL_ALLOW_PRIVATE=1; SHADOWFAX_INTEL_FETCH=0 turns downloading off
+# entirely (watchlists still work).
+INTEL_FETCH = os.environ.get("SHADOWFAX_INTEL_FETCH", "1") != "0"
+INTEL_ALLOW_PRIVATE = os.environ.get("SHADOWFAX_INTEL_ALLOW_PRIVATE") == "1"
+MAX_INTEL_FEEDS = 25
+MAX_WATCHLIST = 10000
+_intel_fetcher: intel.Fetcher | None = None     # tests put a fake download here
+_intel_cache: dict[str, Any] = {"key": None, "index": None}
+_intel_lock = threading.Lock()
+
+
+def _intel_now() -> str:
+    """When a feed listed or dropped something, to the microsecond: events keep
+    the precision they were sent with, and one in the same second as a refresh
+    must still fall on the right side of it."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def _intel_index(conn: sqlite3.Connection) -> intel.Index:
+    """The matching index, rebuilt only when a feed or its indicators changed."""
+    key = db.intel_version(conn)
+    with _intel_lock:
+        if _intel_cache["key"] != key:
+            _intel_cache["index"] = intel.Index(
+                intel.listing_from_row(r) for r in db.intel_listings(conn))
+            _intel_cache["key"] = key
+        return _intel_cache["index"]
+
+
+def _record_intel_change(conn: sqlite3.Connection, action: str, feed: str, by: str,
+                         **detail: Any) -> None:
+    """Feed changes go into the ledger: switching a feed off makes its alerts
+    disappear, and who did that, and when, is evidence."""
+    db.insert_event(conn, {
+        "timestamp": _naive_utc_now().isoformat(), "actor_id": detectors.INTEL_ACTOR_ID,
+        "actor_type": SELF_ACTOR_TYPE, "task": "threat_intel", "event_type": "intel_feed_change",
+        "target": feed, "metadata": {"action": action, "by": by, **detail},
+    })
+
+
+def _intel_rescan(conn: sqlite3.Connection) -> None:
+    for actor_id, _ in db.distinct_actors(conn):
+        if actor_id != detectors.INTEL_ACTOR_ID:
+            _rescan_actor(conn, actor_id)
+
+
+def _intel_refresh(feed_id: int) -> dict[str, Any]:
+    """Download one feed and bring its indicators up to date. The download
+    happens before any database work, so a slow feed holds no lock."""
+    with db.get_conn() as conn:
+        feed = db.intel_feed(conn, feed_id)
+    if feed is None:
+        raise HTTPException(404, "no such feed")
+    if feed["kind"] != "remote":
+        raise HTTPException(400, "a watchlist has no address to download from; edit its entries instead")
+    attempted = _intel_now()
+    try:
+        if not INTEL_FETCH and _intel_fetcher is None:
+            raise intel.IntelError("downloading feeds is switched off on this server "
+                                   "(SHADOWFAX_INTEL_FETCH=0)")
+        url = intel.resolve_url(feed["url"])
+        body = (_intel_fetcher or (lambda u: intel.fetch(u, INTEL_ALLOW_PRIVATE)))(url)
+        listed, dropped = intel.classify_all(intel.parse(body, feed["format"], feed["field"]))
+        if not listed:
+            raise intel.IntelError("the download had no entries Shadowfax could use; check the "
+                                   "format and field")
+    except intel.IntelError as exc:
+        with db.get_conn() as conn:
+            db.intel_feed_status(conn, feed_id, attempted, None, str(exc), None)
+            conn.commit()
+        return {"ok": False, "error": str(exc)}
+    with db.get_conn() as conn:
+        counts = db.intel_replace(conn, feed_id, listed, attempted)
+        db.intel_feed_status(conn, feed_id, attempted, attempted, None, dropped)
+        changed = any(counts[k] for k in ("added", "relisted", "retired"))
+        if changed and feed["enabled"]:
+            _intel_rescan(conn)
+        conn.commit()
+    if changed:
+        bus.publish({"type": "change", "reason": "intel"})
+    return {"ok": True, **counts, "dropped": dropped}
+
+
+def _intel_due(now: datetime) -> list[int]:
+    with db.get_conn() as conn:
+        feeds = db.intel_feeds(conn)
+    due = []
+    for f in feeds:
+        if f["kind"] != "remote" or not f["enabled"]:
+            continue
+        last = timeutil.parse(f["last_attempt_at"]) if f["last_attempt_at"] else None
+        if last is None or now - last >= timedelta(minutes=f["refresh_minutes"]):
+            due.append(f["id"])
+    return due
+
+
+def _intel_loop(stop: threading.Event) -> None:
+    while not stop.wait(60):
+        try:
+            for feed_id in _intel_due(_naive_utc_now()):
+                _intel_refresh(feed_id)
+        except Exception:   # one bad pass must not end refreshing for good
+            pass
+
+
+class IntelFeedRequest(BaseModel):
+    preset: str | None = Field(None, max_length=40)
+    name: str | None = Field(None, max_length=80)
+    url: str | None = Field(None, max_length=2048)
+    format: str = "text"
+    field: str | None = Field(None, max_length=64)
+    severity: str = "high"
+    refresh_minutes: int = intel.DEFAULT_REFRESH_MINUTES
+    description: str | None = Field(None, max_length=400)
+    attack: list[str] = Field(default_factory=list, max_length=8)
+    watchlist: bool = False
+    enabled: bool = True
+
+
+class IntelFeedUpdate(BaseModel):
+    name: str | None = Field(None, max_length=80)
+    enabled: bool | None = None
+    severity: str | None = None
+    refresh_minutes: int | None = None
+    description: str | None = Field(None, max_length=400)
+
+
+class WatchlistRequest(BaseModel):
+    values: list[str] = Field(max_length=MAX_WATCHLIST)
+
+
+def _check_feed_settings(severity: str | None, refresh: int | None, attack_ids: list[str] | None) -> None:
+    if severity is not None and severity not in intel.SEVERITIES:
+        raise HTTPException(400, f"severity must be one of {', '.join(intel.SEVERITIES)}")
+    if refresh is not None and not intel.MIN_REFRESH_MINUTES <= refresh <= 7 * 24 * 60:
+        raise HTTPException(400, f"refresh every {intel.MIN_REFRESH_MINUTES} minutes to 7 days "
+                                 f"(10080 minutes); providers ban clients that ask too often")
+    unknown = [t for t in (attack_ids or []) if t not in attack.registry()]
+    if unknown:
+        raise HTTPException(400, f"unknown ATT&CK technique {unknown[0]!r}")
+
+
+def _public_feed(f: dict[str, Any]) -> dict[str, Any]:
+    keep = ("id", "name", "kind", "url", "format", "field", "severity", "attack", "description",
+            "refresh_minutes", "enabled", "created_at", "created_by", "last_attempt_at",
+            "last_success_at", "last_error", "last_dropped", "listed", "retired")
+    return {k: f.get(k) for k in keep}
+
+
+@app.get("/intel/presets")
+def intel_presets(identity: dict = Depends(require_role("viewer"))):
+    return [{"key": k, **{f: p[f] for f in ("name", "url", "format", "field", "severity",
+                                             "description")}} for k, p in intel.PRESETS.items()]
+
+
+@app.get("/intel/feeds")
+def intel_feeds(identity: dict = Depends(require_role("viewer"))):
+    with db.get_conn() as conn:
+        feeds = [_public_feed(f) for f in db.intel_feeds(conn)]
+    return {"feeds": feeds, "fetching": INTEL_FETCH}
+
+
+@app.post("/intel/feeds")
+def intel_add_feed(req: IntelFeedRequest, identity: dict = Depends(require_role("admin"))):
+    if req.preset:
+        preset = intel.PRESETS.get(req.preset)
+        if preset is None:
+            raise HTTPException(400, f"no preset called {req.preset!r}")
+        rec = {"kind": "remote", "name": preset["name"], "url": preset["url"],
+               "format": preset["format"], "field": preset["field"], "severity": preset["severity"],
+               "attack": preset["attack"], "description": preset["description"],
+               "refresh_minutes": intel.DEFAULT_REFRESH_MINUTES, "enabled": req.enabled}
+    elif req.watchlist:
+        if not (req.name or "").strip():
+            raise HTTPException(400, "give the watchlist a name")
+        _check_feed_settings(req.severity, None, req.attack)
+        rec = {"kind": "manual", "name": req.name.strip(), "url": None, "format": "text",
+               "field": None, "severity": req.severity, "attack": req.attack,
+               "description": req.description, "refresh_minutes": intel.DEFAULT_REFRESH_MINUTES,
+               "enabled": req.enabled}
+    else:
+        if not (req.name or "").strip() or not req.url:
+            raise HTTPException(400, "a feed needs a name and a URL (or a preset)")
+        if req.format not in intel.FORMATS:
+            raise HTTPException(400, f"format must be one of {', '.join(intel.FORMATS)}")
+        if req.format == "json" and not req.field:
+            raise HTTPException(400, "a JSON feed needs the name of the field that holds each entry")
+        try:
+            intel.check_template(req.url, INTEL_ALLOW_PRIVATE)
+        except intel.IntelError as exc:
+            raise HTTPException(400, str(exc))
+        _check_feed_settings(req.severity, req.refresh_minutes, req.attack)
+        rec = {"kind": "remote", "name": req.name.strip(), "url": req.url.strip(),
+               "format": req.format, "field": req.field, "severity": req.severity,
+               "attack": req.attack, "description": req.description,
+               "refresh_minutes": req.refresh_minutes, "enabled": req.enabled}
+    with db.get_conn() as conn:
+        feeds = db.intel_feeds(conn)
+        if len(feeds) >= MAX_INTEL_FEEDS:
+            raise HTTPException(400, f"at most {MAX_INTEL_FEEDS} feeds")
+        if any(f["name"].lower() == rec["name"].lower() for f in feeds):
+            raise HTTPException(409, f"there is already a feed called {rec['name']!r}")
+        feed_id = db.intel_feed_create(conn, rec, identity["username"])
+        _record_intel_change(conn, "added", rec["name"], identity["username"],
+                             kind=rec["kind"], url=rec["url"], severity=rec["severity"])
+        conn.commit()
+        feed = db.intel_feed(conn, feed_id)
+    bus.publish({"type": "change", "reason": "intel"})
+    return _public_feed(feed)
+
+
+@app.patch("/intel/feeds/{feed_id}")
+def intel_update_feed(feed_id: int, req: IntelFeedUpdate, identity: dict = Depends(require_role("admin"))):
+    changes = {k: v for k, v in req.model_dump().items() if v is not None}
+    _check_feed_settings(changes.get("severity"), changes.get("refresh_minutes"), None)
+    if "name" in changes:
+        changes["name"] = changes["name"].strip()
+        if not changes["name"]:
+            raise HTTPException(400, "a feed needs a name")
+    with db.get_conn() as conn:
+        feed = db.intel_feed(conn, feed_id)
+        if feed is None:
+            raise HTTPException(404, "no such feed")
+        if "name" in changes and any(f["name"].lower() == changes["name"].lower() and f["id"] != feed_id
+                                     for f in db.intel_feeds(conn)):
+            raise HTTPException(409, f"there is already a feed called {changes['name']!r}")
+        real = {k: v for k, v in changes.items() if feed.get(k) != v}
+        if real:
+            db.intel_feed_update(conn, feed_id, real)
+            _record_intel_change(conn, "changed", feed["name"], identity["username"],
+                                 changes={k: [feed.get(k), v] for k, v in real.items()})
+            if {"enabled", "severity"} & set(real):
+                _intel_rescan(conn)
+        conn.commit()
+        feed = db.intel_feed(conn, feed_id)
+    if real:
+        bus.publish({"type": "change", "reason": "intel"})
+    return _public_feed(feed)
+
+
+@app.delete("/intel/feeds/{feed_id}")
+def intel_delete_feed(feed_id: int, identity: dict = Depends(require_role("admin"))):
+    with db.get_conn() as conn:
+        feed = db.intel_feed(conn, feed_id)
+        if feed is None:
+            raise HTTPException(404, "no such feed")
+        db.intel_feed_delete(conn, feed_id)
+        _record_intel_change(conn, "removed", feed["name"], identity["username"],
+                             listed=feed["listed"], retired=feed["retired"])
+        _intel_rescan(conn)
+        conn.commit()
+    bus.publish({"type": "change", "reason": "intel"})
+    return {"status": "removed", "name": feed["name"]}
+
+
+@app.post("/intel/feeds/{feed_id}/refresh")
+def intel_refresh_feed(feed_id: int, identity: dict = Depends(require_role("admin"))):
+    return _intel_refresh(feed_id)
+
+
+@app.put("/intel/feeds/{feed_id}/entries")
+def intel_set_watchlist(feed_id: int, req: WatchlistRequest, identity: dict = Depends(require_role("admin"))):
+    listed, dropped = intel.classify_all(req.values)
+    rejected = [v for v in req.values if v.strip() and intel.classify(v) is None][:20]
+    with db.get_conn() as conn:
+        feed = db.intel_feed(conn, feed_id)
+        if feed is None:
+            raise HTTPException(404, "no such feed")
+        if feed["kind"] != "manual":
+            raise HTTPException(400, "only a watchlist's entries can be edited; a feed's come from its download")
+        now = _intel_now()
+        counts = db.intel_replace(conn, feed_id, listed, now)
+        db.intel_feed_status(conn, feed_id, now, now, None, dropped)
+        changed = any(counts[k] for k in ("added", "relisted", "retired"))
+        if changed:
+            _record_intel_change(conn, "entries_changed", feed["name"], identity["username"],
+                                 added=counts["added"], retired=counts["retired"])
+            if feed["enabled"]:
+                _intel_rescan(conn)
+        conn.commit()
+    if changed:
+        bus.publish({"type": "change", "reason": "intel"})
+    return {**counts, "rejected": rejected, "dropped": dropped}
+
+
+@app.get("/intel/feeds/{feed_id}/entries")
+def intel_feed_entries(feed_id: int, retired: bool = False, limit: int = Query(200, ge=1, le=MAX_WATCHLIST),
+                       identity: dict = Depends(require_role("analyst"))):
+    with db.get_conn() as conn:
+        if db.intel_feed(conn, feed_id) is None:
+            raise HTTPException(404, "no such feed")
+        return db.intel_indicators(conn, feed_id, limit, include_retired=retired)
+
+
+@app.get("/intel/lookup")
+def intel_lookup(value: str = Query(..., min_length=1, max_length=2048),
+                 identity: dict = Depends(require_role("analyst"))):
+    """Is this on any feed? The value as given, its host, and each parent
+    domain or covering network that a feed lists."""
+    c = intel.classify(value)
+    with db.get_conn() as conn:
+        index = intel.Index(intel.listing_from_row(r) for r in conn.execute(
+            """SELECT i.feed_id, f.name AS feed_name, f.severity, f.attack, i.kind, i.value,
+                      i.first_listed, i.retired_at
+               FROM intel_indicators i JOIN intel_feeds f ON f.id = i.feed_id"""))
+        hits = index.match([value.strip()], datetime(1970, 1, 1))
+        enabled = {f["id"]: f["enabled"] for f in db.intel_feeds(conn)}
+    seen = set()
+    out = []
+    for m in hits:
+        key = (m.listing.feed_id, m.listing.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"feed_id": m.listing.feed_id, "feed": m.listing.feed,
+                    "enabled": enabled.get(m.listing.feed_id, False), "kind": m.listing.kind,
+                    "value": m.listing.value, "first_listed": m.listing.first_listed,
+                    "retired_at": m.listing.retired_at})
+    return {"value": value, "understood_as": c[0] if c else None, "listed": out}
 
 
 # Serving the dashboard (v0.12)

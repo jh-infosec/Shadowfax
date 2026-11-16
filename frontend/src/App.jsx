@@ -9,6 +9,7 @@ import IncidentsDrawer from "./components/IncidentsDrawer.jsx";
 import DigestDrawer from "./components/DigestDrawer.jsx";
 import LockoutsDrawer from "./components/LockoutsDrawer.jsx";
 import AccountsDrawer from "./components/AccountsDrawer.jsx";
+import IntelDrawer from "./components/IntelDrawer.jsx";
 import TwoFactorModal from "./components/TwoFactorModal.jsx";
 import SubjectsDrawer from "./components/SubjectsDrawer.jsx";
 import ProfileDraftModal from "./components/ProfileDraftModal.jsx";
@@ -73,6 +74,7 @@ export default function App() {
   const [digestOpen, setDigestOpen] = useState(false);
   const [lockoutsOpen, setLockoutsOpen] = useState(false);
   const [accountsOpen, setAccountsOpen] = useState(false);
+  const [intelOpen, setIntelOpen] = useState(false);
   const [twoFactorOpen, setTwoFactorOpen] = useState(false);
   const [subjectsOpen, setSubjectsOpen] = useState(false);
   const [draftAgent, setDraftAgent] = useState(null);
@@ -283,6 +285,7 @@ export default function App() {
       else if (notesAlert) setNotesAlert(null);
       else if (explainAlert) setExplainAlert(null);
       else if (accountsOpen) setAccountsOpen(false);
+      else if (intelOpen) setIntelOpen(false);
       else if (subjectsOpen) setSubjectsOpen(false);
       else if (lockoutsOpen) setLockoutsOpen(false);
       else if (digestOpen) setDigestOpen(false);
@@ -293,7 +296,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [passwordOpen, policyOpen, twoFactorOpen, draftAgent, notesAlert, explainAlert, accountsOpen, subjectsOpen, lockoutsOpen, digestOpen,
+  }, [passwordOpen, policyOpen, twoFactorOpen, draftAgent, notesAlert, explainAlert, accountsOpen, intelOpen, subjectsOpen, lockoutsOpen, digestOpen,
       incidentsOpen, selectedActorId]);
 
   const handleLogout = async () => {
@@ -433,6 +436,7 @@ export default function App() {
           onOpenIncidents={() => setIncidentsOpen(true)}
           onOpenDigest={() => setDigestOpen(true)}
           onOpenSubjects={() => setSubjectsOpen(true)}
+          onOpenIntel={() => setIntelOpen(true)}
           onOpenLockouts={() => setLockoutsOpen(true)}
           onOpenAccounts={() => setAccountsOpen(true)}
           canSeeLockouts={canAdmin}
@@ -485,6 +489,9 @@ export default function App() {
         />
       )}
 
+      {intelOpen && (
+        <IntelDrawer onClose={() => setIntelOpen(false)} canAdmin={canAdmin} canAnalyst={canAnalyst} />
+      )}
       {accountsOpen && (
         <AccountsDrawer me={user.username} onClose={() => setAccountsOpen(false)} />
       )}

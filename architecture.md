@@ -516,7 +516,8 @@ apart in version, and the dashboard needs no build of its own for the desktop.
 - **settings.js** keeps recent servers in a JSON file in the app's data folder,
   sanitised on load. No credentials: the sign-in stays in the dashboard page's
   own storage for that origin.
-- **frontend/src/desktop.js** is the dashboard's half. Only when
+- **frontend/src/desktop.js
+frontend/src/components/IntelDrawer.jsx** is the dashboard's half. Only when
   `window.shadowfaxDesktop` exists, it reads critical and high alerts on each
   stream change; the first read only learns what exists, later ones notify
   what's new and unacknowledged.
@@ -526,6 +527,32 @@ arguments and `NODE_OPTIONS` off; asar-only loading with integrity checks).
 Because those fuses also stop Playwright driving the packaged app,
 `test/packaged.js` checks it from outside over the Chrome DevTools protocol,
 and checks the fuses directly.
+
+#### intel.py
+
+Threat intelligence (v0.39). Pure parsing (`parse`: text, CSV by column name or
+number, JSON array or one object per line), classifying (`classify`: ip, cidr,
+domain or url, normalised; internal ranges and networks wider than /8 or /32
+dropped) and matching (`Index.match`: exact addresses, covering networks by
+prefix length, a domain and its parents, exact URLs). Plus the fenced
+download, `fetch`: https only, every resolved address checked public, the
+connection pinned to the checked address with the certificate still verified
+against the host name, no redirects, a 25 MB cap. `{env:SHADOWFAX_INTEL_*}`
+placeholders are filled at download time and the name is checked again there,
+so a URL edited in the database still can't read other variables.
+
+Indicators live in `intel_indicators`, keyed (feed, value), with
+`first_listed` and `retired_at`. A refresh upserts what the feed lists and
+retires what it no longer lists; nothing is deleted while the feed exists. An
+event matches if it happened before `retired_at`, so alerts are a pure function
+of (events, policy, indicators) and a feed dropping an entry never rewrites
+history. A refresh that changes anything bumps the feed's version, which
+invalidates the cached `Index` in app.py (`_intel_index`, keyed on every
+feed's id, enabled flag, version and severity), and rescans every actor: that
+is how past activity gets checked against new entries. The download happens
+before any database work, so a slow feed holds no lock. Feed changes are
+events under the reserved `shadowfax-intel` actor, which the detector loop
+skips like the case actor.
 
 #### forward.py
 
@@ -1339,6 +1366,7 @@ totp.py                 subjects.py             profile_draft.py
 forward.py              screenshots.py          docs/screenshots/*.png
 pgcompat.py             cases.py                injection.py
 demo_gif.py             docs/demo.gif           shadowfax_agent.py
+intel.py
 
 desktop/package.json    desktop/package-lock.json
 desktop/main.js         desktop/preload.js      desktop/connect-preload.js

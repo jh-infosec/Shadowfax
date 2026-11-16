@@ -69,7 +69,10 @@ new work.
       `v0.4.6` snapshot.
 - [x] Alert correlation. `correlate.py` groups an actor's alerts into incidents
       by a policy time-window; `GET /incidents`. Shipped in `v0.4.7`.
-- [ ] Threat intelligence feeds
+- [x] Threat intelligence feeds (`v0.39.0`): presets for Feodo Tracker,
+      Spamhaus DROP and URLhaus, any feed by its address, and team watchlists.
+      Matches look back over past activity, and dropped entries are kept so
+      alerts don't vanish. Downloads are fenced against SSRF.
 - [x] Incident reports. Deterministic markdown report per incident
       (`GET /incidents/{id}`), shown in the dashboard's Incidents view. `v0.4.7`.
 

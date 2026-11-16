@@ -429,3 +429,44 @@ export function setAlertState(alertId, patch) {
 }
 
 export { API_BASE };
+
+// Threat intel (v0.39). Reading is open to anyone signed in, lookups to
+// analysts, and every change to admins (the server enforces all of it).
+export function getIntelFeeds() {
+  return request("/intel/feeds");
+}
+
+export function getIntelPresets() {
+  return request("/intel/presets");
+}
+
+export function addIntelFeed(body) {
+  return request("/intel/feeds", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function updateIntelFeed(id, changes) {
+  return request(`/intel/feeds/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(changes) });
+}
+
+export function removeIntelFeed(id) {
+  return request(`/intel/feeds/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function refreshIntelFeed(id) {
+  return request(`/intel/feeds/${encodeURIComponent(id)}/refresh`, { method: "POST" });
+}
+
+export function getIntelEntries(id) {
+  return request(`/intel/feeds/${encodeURIComponent(id)}/entries?limit=10000`);
+}
+
+export function setIntelEntries(id, values) {
+  return request(`/intel/feeds/${encodeURIComponent(id)}/entries`, {
+    method: "PUT", body: JSON.stringify({ values }),
+  });
+}
+
+export function intelLookup(value) {
+  return request(`/intel/lookup?value=${encodeURIComponent(value)}`);
+}
+

@@ -1,5 +1,48 @@
 # Changelog
 
+## Version 0.39.0
+
+Threat intelligence feeds: what agents reach, checked against lists of
+known-bad infrastructure.
+
+### What's new
+
+- **`threat_intel_match`,** the 33rd detector. An agent calling an address,
+  domain or URL that a feed lists raises it, at the severity the feed is set to.
+  A sign-in from a listed address does too.
+- **Feeds and watchlists,** managed from a new **Threat intel** drawer.
+  Presets for Feodo Tracker, Spamhaus DROP and URLhaus, any other feed by its
+  https address (plain lists, CSV or JSON), and watchlists your team types in.
+  Feeds refresh every six hours, or on demand.
+- **It looks back.** When a feed gains an entry, past activity is checked too,
+  and an agent that reached something before it was listed gets an alert that
+  says so.
+- **Nothing is forgotten.** An entry a feed drops is kept with the date it left,
+  so alerts from when it was listed stay put, and reaching it afterwards isn't
+  flagged.
+- **Lookups.** Analysts can check any address against every list.
+- **Every feed change is in the ledger,** under Shadowfax's own
+  `shadowfax-intel` account, with who made it.
+- **Downloads are fenced.** Feeds must be https on a public address, the
+  connection goes to the address that was checked, redirects aren't followed,
+  downloads are capped, and account keys come from `SHADOWFAX_INTEL_*`
+  environment variables, never stored or shown. `SHADOWFAX_INTEL_FETCH=0` turns
+  downloading off; `SHADOWFAX_INTEL_ALLOW_PRIVATE=1` lets a lab use a feed on
+  its own network.
+
+### Tested
+
+- 1,046 API checks, on SQLite and on PostgreSQL. The 45 new ones cover reading
+  each feed format, the fences (a feed on localhost, plain http, a redirect, an
+  oversized download, a URL reaching for the database password), looking back,
+  dropped entries, switching feeds off and on, and a key never appearing
+  anywhere it's stored or shown.
+- 75 browser checks, 6 of them new: adding a watchlist from the drawer, the
+  agent that had already reached an entry being flagged, a lookup, and a hostile
+  feed name showing as text.
+- 12 deliberate bugs planted in the new code, one at a time; the tests caught
+  every one.
+
 ## Version 0.38.0
 
 The desktop app, the last item on the roadmap for 1.0.

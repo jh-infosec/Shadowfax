@@ -122,6 +122,7 @@ def run(url: str, headed: bool) -> int:
             _run_two_factor_checks(browser, url)
             _run_rotation_checks(browser, url)
             _run_case_notes_checks(browser, url)
+            _run_intel_checks(browser, url)
         except Exception as exc:
             # A component that throws on mount takes the whole page with it, and
             # the first thing to notice is a selector that never appears. Report
@@ -538,6 +539,68 @@ def _run_case_notes_checks(browser, url: str) -> None:
           page.locator(".incident-detail button:has-text('Explain this incident')").count() == 1
           and page.locator(".incident-detail .case-notes").count() == 1
           and page.locator(f".incident-detail .case-body:has-text('{inc_text}')").count() == 1)
+    context.close()
+
+
+def _run_intel_checks(browser, url: str) -> None:
+    """Threat intel (v0.39): add a watchlist from the drawer, give it entries,
+    see the agent that reached one flagged, look an address up, and check a
+    hostile feed name shows as text."""
+    import secrets
+    from datetime import datetime, timezone
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    tag = secrets.token_hex(3)
+    agent = f"intel-ui-agent-{tag}"
+    domain = f"c2-{tag}.example"
+    _api(url, "POST", "/events", [{
+        "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        "actor_id": agent, "actor_type": "ai_agent", "event_type": "tool_call",
+        "target": f"https://{domain}/beacon", "metadata": {"tool": "WebFetch", "url": f"https://{domain}/beacon"}}], admin)
+    hostile = f"<img src=x onerror=alert(1)> list {tag}"
+    _api(url, "POST", "/intel/feeds", {"watchlist": True, "name": hostile, "severity": "medium"}, admin)
+
+    context = browser.new_context(viewport={"width": 1400, "height": 900})
+    page = context.new_page()
+    page.goto(url, wait_until="networkidle")
+    page.fill('input[autocomplete="username"]', USERNAME)
+    page.fill('input[type="password"]', PASSWORD)
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".table-wrap tbody tr", timeout=15000)
+    page.get_by_role("button", name="Threat intel", exact=True).click()
+    page.wait_for_selector(".intel-drawer .intel-body", timeout=10000)
+    check("the Threat intel drawer opens, and a feed's name is shown as text, not markup",
+          page.locator(f".intel-feed-name:has-text('list {tag}')").count() == 1
+          and page.locator(".intel-drawer img").count() == 0)
+
+    name = f"Team watchlist {tag}"
+    page.select_option(".intel-add select", "watchlist")
+    page.fill('.intel-add input[placeholder="Name"]', name)
+    page.click(".intel-add button[type=submit]")
+    row = page.locator(".intel-feed", has_text=name)
+    row.wait_for(timeout=10000)
+    check("an admin adds a watchlist from the drawer", row.count() == 1)
+    row.locator("button:has-text('Edit entries')").click()
+    row.locator(".intel-entries").fill(f"{domain}\n10.0.0.1")
+    row.locator("button:has-text('Save entries')").click()
+    page.wait_for_selector(f".intel-feed:has-text('{name}') .intel-note:has-text('Not used')", timeout=10000)
+    check("saving entries says which ones it couldn't use (an internal address)",
+          "10.0.0.1" in row.locator(".intel-note").inner_text())
+    page.wait_for_timeout(1500)
+    alerts = _api(url, "GET", f"/alerts?actor_id={agent}", None, admin)
+    check("and the agent that had already reached that domain is flagged",
+          any(a["category"] == "threat_intel_match" for a in alerts))
+
+    page.fill(".intel-lookup input", f"https://beacon.{domain}/x")
+    page.click(".intel-lookup button:has-text('Look up')")
+    page.wait_for_selector(".intel-hits li", timeout=10000)
+    check("looking up a URL on a listed domain names the watchlist",
+          name in page.inner_text(".intel-hits"))
+    row.locator("button:has-text('Switch off')").click()
+    page.wait_for_selector(f".intel-feed.off:has-text('{name}')", timeout=10000)
+    check("switching a watchlist off shows it as off", True)
+    for f in _api(url, "GET", "/intel/feeds", None, admin)["feeds"]:
+        if tag in f["name"]:
+            _api(url, "DELETE", f"/intel/feeds/{f['id']}", None, admin)
     context.close()
 
 

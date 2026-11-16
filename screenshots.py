@@ -22,6 +22,7 @@ import os
 import secrets
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -63,6 +64,52 @@ def _seed_extras(url: str, token: str) -> str:
             "source": {"tool": tool, "version": version, "run_id": run},
             "subject": host, "findings": findings}, token)
     return f"{host['kind']}:{host['id']}"
+
+
+def _intel_setup(url: str, token: str) -> None:
+    """A team watchlist, and (when the server allows feeds on its own network,
+    SHADOWFAX_INTEL_ALLOW_PRIVATE=1) a small lab feed served from here, so the
+    Threat intel drawer has something real in it. An agent from the Claude Code
+    session reaches one of the listed servers."""
+    import http.server
+    import socketserver
+    import threading
+
+    names = {f["name"] for f in _api(url, "GET", "/intel/feeds", None, token)["feeds"]}
+    if "Lab feed: command servers" not in names:
+        body = b"# lab feed\n198.51.100.23\n198.51.100.24\n203.0.113.0/26\n"
+
+        class Feed(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = socketserver.TCPServer(("127.0.0.1", 0), Feed)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            feed = _api(url, "POST", "/intel/feeds", {
+                "name": "Lab feed: command servers", "url": f"http://127.0.0.1:{srv.server_address[1]}/c2.txt",
+                "severity": "critical", "attack": ["T1071"],
+                "description": "Known command servers from the lab's own sandbox runs."}, token)
+            _api(url, "POST", f"/intel/feeds/{feed['id']}/refresh", {}, token)
+        except urllib.error.HTTPError:
+            pass   # the server only fetches public feeds; the watchlist still shows
+        finally:
+            srv.shutdown()
+    if "Team watchlist" not in names:
+        wl = _api(url, "POST", "/intel/feeds", {"watchlist": True, "name": "Team watchlist",
+                                                "severity": "high",
+                                                "description": "Infrastructure from our own incidents."}, token)
+        _api(url, "PUT", f"/intel/feeds/{wl['id']}/entries",
+             {"values": ["paste.evil.example", "drop.badcdn.example", "198.51.100.77"]}, token)
+    _api(url, "POST", "/events", [{
+        "timestamp": "2026-11-03T08:58:00", "actor_id": "claude-code-laptop", "actor_type": "ai_agent",
+        "event_type": "tool_call", "target": "curl -s http://198.51.100.23:8080/gate.php",
+        "metadata": {"tool": "Bash", "command": "curl -s http://198.51.100.23:8080/gate.php"}}], token)
 
 
 def _claude_code_session(url: str, token: str) -> str:
@@ -148,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
             "Agreed. Removing nc and bash from its tools and re-running the engagement "
             "under the drafted profile.")}, token)
     claude = _claude_code_session(args.url, token)
+    _intel_setup(args.url, token)
     OUT.mkdir(parents=True, exist_ok=True)
     shots: list[str] = []
 
@@ -210,6 +258,14 @@ def main(argv: list[str] | None = None) -> int:
         page.keyboard.press("Escape")
         search.fill("")
         page.wait_for_timeout(800)
+
+        # v0.39: the Threat intel drawer, with whatever _intel_setup added.
+        page.get_by_role("button", name="Threat intel", exact=True).click()
+        page.wait_for_selector(".intel-drawer .intel-feed", timeout=10000)
+        page.wait_for_timeout(500)
+        save(page, "threat-intel")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
 
         page.get_by_role("button", name="Subjects", exact=True).click()
         page.wait_for_selector(".subjects-table", timeout=10000)
