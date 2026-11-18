@@ -968,6 +968,9 @@ ok = hmac.compare_digest(expected, signature) and abs(time.time() - int(ts)) < 3
 
 ## Security
 
+Found a vulnerability? Please report it privately, as [SECURITY.md](SECURITY.md)
+explains, rather than in a public issue.
+
 Every endpoint needs authentication. People sign in for a bearer token and
 agents send events with an API key. There are three roles: `viewer` can read,
 `analyst` can acknowledge, assign and edit the policy, and `admin` manages
@@ -1197,6 +1200,15 @@ commit, runs the app's tests against it under a virtual screen, then builds the
 Linux package and checks it. **desktop-windows** builds the Windows installer
 on Windows, installs it silently and checks what landed.
 
+Two more look at the code itself, on every push and once a week even when
+nothing has changed. **supply-chain** runs `supply_chain.py`, which checks the
+pinned Python packages, the dashboard's JavaScript and the Electron inside the
+desktop app against the public vulnerability databases, and fails if anything
+that ships has a known high or critical one. **codeql** runs GitHub's static
+analysis on the Python and JavaScript; its findings are under the Security tab.
+The test suite also lints the code with `ruff`, and runs on exactly the package
+versions pinned in `requirements.lock`, which is what the image installs.
+
 ### Releasing
 
 Publishing a release on GitHub (**Releases → Draft a new release**, with a tag
@@ -1256,6 +1268,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
 | 0.37 | Connecting real agents: Claude Code hooks, an MCP proxy, a Python decorator |
 | 0.38 | The desktop app for Windows and Linux |
 | 0.39 | Threat intelligence feeds and watchlists |
+| 0.40 | MIT licence, security policy, pinned dependencies, vulnerability and code scanning |
 
 Everything on the original list for 1.0 is done. Still open:
 
@@ -1270,3 +1283,8 @@ one file, where the policy controls it and the tests can check it.
 
 Language models are only used to explain and summarise. They're never the
 security boundary.
+
+## Licence
+
+Shadowfax is released under the [MIT licence](LICENSE): use it, change it and
+share it, as long as the copyright notice comes along.

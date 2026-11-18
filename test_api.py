@@ -502,7 +502,6 @@ check("unauthenticated /search is 401",
       anon.post("/search", json={"query": "anything"}).status_code == 401)
 
 print("\n== tamper-evident ledger (v0.9) ==")
-import sqlite3 as _sqlite3
 import ledger as _ledger
 
 # The chain is built as events are stored.
@@ -1558,13 +1557,23 @@ else:
     check("publishing waits for the test suite and the end-to-end replay",
           set(_pub.get("needs", [])) == {"checks", "container"})
     _drel = _ci["jobs"].get("desktop-release", {})
-    check("only the publish job may write packages, and only the desktop release job may "
-          "add files to a release (v0.38)",
+    check("only the publish job may write packages, only the desktop release job may add files "
+          "to a release (v0.38), and only CodeQL may write security findings (v0.40)",
           _ci.get("permissions") == {"contents": "read"}
           and _pub.get("permissions", {}).get("packages") == "write"
           and _drel.get("permissions") == {"contents": "write"}
+          and _ci["jobs"]["codeql"].get("permissions") == {"contents": "read", "security-events": "write"}
           and all("permissions" not in j for n, j in _ci["jobs"].items()
-                  if n not in ("publish", "desktop-release")))
+                  if n not in ("publish", "desktop-release", "codeql")))
+    _sched40 = [n for n, j in _ci["jobs"].items()
+                if j.get("if") is None]
+    check("a weekly scheduled run checks for new vulnerabilities, and only the light jobs run on it",
+          _on.get("schedule") and sorted(_sched40) == ["codeql", "supply-chain"]
+          and "python supply_chain.py" in " ".join(str(st) for st in _ci["jobs"]["supply-chain"]["steps"])
+          and "event_name" in _ci["concurrency"]["group"])
+    _chk40 = " ".join(str(st) for st in _ci["jobs"]["checks"]["steps"])
+    check("the test suite runs on the exact pinned versions, and the code is linted",
+          "--require-hashes --no-deps -r requirements.lock" in _chk40 and "ruff check ." in _chk40)
     check("desktop installers are attached only for a release, after every check passed, "
           "and only if the tag matches the app's version",
           _drel.get("if") == "github.event_name == 'release'"
@@ -2885,7 +2894,6 @@ check("'new admin' searches for the new category",
 
 print("\n== console recovery and Escape (v0.22) ==")
 import builtins as _bi
-import contextlib as _ctx
 import recover as _recover
 
 # A throwaway admin, so recovering it cannot end the session this suite runs on.
@@ -2994,7 +3002,6 @@ import concurrent.futures as _cf
 import http.server as _hs
 import argparse as _ap
 import assistant as _assistant
-import permissions as _perm
 import timeutil as _tu
 
 # Fifteen findings from a reviewer who read the code with no knowledge of the
@@ -3696,7 +3703,6 @@ check("and 0 when every tool is within the profile",
 os.unlink(_fh.name)
 
 print("\n== stream tickets and request limits (v0.17.1) ==")
-import asyncio as _aio
 import tickets as tickets_mod
 import limits as limits_mod
 
@@ -5022,6 +5028,48 @@ check("a new detector category, thirty-three in all",
       "threat_intel_match" in _detectors.NATIVE_CATEGORIES and len(_detectors.NATIVE_CATEGORIES) == 33)
 app_module._intel_fetcher = None
 _srv39.shutdown()
+
+print("\n== licence, security policy and supply chain (v0.40) ==")
+import supply_chain as _sc
+_lic40 = _P("LICENSE").read_text(encoding="utf-8")
+check("the code has a licence (MIT), and the packages say so too",
+      _lic40.startswith("MIT License") and "Permission is hereby granted, free of charge" in _lic40
+      and json.loads(_P("desktop/package.json").read_text())["license"] == "MIT")
+_sec40 = _P("SECURITY.md").read_text(encoding="utf-8")
+check("SECURITY.md says how to report a vulnerability privately, and what's in scope",
+      "Report a vulnerability" in _sec40 and "not in a public issue" in _sec40 and "## What's in scope" in _sec40)
+
+_lock40 = _P("requirements.lock").read_text(encoding="utf-8")
+_pins40 = dict(_re.findall(r"^([A-Za-z0-9_.-]+)==(\S+) \\", _lock40, _re.M))
+_direct40 = [_re.split(r"[\[<>=~!; ]", l.strip())[0].lower()
+             for l in _P("requirements.txt").read_text(encoding="utf-8").splitlines()
+             if l.strip() and not l.lstrip().startswith("#")]
+_blocks40 = [b for b in _re.split(r"\n(?=[A-Za-z0-9_.-]+==)", _lock40) if _re.match(r"[A-Za-z0-9_.-]+==", b)]
+check("every direct dependency is pinned in requirements.lock",
+      _direct40 and all(d in {k.lower() for k in _pins40} for d in _direct40))
+check("and every pinned package carries at least one hash",
+      len(_blocks40) == len(_pins40) and all("--hash=sha256:" in b for b in _blocks40))
+check("the image installs exactly the lock, checking hashes, and nothing it doesn't list",
+      "--require-hashes --no-deps -r requirements.lock" in _dockerfile
+      and "-r requirements.txt" not in _dockerfile)
+
+_fake40 = {"vulnerabilities": {
+    "react": {"severity": "high", "via": [{"title": "XSS in react"}]},
+    "electron": {"severity": "critical", "via": [{"title": "sandbox escape"}]},
+    "picomatch": {"severity": "high", "via": [{"title": "ReDoS"}]},
+    "minimatch": {"severity": "moderate", "via": ["picomatch"]}}}
+_f40, _n40 = _sc.judge(_fake40, None)
+check("a high or critical advisory in a shipped package fails; a moderate one is only noted",
+      _f40 == ["electron (critical): sandbox escape", "picomatch (high): ReDoS", "react (high): XSS in react"]
+      and _n40 == ["minimatch (moderate)"])
+_f40d, _n40d = _sc.judge(_fake40, ("electron",))
+check("for the desktop app only Electron ships, so build tools' advisories are noted, not failed",
+      _f40d == ["electron (critical): sandbox escape"] and len(_n40d) == 3)
+check("and with nothing reported, nothing fails", _sc.judge({}, None) == ([], []))
+_ruff40 = _P("ruff.toml").read_text(encoding="utf-8")
+check("lint settings exist, and every rule that's switched off says why",
+      'select = ["F", "E9", "B"]' in _ruff40
+      and all(f"#   {r}" in _ruff40 for r in ("B008", "B904", "B905")))
 
 print("\n== same-second events keep their order (v0.34.1) ==")
 # Timestamps go down to the second. On PostgreSQL, rows that share one came back

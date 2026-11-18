@@ -20,3 +20,8 @@ playwright>=1.44
 # a push can never publish, and that only a release that passed both test jobs
 # can. Parsing YAML with a regex is how a check quietly stops checking.
 pyyaml>=6
+
+# v0.40: the checks CI runs on the code itself. Pinned, so a new release of a
+# checker can't fail a build that changed nothing.
+ruff==0.16.9
+pip-audit==2.10.1

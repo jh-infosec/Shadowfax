@@ -60,8 +60,10 @@ LABEL org.opencontainers.image.title="Shadowfax" \
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# v0.40: exactly the versions in requirements.lock, each checked against its
+# hash. A package that changed on PyPI, or one nobody pinned, can't get in.
+COPY requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock
 
 COPY *.py attack_registry.json ./
 COPY --from=dashboard /build/dist ./frontend/dist

@@ -41,7 +41,7 @@ translator, and the whole API suite runs against both databases.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterator
+from typing import Iterator
 
 # The single lock that stands in for SQLite's database-wide write lock.
 WRITE_LOCK_KEY = 0x5AD0F4  # "shadowfax", roughly

@@ -1,5 +1,37 @@
 # Changelog
 
+## Version 0.40.0
+
+Housekeeping a security reviewer looks for first.
+
+### What's new
+
+- **An MIT licence.** Until now the code had none, which legally meant nobody
+  else could use it.
+- **SECURITY.md:** how to report a vulnerability privately, what's in scope,
+  and how dependencies are checked.
+- **Pinned dependencies.** `requirements.lock` pins every Python package the
+  server uses, direct or not, to one version and its hashes. The Docker image
+  installs exactly that list and checks every hash, so a package changed on
+  PyPI, or one nobody chose, can't get in. The test suite runs on exactly the
+  same versions.
+- **Vulnerability checks on what ships,** on every push and once a week even
+  when nothing has changed: `supply_chain.py` checks the pinned Python packages,
+  the dashboard's JavaScript and the Electron inside the desktop app. A known
+  high or critical vulnerability in anything that ships fails the run.
+  Advisories in build-only tools are listed but don't fail it.
+- **CodeQL code scanning** of the Python and JavaScript, with findings in the
+  repository's Security tab.
+- **Linting** with ruff on every push. It found seven unused or shadowed
+  imports, now gone.
+
+### Tested
+
+- 1,057 API checks, on SQLite and on PostgreSQL, run on exactly the pinned
+  versions. The 11 new ones check the lock covers every dependency with hashes,
+  the image installs only the lock, the supply-chain rule itself, and how CI is
+  wired (the weekly run, and which jobs may write what).
+
 ## Version 0.39.0
 
 Threat intelligence feeds: what agents reach, checked against lists of

@@ -1,3 +1,11 @@
+# The server's direct dependencies, as ranges (v0.40: see requirements.lock).
+#
+# requirements.lock pins every package, direct or not, to one version and its
+# hashes; the Docker image and CI install exactly that. This file is what the
+# lock is made from, and what a from-source install on another platform uses:
+#
+#   pip-compile --generate-hashes --strip-extras --no-emit-index-url \
+#       --output-file=requirements.lock requirements.txt
 fastapi>=0.110
 uvicorn>=0.29
 pydantic>=2.6

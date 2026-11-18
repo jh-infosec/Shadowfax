@@ -17,6 +17,10 @@
 #              checked. desktop-windows builds the Windows installer on Windows
 #              and installs it. On a release, desktop-release attaches both.
 #
+#   supply-chain and codeql (v0.40) Known vulnerabilities in what ships, and
+#              GitHub's static analysis. Also run weekly on a schedule; the
+#              other jobs don't.
+#
 #   publish    Only when a GitHub release is published. Only after both jobs
 #              above have passed on that exact commit. Pushes the image to
 #              ghcr.io, signs it, verifies the signature, then pulls back what
@@ -39,6 +43,11 @@ on:
   # ships an image. Pushing to main never does.
   release:
     types: [published]
+  # v0.40: once a week even when nothing changed, because new vulnerabilities
+  # are published in packages that haven't. Only the supply-chain and CodeQL
+  # jobs run on this schedule; a failure is emailed to the repository owner.
+  schedule:
+    - cron: "17 4 * * 1"
 
 permissions:
   contents: read
@@ -46,12 +55,14 @@ permissions:
 concurrency:
   # A newer push makes an in-flight run irrelevant; let it go rather than
   # queueing results nobody will read.
-  group: ci-${{ github.ref }}
+  # The event is part of the name so the weekly scan never cancels a push.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   checks:
     name: Test suite and dashboard build
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # v0.32: a PostgreSQL server for the second run of the suite. The official
@@ -79,10 +90,17 @@ jobs:
           python-version: "3.11"
 
       - name: Install backend and test dependencies
-        # requirements-dev.txt pulls in requirements.txt and adds what only the
-        # suite needs. The container job deliberately installs neither: it tests
-        # the shipped image, whose dependencies are requirements.txt alone.
-        run: pip install -r requirements-dev.txt
+        # v0.40: the exact pinned versions the image ships (requirements.lock,
+        # hash-checked), then what only the suite needs on top. The container
+        # job deliberately installs neither: it tests the shipped image.
+        run: |
+          pip install --require-hashes --no-deps -r requirements.lock
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        # Pyflakes and bugbear's likely-bug checks; see ruff.toml for the three
+        # rules that are off and why.
+        run: ruff check .
 
       - name: Run the test suite
         # Exits non-zero on the first failure and names the check that broke.
@@ -109,8 +127,66 @@ jobs:
         run: npm run build
         working-directory: frontend
 
+  supply-chain:
+    name: Known vulnerabilities in what ships
+    # v0.40. Every push and every week: the pinned Python packages, the
+    # dashboard's runtime JavaScript, and the Electron inside the desktop app,
+    # against the public advisory databases. See supply_chain.py for the line
+    # between what ships (fails the run) and build-only tools (reported).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install the auditing tools
+        run: pip install "pip-audit==2.10.1"
+
+      - name: Install the JavaScript dependencies (without running anything)
+        # --ignore-scripts: an audit has no reason to run install scripts, and
+        # skipping them also skips Electron's 100 MB download.
+        run: |
+          (cd frontend && npm ci --ignore-scripts --no-audit --no-fund)
+          (cd desktop && npm ci --ignore-scripts --no-audit --no-fund)
+
+      - name: Check
+        run: python supply_chain.py
+
+  codeql:
+    name: CodeQL code scanning
+    # v0.40. GitHub's own static analysis of the Python and JavaScript, on every
+    # push and every week. Findings appear under the Security tab.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
   container:
     name: Packaged image, end to end
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -274,6 +350,7 @@ jobs:
 
   desktop:
     name: Desktop app, end to end
+    if: github.event_name != 'schedule'
     # v0.38. The real Electron app against a real server started from this
     # commit, under a virtual screen: the connect window, the dashboard, the
     # navigation lock, notifications. Then the Linux package is built and
@@ -348,6 +425,7 @@ jobs:
 
   desktop-windows:
     name: Desktop app, Windows installer
+    if: github.event_name != 'schedule'
     # Built on Windows, where the installer is meant to run, then installed
     # silently and checked, so a broken installer fails here and not on
     # someone's PC.

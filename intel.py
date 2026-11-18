@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import csv
 import http.client
-import io
 import ipaddress
 import json
 import os

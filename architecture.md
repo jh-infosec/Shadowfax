@@ -554,6 +554,17 @@ before any database work, so a slow feed holds no lock. Feed changes are
 events under the reserved `shadowfax-intel` actor, which the detector loop
 skips like the case actor.
 
+#### supply_chain.py
+
+Known vulnerabilities in what ships (v0.40). Runs `pip-audit` on
+`requirements.lock` and `npm audit` on the dashboard and the desktop app, and
+applies one rule (`judge`, pure and unit-tested): a high or critical advisory
+in a shipped package fails, anything in build-only tooling is reported. The
+dashboard's runtime dependencies are audited with `--omit=dev`; for the desktop
+app the only shipped npm package is Electron itself, which electron-builder
+requires to be a devDependency. Run by CI's `supply-chain` job on every push
+and weekly.
+
 #### forward.py
 
 Alert forwarding (v0.31). `Config.from_env()` reads the destinations (refusing
@@ -1366,7 +1377,8 @@ totp.py                 subjects.py             profile_draft.py
 forward.py              screenshots.py          docs/screenshots/*.png
 pgcompat.py             cases.py                injection.py
 demo_gif.py             docs/demo.gif           shadowfax_agent.py
-intel.py
+intel.py                supply_chain.py         requirements.lock
+LICENSE                 SECURITY.md             ruff.toml
 
 desktop/package.json    desktop/package-lock.json
 desktop/main.js         desktop/preload.js      desktop/connect-preload.js

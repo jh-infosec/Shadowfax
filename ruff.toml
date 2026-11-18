@@ -1,0 +1,15 @@
+# Lint settings (v0.40). Pyflakes (undefined names, unused imports, shadowed
+# definitions) and flake8-bugbear's likely-bug checks, run on every push.
+#
+# Three bugbear rules are off on purpose:
+#   B008  FastAPI declares dependencies as Depends(...) defaults; that is the
+#         framework's design, not a mistake.
+#   B904  "raise ... from err" is style here: the handlers turn library errors
+#         into plain messages and the chain adds nothing a user would read.
+#   B905  zip(strict=) would hide nothing: every zip pairs lists built together.
+target-version = "py311"
+extend-exclude = ["frontend", "desktop", "docs"]
+
+[lint]
+select = ["F", "E9", "B"]
+ignore = ["B008", "B904", "B905"]
