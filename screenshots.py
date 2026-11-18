@@ -151,6 +151,23 @@ def _claude_code_session(url: str, token: str) -> str:
     return agent
 
 
+def _mute_setup(url: str, token: str) -> None:
+    """v0.42: a believable false positive and the rule that mutes it, so the
+    Muted alerts drawer has something to show."""
+    from datetime import datetime, timedelta, timezone
+    start = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0) - timedelta(hours=6)
+    _api(url, "POST", "/events", [{
+        "timestamp": (start + timedelta(minutes=17 * i)).isoformat(), "actor_id": f"doc-indexer-{i % 2 + 1}",
+        "actor_type": "ai_agent", "task": "code_review_task", "event_type": "tool_call",
+        "target": "internal_wiki", "metadata": {"tool": "read_page"}} for i in range(6)], token)
+    rules = _api(url, "GET", "/suppressions", None, token)["rules"]
+    if not any(r["actor"] == "doc-indexer-*" for r in rules):
+        _api(url, "POST", "/suppressions", {
+            "category": "allowlist_violation", "actor": "doc-indexer-*", "target": "internal_wiki",
+            "reason": "The doc indexer runs under the code review task and reads the wiki to build "
+                      "search. Expected; its own profile is tracked in PLAT-412.", "days": 30}, token)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--url", default=DEFAULT_URL)
@@ -196,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             "under the drafted profile.")}, token)
     claude = _claude_code_session(args.url, token)
     _intel_setup(args.url, token)
+    _mute_setup(args.url, token)
     OUT.mkdir(parents=True, exist_ok=True)
     shots: list[str] = []
 
@@ -264,6 +282,14 @@ def main(argv: list[str] | None = None) -> int:
         page.wait_for_selector(".intel-drawer .intel-feed", timeout=10000)
         page.wait_for_timeout(500)
         save(page, "threat-intel")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
+
+        # v0.42: the Muted alerts drawer, with the rule _mute_setup made.
+        page.get_by_role("button", name="Muted alerts", exact=True).click()
+        page.wait_for_selector(".mute-drawer .mute-rule", timeout=10000)
+        page.wait_for_timeout(500)
+        save(page, "muted-alerts")
         page.keyboard.press("Escape")
         page.wait_for_timeout(400)
 

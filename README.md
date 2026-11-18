@@ -72,6 +72,8 @@ is not a security boundary and doesn't block anything.
 - Subject pages for files and hosts, grouping what each tool reported
 - Case notes on alerts and incidents, so a team can work an investigation
   together. Notes are append-only and go into the evidence ledger.
+- Mute false positives with rules that need a reason, expire, and are recorded
+  in the ledger. Muted alerts are hidden, never deleted.
 - A triage digest that ranks open incidents and shows why
 - An optional AI assistant that explains alerts and incidents in plain English
   and turns plain English searches into filters. It never decides anything.
@@ -1197,6 +1199,50 @@ text, up to 4,000 characters, and nothing in it is ever treated as markup. The
 same notes are available from `GET` and `POST /alerts/{id}/notes` and
 `/incidents/{id}/notes`, and from `cli.py notes`.
 
+## Muting false positives
+
+Every detector is sometimes right about the event and wrong about the
+situation. The backup agent copies a lot of data every night. The red team
+runs its scanner on purpose. Before, you had two options: change the policy
+for everyone, or acknowledge the same alert again every day.
+
+A mute rule says: alerts of this kind, from these agents, on these targets,
+aren't worth anyone's time, for this reason, until this date. Click **Mute**
+on an alert to start one filled in from it, or open **Muted alerts**.
+**Preview** shows how many alerts the rule would hide before you make it.
+
+![The Muted alerts drawer with one active rule, its reason, who made it, when it ends and what it's muting](docs/screenshots/muted-alerts.png)
+
+Muting hides, it doesn't delete. Detection runs exactly as before and the
+alerts are still stored with the same ids. A rule only decides what shows in
+the queue, the severity counts, incidents, the digest, risk scores, desktop
+notifications, alerts sent to a SIEM and `cli.py check`. Tick **show muted**
+to see them in the table, marked with the rule that hides them. They always
+show on the agent's own timeline.
+
+Because a mute rule is also exactly what someone hiding their tracks would
+want, it's deliberately hard to misuse:
+
+- **Every rule has a reason and an end date.** The reason has to be a real
+  sentence, and a rule lasts 1 to 90 days. When it runs out, its alerts come
+  back on their own. Ending one early brings them back straight away.
+- **Rules are on the record.** Making or ending one is written into the
+  evidence ledger under `shadowfax-case`, with who did it and why. Ended and
+  expired rules stay in the list.
+- **Rules are narrow.** Each one names a single category. It can't cover every
+  agent and every target at once, because that's switching a detector off,
+  which is what the policy is for. It never hides an alert about Shadowfax's
+  own accounts, and canary alerts can't be muted at all, since nothing touches
+  a canary for a good reason.
+- **Analysts and admins make rules; viewers can read them.**
+
+Patterns use `*` for "anything", like `backup-agent-*` or `*.internal`. Every
+other character means itself, and case doesn't matter. The API is
+`GET /suppressions`, `POST /suppressions/preview`, `POST /suppressions`,
+`POST /suppressions/{id}/end`, and `GET /alerts?suppressed=include` (or `only`).
+A muted alert isn't sent to your SIEM. If its rule ends, it's sent at the
+agent's next event.
+
 ## Investigation assistant
 
 The dashboard can explain any alert or incident in plain English, using the
@@ -1225,7 +1271,7 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 1,101 checks against the API, with every resumed scan checked against
+That runs 1,137 checks against the API, with every resumed scan checked against
 a full one as it goes. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
@@ -1238,7 +1284,7 @@ python demo.py --fast          # put some data on the dashboard first
 python test_dashboard.py
 ```
 
-There are 76 checks, covering things like the alert rows rendering with severity
+There are 83 checks, covering things like the alert rows rendering with severity
 and ATT&CK technique, filters actually filtering, the kill chain being drawn, the
 ledger badge reading verified, the session token never appearing in a URL, and
 the Accounts drawer creating a user whose password really works. They refuse to
@@ -1359,6 +1405,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
 | 0.39 | Threat intelligence feeds and watchlists |
 | 0.40 | MIT licence, security policy, pinned dependencies, vulnerability and code scanning |
 | 0.41 | Recording stays fast as history grows, archiving old events |
+| 0.42 | Muting false positives, with a reason and an end date |
 
 Everything on the original list for 1.0 is done. Still open:
 

@@ -235,6 +235,8 @@ export function getAlerts(filters = {}) {
   (filters.actorType || []).forEach((t) => params.append("actor_type", t));
   (filters.category || []).forEach((c) => params.append("category", c));
   if (filters.search) params.append("search", filters.search);
+  // v0.42: muted alerts are left out unless asked for ("include" or "only").
+  if (filters.suppressed) params.append("suppressed", filters.suppressed);
   const qs = params.toString();
   return request(`/alerts${qs ? `?${qs}` : ""}`);
 }
@@ -470,3 +472,23 @@ export function intelLookup(value) {
   return request(`/intel/lookup?value=${encodeURIComponent(value)}`);
 }
 
+
+// Muting false positives (v0.42). Anyone signed in can see the rules; analysts
+// make and end them, and the server records both in the ledger.
+export function getSuppressions() {
+  return request("/suppressions");
+}
+
+export function previewSuppression(rule) {
+  return request("/suppressions/preview", { method: "POST", body: JSON.stringify(rule) });
+}
+
+export function createSuppression(rule) {
+  return request("/suppressions", { method: "POST", body: JSON.stringify(rule) });
+}
+
+export function endSuppression(id, reason) {
+  return request(`/suppressions/${encodeURIComponent(id)}/end`, {
+    method: "POST", body: JSON.stringify({ reason: reason || null }),
+  });
+}

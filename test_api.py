@@ -5098,7 +5098,7 @@ import seed_data as _seed41
 
 def _stored41(actor):
     with db_module.get_conn() as _c:
-        return sorted(a["id"] for a in db_module.query_alerts(_c, actor_id=actor, limit=100000))
+        return sorted(a["id"] for a in db_module.query_alerts(_c, actor_id=actor, limit=100000, suppressed="include"))
 
 def _fresh41(actor):
     with db_module.get_conn() as _c:
@@ -5218,6 +5218,172 @@ check("bench.py runs, and with 3,000 events stored a kept scan records the next 
       _b41[0]["median"] * 3 < _b41[1]["median"])
 check("no resumed scan in this whole run differed from a full one",
       app_module.SCAN_STATS["mismatches"] == 0 and app_module.VERIFY_SCANS)
+
+print("\n== muting false positives (v0.42) ==")
+import suppress as _sup42
+import forward as _fw42
+
+def _ev42(actor, target, ts, task="code_review_task", atype="ai_agent"):
+    return {"timestamp": ts, "actor_id": actor, "actor_type": atype, "task": task,
+            "event_type": "tool_call", "target": target, "metadata": {"tool": "read_file"}}
+
+# Two backup agents that keep tripping the allowlist, and one agent that does
+# the same thing and should stay loud.
+client.post("/events", json=[_ev42(a, t, f"2026-10-05T10:{i:02d}:00")
+                             for i, (a, t) in enumerate([(a, t) for a in ("mute42-a", "mute42-b", "keep42-c")
+                                                         for t in ("backup_bucket", "other_bucket")])])
+def _ids42(**params):
+    return {a["id"] for a in client.get("/alerts", params={"limit": 5000, **params}).json()}
+def _mine42(actor, **params):
+    return [a for a in client.get("/alerts", params={"limit": 5000, "actor_id": actor, **params}).json()
+            if a["category"] == "allowlist_violation"]
+_a42 = {x: _mine42(x) for x in ("mute42-a", "mute42-b", "keep42-c")}
+check("the setup raises allowlist alerts on all three agents", all(len(v) == 2 for v in _a42.values()))
+
+_rule42 = {"category": "allowlist_violation", "actor": "mute42-*", "target": "*",
+           "reason": "nightly backup agents, reviewed with the platform team", "days": 30}
+_pv42 = client.post("/suppressions/preview", json=_rule42).json()
+check("a preview says what a rule would mute, before it exists",
+      _pv42["total"] == 4 and _pv42["agents"] == 2 and _pv42["by_severity"]
+      and all(e["actor_id"].startswith("mute42-") for e in _pv42["examples"]))
+
+def _refused42(body):
+    r = client.post("/suppressions", json={**_rule42, **body})
+    return r.status_code == 400 and r.json()["detail"]["problems"]
+check("a canary can't be muted", _refused42({"category": "canary_triggered"}))
+check("nor every agent on every target at once (that's switching the detector off)",
+      _refused42({"actor": "*", "target": "**"}))
+check("nor Shadowfax's own accounts", _refused42({"actor": "shadowfax-auth"}))
+check("a rule needs a reason someone else can read", _refused42({"reason": "fp"}))
+check("and an end: 1 to 90 days", _refused42({"days": 0}) and _refused42({"days": 91}))
+check("and a category that exists", _refused42({"category": "made_up_category"}))
+check("a viewer can look at rules but not make one",
+      viewer.get("/suppressions").status_code == 200
+      and viewer.post("/suppressions", json=_rule42).status_code == 403)
+with db_module.get_conn() as _c:
+    _n_rules_before42 = len(db_module.list_suppressions(_c))
+check("nothing refused was stored", _n_rules_before42 == 0)
+
+_stats0 = client.get("/stats").json()
+_r42 = client.post("/suppressions", json=_rule42)
+_rid42 = _r42.json()["id"]
+check("an analyst's rule is stored, with who made it and when it ends",
+      _r42.status_code == 201 and _r42.json()["created_by"] == "admin"
+      and _r42.json()["expires_at"] > _r42.json()["created_at"] and _r42.json()["muting"]["total"] == 4)
+_hidden42 = {a["id"] for v in ("mute42-a", "mute42-b") for a in _a42[v]}
+check("its alerts leave the queue", not (_hidden42 & _ids42()))
+check("and the third agent's stay", {a["id"] for a in _a42["keep42-c"]} <= _ids42())
+_inc42 = [a for a in client.get("/alerts", params={"limit": 5000, "suppressed": "include"}).json()
+          if a["id"] in _hidden42]
+check("?suppressed=include shows them, each with the rule that mutes it",
+      len(_inc42) == 4 and all(a["suppressed_by"] == _rid42 for a in _inc42))
+check("?suppressed=only shows just the muted ones", _ids42(suppressed="only") >= _hidden42
+      and not ({a["id"] for a in _a42["keep42-c"]} & _ids42(suppressed="only")))
+check("an unknown mode is refused", client.get("/alerts", params={"suppressed": "maybe"}).status_code == 400)
+_stats1 = client.get("/stats").json()
+check("the counts leave them out, and say how many are muted",
+      sum(_stats0["alert_counts"].values()) - sum(_stats1["alert_counts"].values()) == 4
+      and _stats1["muted_count"] - _stats0.get("muted_count", 0) == 4)
+_risk42 = {a["actor_id"]: a for a in client.get("/actors").json()}
+check("they carry no risk",
+      _risk42.get("mute42-a", {}).get("risk_score", 0) < _risk42["keep42-c"]["risk_score"])
+_tl42 = client.get("/actors/mute42-a").json()["alerts"]
+check("the agent's own page still shows them, marked",
+      {a["id"] for a in _tl42} >= {a["id"] for a in _a42["mute42-a"]}
+      and all(a["suppressed_by"] == _rid42 for a in _tl42 if a["category"] == "allowlist_violation"))
+_incs42 = client.get("/incidents").json()
+check("incidents don't include them", not any(set(i["alert_ids"]) & _hidden42 for i in _incs42))
+with db_module.get_conn() as _c:
+    _one42 = db_module.get_alert(_c, next(iter(_hidden42)))
+check("an alert looked up by id says it's muted", _one42["suppressed_by"] == _rid42)
+client.post("/events", json=[_ev42("mute42-a", "third_bucket", "2026-10-05T11:00:00")])
+check("a new alert that matches is muted too", not [a for a in _mine42("mute42-a")]
+      and len(_mine42("mute42-a", suppressed="include")) == 3)
+_lst42 = next(r for r in client.get("/suppressions").json()["rules"] if r["id"] == _rid42)
+check("the rule list says what each rule is muting right now",
+      _lst42["state"] == "active" and _lst42["muting_total"] == 5)
+with db_module.get_conn() as _c:
+    _led42 = [e for e in db_module.get_events_for_actor(_c, "shadowfax-case")
+              if e["event_type"] == "suppression_change"]
+check("making a rule is written into the ledger, with who and why",
+      _led42 and _led42[-1]["metadata"]["action"] == "created" and _led42[-1]["metadata"]["by"] == "admin"
+      and "backup agents" in _led42[-1]["metadata"]["reason"] and _led42[-1]["target"] == f"suppression:{_rid42}")
+check("and nobody can post that event themselves",
+      client.post("/events", json=[{"timestamp": "2026-11-01T00:00:00", "actor_id": "x", "actor_type": "human",
+                                    "event_type": "suppression_change", "target": "x"}]).status_code == 400)
+
+# Patterns: * is the only wildcard, the rest is literal, case doesn't matter.
+client.post("/events", json=[_ev42("esc42_x", "t", "2026-10-06T10:00:00"),
+                             _ev42("esc42ax", "t", "2026-10-06T10:01:00"),
+                             _ev42("ESC42%Y", "t", "2026-10-06T10:02:00"),
+                             _ev42("esc42zy", "t", "2026-10-06T10:03:00")])
+_r42b = client.post("/suppressions", json={**_rule42, "actor": "esc42_x"}).json()["id"]
+_r42c = client.post("/suppressions", json={**_rule42, "actor": "esc42%y"}).json()["id"]
+check("_ and % in a pattern are just characters, and case is ignored",
+      not _mine42("esc42_x") and _mine42("esc42ax") and not _mine42("ESC42%Y") and _mine42("esc42zy"))
+_rng42 = __import__("random").Random(42)
+_alpha42 = "aB_%*\\."
+_agree42 = True
+with db_module.get_conn() as _c:
+    for _ in range(400):
+        _p = "".join(_rng42.choice(_alpha42) for _ in range(_rng42.randint(0, 5)))
+        _v = "".join(_rng42.choice(_alpha42.replace("*", "")) for _ in range(_rng42.randint(0, 5)))
+        _sql = bool(_c.execute("SELECT ? LIKE ? ESCAPE '\\' AS m", (_v, _sup42.like(_p))).fetchone()["m"])
+        if _sql != _sup42.matches(_p, _v):
+            _agree42 = False
+            print("   disagree on", repr(_p), repr(_v), _sql)
+            break
+check("the database and suppress.matches agree on 400 random patterns", _agree42)
+
+# Shadowfax's own accounts are never hidden, even by a rule that would match.
+with db_module.get_conn() as _c:
+    _eid42 = _c.execute("SELECT MIN(id) AS i FROM events").fetchone()["i"]
+    db_module.add_alerts(_c, [{"id": "plat42-alert", "event_id": _eid42, "actor_id": "shadowfax-auth",
+                               "actor_type": "service_account", "timestamp": "2026-10-07T00:00:00",
+                               "severity": "high", "category": "allowlist_violation",
+                               "message": "test", "target": "plat42-target"}])
+    _c.commit()
+_r42d = client.post("/suppressions", json={**_rule42, "actor": "*", "target": "plat42-*"}).json()["id"]
+check("a rule never mutes an alert about Shadowfax's own accounts", "plat42-alert" in _ids42())
+with db_module.get_conn() as _c:
+    _c.execute("DELETE FROM alerts WHERE id = 'plat42-alert'"); _c.commit()
+
+# Forwarding: a muted alert isn't sent.
+_saved42 = (app_module.FORWARD, app_module._FORWARD_READY)
+app_module.FORWARD = _fw42.Config([_fw42.Destination("webhook42", "https://siem.test/hook")], "low", False)
+try:
+    app_module._FORWARD_READY = True
+    client.post("/events", json=[_ev42("mute42-b", "fwd_bucket", "2026-10-08T10:00:00"),
+                                 _ev42("keep42-c", "fwd_bucket", "2026-10-08T10:00:00")])
+    with db_module.get_conn() as _c:
+        _q42 = {r["alert_id"] for r in _c.execute("SELECT alert_id FROM forward_outbox WHERE destination = 'webhook42'")}
+    _mb42 = {a["id"] for a in _mine42("mute42-b", suppressed="include")}
+    _kc42 = {a["id"] for a in _mine42("keep42-c")}
+    check("a muted alert isn't forwarded to the SIEM, and the others are", not (_q42 & _mb42) and _kc42 <= _q42)
+finally:
+    app_module.FORWARD, app_module._FORWARD_READY = _saved42
+
+# Ending and expiring.
+_e42 = client.post(f"/suppressions/{_rid42}/end", json={"reason": "backups moved to their own bucket"})
+check("ending a rule brings its alerts straight back, and keeps the rule",
+      _e42.status_code == 200 and _e42.json()["ended_by"] == "admin" and _hidden42 <= _ids42()
+      and next(r for r in client.get("/suppressions").json()["rules"] if r["id"] == _rid42)["state"] == "ended")
+check("a rule can't be ended twice", client.post(f"/suppressions/{_rid42}/end").status_code == 409)
+check("or one that doesn't exist", client.post("/suppressions/999999/end").status_code == 404)
+with db_module.get_conn() as _c:
+    _led42b = [e for e in db_module.get_events_for_actor(_c, "shadowfax-case")
+               if e["event_type"] == "suppression_change" and e["target"] == f"suppression:{_rid42}"]
+check("ending is in the ledger too, with the reason", _led42b[-1]["metadata"]["action"] == "ended"
+      and _led42b[-1]["metadata"]["end_reason"] == "backups moved to their own bucket")
+with db_module.get_conn() as _c:
+    _c.execute("UPDATE suppressions SET expires_at = '2000-01-01T00:00:00' WHERE id = ?", (_r42b,)); _c.commit()
+check("when a rule's time is up its alerts come back on their own",
+      _mine42("esc42_x") and next(r for r in client.get("/suppressions").json()["rules"]
+                                  if r["id"] == _r42b)["state"] == "expired")
+for _x in (_r42c, _r42d):
+    client.post(f"/suppressions/{_x}/end")
+check("the analyst who ends a rule doesn't have to say why, but the rule remembers who",
+      all(r["ended_by"] == "admin" for r in client.get("/suppressions").json()["rules"] if r["id"] in (_r42c, _r42d)))
 
 print("\n== archiving old events (v0.41) ==")
 import archive as archive_mod
@@ -5374,6 +5540,8 @@ r = client.post("/reset")
 check("POST /reset returns 200", r.status_code == 200)
 r = client.get("/stats")
 check("reset restores 40 seed events", r.json()["event_count"] == 40)
+check("a reset clears mute rules with the alerts they were about",
+      client.get("/suppressions").json()["rules"] == [])
 check("a reset also forgets the archives, since the ledger starts again",
       client.get("/ledger/verify").json()["archives"] == [] and client.get("/ledger/verify").json()["ok"])
 check("and forgets every kept scan", not any(a.startswith("fuzz41") for a in app_module._scan_cache))

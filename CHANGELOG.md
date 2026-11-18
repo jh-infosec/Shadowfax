@@ -1,5 +1,45 @@
 # Changelog
 
+## Version 0.42.0
+
+Muting false positives, with a reason and an end date.
+
+### What's new
+
+- **Mute rules.** A rule says: alerts of this category, from these agents, on
+  these targets, aren't worth anyone's time, for this reason, until this date.
+  Make one from the **Mute** button on any alert, or from the new **Muted
+  alerts** drawer. **Preview** says how many alerts it would hide first.
+- **Muting hides, it never deletes.** Detection is untouched and the alerts
+  are still stored with the same ids. A rule takes them out of the queue, the
+  severity counts, incidents, the digest, risk scores, desktop notifications,
+  SIEM forwarding and `cli.py check`. **show muted** puts them back in the
+  table, marked with their rule, and the agent's timeline always shows them.
+- **Hard to misuse.** Every rule needs a real reason and lasts 1 to 90 days,
+  then its alerts come back on their own. Making or ending one goes into the
+  evidence ledger under `shadowfax-case`. A rule names one category, can't
+  cover every agent and every target at once, never hides an alert about
+  Shadowfax's own accounts, and canaries can't be muted at all.
+- **API:** `GET /suppressions`, `POST /suppressions/preview`,
+  `POST /suppressions`, `POST /suppressions/{id}/end`, and
+  `GET /alerts?suppressed=include|only`. `GET /stats` has a `muted_count`.
+- **`GET /stats` counts events instead of loading them.** The dashboard asks
+  for it on every change, and it was reading every event to count them.
+- A new screenshot, `muted-alerts.png`.
+
+### Tested
+
+- 1,137 API checks, on SQLite and on PostgreSQL. The 36 new ones cover the
+  preview, every refusal, roles, what's hidden where (queue, counts, risk,
+  incidents, forwarding) and what isn't (the timeline, `?suppressed=include`),
+  new alerts matching an existing rule, `_` and `%` in patterns, 400 random
+  patterns matched the same way by the database and by `suppress.matches`,
+  Shadowfax's own accounts, ending, expiry, reset and the ledger records.
+- 82 dashboard checks; the 7 new ones mute an alert from its row in a real
+  browser, check the reason shows as text, bring it back with **show muted**,
+  and end the rule.
+- Eleven mutations to the safety checks, each caught by the suite.
+
 ## Version 0.41.0
 
 Long histories: recording stays fast as an agent's history grows, and old

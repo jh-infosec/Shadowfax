@@ -122,6 +122,7 @@ def run(url: str, headed: bool) -> int:
             _run_rotation_checks(browser, url)
             _run_case_notes_checks(browser, url)
             _run_intel_checks(browser, url)
+            _run_mute_checks(browser, url)
         except Exception as exc:
             # A component that throws on mount takes the whole page with it, and
             # the first thing to notice is a selector that never appears. Report
@@ -611,6 +612,68 @@ def _run_intel_checks(browser, url: str) -> None:
     for f in _api(url, "GET", "/intel/feeds", None, admin)["feeds"]:
         if tag in f["name"]:
             _api(url, "DELETE", f"/intel/feeds/{f['id']}", None, admin)
+    context.close()
+
+
+def _run_mute_checks(browser, url: str) -> None:
+    """Muting (v0.42): mute an alert from its row, see it leave the table and
+    come back with "show muted", check the reason shows as text, then end the
+    rule and see the alert return."""
+    import secrets
+    from datetime import datetime, timezone
+    admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
+    tag = secrets.token_hex(3)
+    agent = f"mute-ui-agent-{tag}"
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    _api(url, "POST", "/events", [{
+        "timestamp": now, "actor_id": agent, "actor_type": "ai_agent", "task": "code_review_task",
+        "event_type": "tool_call", "target": f"bucket-{tag}", "metadata": {"tool": "read_file"}}], admin)
+
+    context = browser.new_context(viewport={"width": 1400, "height": 900})
+    page = context.new_page()
+    page.goto(url, wait_until="networkidle")
+    page.fill('input[autocomplete="username"]', USERNAME)
+    page.fill('input[type="password"]', PASSWORD)
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".table-wrap tbody tr", timeout=15000)
+    row = page.locator(".alert-table tbody tr", has_text=agent).filter(has_text="allowlist_violation")
+    row.first.wait_for(timeout=10000)
+    row.first.locator(".mute-btn").click()
+    page.wait_for_selector(".mute-drawer .mute-new", timeout=10000)
+    check("Mute on a row opens the rule form, filled in from that alert",
+          page.input_value('.mute-new input[aria-label="Alert category"]') == "allowlist_violation"
+          and page.input_value('.mute-new input[aria-label="Agent pattern"]') == agent)
+    hostile = f"<img src=x onerror=alert(1)> backup agent {tag}, cleared with the owner"
+    page.fill(".mute-new textarea", hostile)
+    page.click(".mute-new button:has-text('Preview')")
+    page.wait_for_selector(".mute-preview", timeout=10000)
+    check("the preview says how many alerts the rule would mute",
+          "would mute 1 alert" in page.inner_text(".mute-preview"))
+    page.click(".mute-new button[type=submit]")
+    rule = page.locator(".mute-rule", has_text=f"backup agent {tag}")
+    rule.wait_for(timeout=10000)
+    check("the rule is listed with its reason shown as text, not markup",
+          rule.count() == 1 and page.locator(".mute-drawer img").count() == 0)
+    page.click(".mute-drawer .drawer-close")
+    page.wait_for_timeout(1500)
+    check("the muted alert leaves the table", row.count() == 0)
+    page.locator(".show-muted input").check()
+    page.wait_for_timeout(1500)
+    check("'show muted' brings it back, marked as muted",
+          row.count() == 1 and "muted" in row.first.inner_text())
+    page.locator(".show-muted input").uncheck()
+
+    page.get_by_role("button", name="Muted alerts", exact=True).click()
+    rule = page.locator(".mute-rule.active", has_text=f"backup agent {tag}")
+    rule.wait_for(timeout=10000)
+    rule.locator("button:has-text('End now')").click()
+    rule.locator('input[aria-label="Why end the rule"]').fill("test over")
+    rule.locator("button:has-text('End it')").click()
+    page.wait_for_selector(f".mute-rule.ended:has-text('backup agent {tag}')", timeout=10000)
+    check("ending the rule moves it to the ended list", True)
+    page.click(".mute-drawer .drawer-close")
+    page.wait_for_timeout(1500)
+    check("and the alert is back in the table", row.count() == 1)
     context.close()
 
 

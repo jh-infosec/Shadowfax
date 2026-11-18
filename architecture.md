@@ -669,6 +669,29 @@ its next request (sessions and users are read from the database each time); the
 dashboard sees the alert on its next refresh, since the event bus lives inside
 the server process.
 
+#### suppress.py
+
+Mute rules (v0.42). Pure: `like()` turns a `*` pattern into a SQL LIKE
+pattern (lower case, with `\`, `%` and `_` escaped), `matches()` does the same
+match in Python (the tests check the two agree on random patterns),
+`validate()` lists what's wrong with a proposed rule, and `NEVER` names the
+categories that can't be muted (`canary_triggered`).
+
+Rules live in the `suppressions` table and are applied at read time, never at
+detection: alerts stay a pure function of events, policy and intel, keep their
+ids, and reappear the moment a rule ends or expires, with nothing to undo.
+`db._SUPPRESSED_BY` is the one SQL expression that says which active rule, if
+any, mutes an alert (lowest id wins); `query_alerts(suppressed=...)`,
+`alert_counts`, `actor_risk_scores`, `muted_count`, `suppressed_ids` and
+`list_suppressions` all use it, so they can't disagree. It always excludes
+`shadowfax-*` actors. Everything that reads alerts through `query_alerts`
+(the queue, incidents, the digest, subjects, natural language search,
+`/findings` export) hides muted alerts by default; the actor detail asks for
+`include`. `_forward_enqueue` drops muted ids, so a muted alert is queued for
+the SIEM at the agent's next event after its rule ends. Creating and ending a
+rule write `suppression_change` events under `shadowfax-case` (a reserved event
+type), which detectors skip like case notes.
+
 #### archive.py
 
 Retention (v0.41), run beside the database like `recover.py`. `plan(cutoff)`
@@ -877,6 +900,9 @@ Tables:
   and `superseded_at` when a refresh replaced it. Replaced rows are kept until
   the session ends so that presenting one again can be recognised as reuse.
 - `api_keys`, ingest keys (also stored as a fingerprint) with a display prefix
+- `suppressions` (v0.42), mute rules: category, actor and target patterns
+  (and their LIKE forms), reason, who made it, when, when it expires, and who
+  ended it and why. Never deleted except by a full reset.
 - `ledger_archives` (v0.41), one row per archive taken: the cutoff, how many
   events and alerts, the ledger count and hash it starts and ends on, and the
   file's name and sha256. Cleared only by a full reset.
@@ -1464,7 +1490,7 @@ pgcompat.py             cases.py                injection.py
 demo_gif.py             docs/demo.gif           shadowfax_agent.py
 intel.py                supply_chain.py         requirements.lock
 LICENSE                 SECURITY.md             ruff.toml
-archive.py              bench.py
+archive.py              bench.py                suppress.py
 
 desktop/package.json    desktop/package-lock.json
 desktop/main.js         desktop/preload.js      desktop/connect-preload.js
@@ -1507,4 +1533,5 @@ frontend/src/components/TwoFactorModal.jsx
 frontend/src/components/SubjectReport.jsx
 frontend/src/components/SubjectsDrawer.jsx
 frontend/src/components/ProfileDraftModal.jsx
+frontend/src/components/MuteDrawer.jsx
 ```

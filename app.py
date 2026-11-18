@@ -50,6 +50,7 @@ import digest as digest_mod
 import envelope
 import forward
 import intel
+import suppress
 import ledger
 import limits
 import manifest
@@ -64,7 +65,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.41.0"
+VERSION = "0.42.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -124,6 +125,8 @@ RESERVED_EVENT_TYPES = {
     "intel_feed_change": "nothing -- Shadowfax records these itself",
     # v0.41: written by archive.py when old events are moved into a file.
     "events_archived": "nothing -- archive.py records these itself",
+    # v0.42: suppression rules created and ended, written by /suppressions.
+    suppress.CHANGE_EVENT: "nothing -- Shadowfax records these itself",
 }
 
 # Recorded sign-in attempts are operational state for the throttle, not
@@ -303,6 +306,10 @@ def _forward_enqueue(conn: sqlite3.Connection, alerts: list[dict[str, Any]]) -> 
     if not (_FORWARD_READY and FORWARD.enabled) or getattr(_forward_hold, "on", False):
         return
     ids = [a["id"] for a in alerts if FORWARD.wants(a)]
+    # v0.42: a muted alert isn't sent. If its rule ends, it goes at the
+    # agent's next event, when this runs again.
+    muted = db.suppressed_ids(conn, ids)
+    ids = [i for i in ids if i not in muted]
     for dest in FORWARD.destinations:
         db.forward_enqueue(conn, ids, dest.name)
 
@@ -708,7 +715,8 @@ def _rescan_actor(conn: sqlite3.Connection, actor_id: str,
     if stored is not None:
         db.add_alerts(conn, alerts[stored:])
         SCAN_STATS["only_new_written"] += 1
-        if VERIFY_SCANS and sorted(a["id"] for a in db.query_alerts(conn, actor_id=actor_id, limit=10**9)) \
+        if VERIFY_SCANS and sorted(a["id"] for a in db.query_alerts(conn, actor_id=actor_id, limit=10**9,
+                                                                    suppressed="include")) \
                 != sorted(a["id"] for a in alerts):
             SCAN_STATS["mismatches"] += 1
             print(f"[scan] stored alerts of {actor_id} drifted from its kept scan", flush=True)
@@ -1010,11 +1018,16 @@ def list_alerts(
     since: str | None = None,
     until: str | None = None,
     limit: int = 500,
+    suppressed: str = "hide",
     identity: dict = Depends(require_role("viewer")),
 ):
+    # v0.42: muted alerts are left out unless asked for (?suppressed=include
+    # or only); each row carries `suppressed_by`, the rule that mutes it.
+    if suppressed not in db.SUPPRESSION_MODES:
+        raise HTTPException(400, f"suppressed must be one of {', '.join(db.SUPPRESSION_MODES)}")
     with db.get_conn() as conn:
         alerts = db.query_alerts(conn, severity, actor_type, actor_id, category,
-                                 search, since, until, limit)
+                                 search, since, until, limit, suppressed)
         counts = db.case_note_counts(conn, cases.CASE_ACTOR_ID, cases.NOTE)
     for a in alerts:
         a["note_count"] = counts.get(cases.subject_key("alert", a["id"]), 0)
@@ -1086,10 +1099,13 @@ def healthz():
 @app.get("/stats")
 def stats(identity: dict = Depends(require_role("viewer"))):
     with db.get_conn() as conn:
+        # v0.42: counted, not loaded. The dashboard asks for this on every
+        # change, and loading every event to count them grew with history.
         return {
             "alert_counts": db.alert_counts(conn),
             "actor_count": len(db.distinct_actors(conn)),
-            "event_count": len(db.get_all_events(conn)),
+            "event_count": db.event_count(conn),
+            "muted_count": db.muted_count(conn),
         }
 
 
@@ -1212,7 +1228,8 @@ def actor_detail(actor_id: str, identity: dict = Depends(require_role("viewer"))
         events = db.get_events_for_actor(conn, actor_id)
         if not events:
             raise HTTPException(404, f"no events for actor '{actor_id}'")
-        alerts = db.query_alerts(conn, actor_id=actor_id, limit=1000)
+        # The timeline shows everything, muted alerts too, each marked.
+        alerts = db.query_alerts(conn, actor_id=actor_id, limit=1000, suppressed="include")
         risk = db.actor_risk_scores(conn).get(actor_id, EMPTY_RISK)
         policy = db.get_policy(conn) or DEFAULT_POLICY
         return {"actor_id": actor_id, "events": events, "alerts": alerts, "risk": risk,
@@ -1447,6 +1464,95 @@ def add_incident_note(incident_id: str, req: NoteRequest,
                       identity: dict = Depends(require_role("analyst"))):
     _check_subject_id(incident_id)
     return _add_note("incident", incident_id, req, identity)
+
+
+# Suppression rules (v0.42). See suppress.py for what they are and aren't.
+
+class SuppressionRequest(BaseModel):
+    category: str = Field(..., max_length=64)
+    actor: str = Field("*", max_length=suppress.MAX_PATTERN)
+    target: str = Field("*", max_length=suppress.MAX_PATTERN)
+    reason: str = Field("", max_length=2000)
+    days: int = suppress.DEFAULT_DAYS
+
+
+class SuppressionEnd(BaseModel):
+    reason: str | None = Field(None, max_length=2000)
+
+
+def _check_suppression(conn: sqlite3.Connection, req: SuppressionRequest) -> tuple[str, str, str]:
+    category, actor, target = req.category.strip(), req.actor.strip(), req.target.strip()
+    problems = suppress.validate(category, actor, target, req.reason, req.days,
+                                 set(detectors.NATIVE_CATEGORIES) | db.known_categories(conn))
+    if problems:
+        raise HTTPException(400, {"message": "rule refused", "problems": problems})
+    return category, actor, target
+
+
+def _record_suppression(conn: sqlite3.Connection, action: str, rule: dict[str, Any], by: str,
+                        **detail: Any) -> None:
+    """Into the ledger: muting alerts changes what analysts see, and who did
+    it, when and why is evidence."""
+    db.insert_event(conn, {
+        "timestamp": _naive_utc_now().isoformat(), "actor_id": cases.CASE_ACTOR_ID,
+        "actor_type": cases.CASE_ACTOR_TYPE, "task": "alert_triage", "event_type": suppress.CHANGE_EVENT,
+        "target": f"suppression:{rule['id']}",
+        "metadata": {"action": action, "by": by, "rule": suppress.describe(rule),
+                     "category": rule["category"], "actor": rule["actor"], "target": rule["target"],
+                     "reason": rule["reason"], "expires_at": rule["expires_at"], **detail},
+    })
+
+
+@app.get("/suppressions")
+def list_suppressions(identity: dict = Depends(require_role("viewer"))):
+    """Every rule, active, ended or expired, with what each mutes right now."""
+    with db.get_conn() as conn:
+        return {"rules": db.list_suppressions(conn), "max_days": suppress.MAX_DAYS,
+                "default_days": suppress.DEFAULT_DAYS, "never": suppress.NEVER}
+
+
+@app.post("/suppressions/preview")
+def preview_suppression(req: SuppressionRequest, identity: dict = Depends(require_role("analyst"))):
+    """What a rule would mute, before it's made. Checks the rule the same way."""
+    with db.get_conn() as conn:
+        category, actor, target = _check_suppression(conn, req)
+        return db.preview_suppression(conn, category, actor, target)
+
+
+@app.post("/suppressions", status_code=201)
+def create_suppression(req: SuppressionRequest, identity: dict = Depends(require_role("analyst"))):
+    now = _naive_utc_now()
+    with db.get_conn() as conn:
+        category, actor, target = _check_suppression(conn, req)
+        rule = db.create_suppression(
+            conn, category=category, actor=actor, target=target, reason=req.reason.strip(),
+            created_by=identity["username"], created_at=now.isoformat(),
+            expires_at=(now + timedelta(days=req.days)).isoformat())
+        preview = db.preview_suppression(conn, category, actor, target)
+        _record_suppression(conn, "created", rule, identity["username"], days=req.days,
+                            muting=preview["total"])
+        conn.commit()
+    bus.publish({"type": "change", "reason": "suppression"})
+    return {**rule, "muting": preview}
+
+
+@app.post("/suppressions/{rule_id}/end")
+def end_suppression(rule_id: int, req: SuppressionEnd | None = None,
+                    identity: dict = Depends(require_role("analyst"))):
+    """End a rule early. Its alerts come back straight away; the rule is kept."""
+    with db.get_conn() as conn:
+        rule = db.get_suppression(conn, rule_id)
+        if rule is None:
+            raise HTTPException(404, f"no rule {rule_id}")
+        if rule["ended_at"]:
+            raise HTTPException(409, f"rule {rule_id} already ended")
+        reason = (req.reason or "").strip() if req else ""
+        db.end_suppression(conn, rule_id, identity["username"], reason or None)
+        _record_suppression(conn, "ended", rule, identity["username"], end_reason=reason or None)
+        conn.commit()
+        rule = db.get_suppression(conn, rule_id)
+    bus.publish({"type": "change", "reason": "suppression"})
+    return rule
 
 
 @app.get("/incidents/{incident_id}")

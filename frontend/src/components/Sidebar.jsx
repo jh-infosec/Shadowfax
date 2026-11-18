@@ -3,7 +3,8 @@ import { SEVERITIES, ACTOR_TYPES, SEVERITY_COLOUR } from "../constants.js";
 
 export default function Sidebar({ filters, onFiltersChange, categories, onOpenPolicy,
                                   canEditPolicy, onOpenIncidents, onOpenDigest, onOpenSubjects,
-                                  onOpenLockouts, canSeeLockouts, onOpenAccounts, onOpenIntel }) {
+                                  onOpenLockouts, canSeeLockouts, onOpenAccounts, onOpenIntel,
+                                  onOpenMuted, mutedCount, showMuted, onShowMuted }) {
   const toggle = (group, value) => {
     const set = new Set(filters[group]);
     set.has(value) ? set.delete(value) : set.add(value);
@@ -86,6 +87,14 @@ export default function Sidebar({ filters, onFiltersChange, categories, onOpenPo
         )}
       </div>
 
+      {/* v0.42: alerts an active rule mutes are left out unless asked for. */}
+      <div className="filter-group">
+        <label className="check-row show-muted">
+          <input type="checkbox" checked={showMuted} onChange={(e) => onShowMuted(e.target.checked)} />
+          show muted{mutedCount ? ` (${mutedCount})` : ""}
+        </label>
+      </div>
+
       <button className="clear-link" onClick={resetFilters}>Reset filters</button>
 
       <div className="filter-group" style={{ marginTop: 24 }}>
@@ -100,6 +109,9 @@ export default function Sidebar({ filters, onFiltersChange, categories, onOpenPo
         </button>
         <button className="btn" style={{ width: "100%" }} onClick={onOpenIntel}>
           Threat intel
+        </button>
+        <button className="btn" style={{ width: "100%" }} onClick={onOpenMuted}>
+          Muted alerts
         </button>
       </div>
 

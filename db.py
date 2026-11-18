@@ -105,6 +105,25 @@ CREATE TABLE IF NOT EXISTS ledger_archives (
     file_name TEXT NOT NULL,
     file_sha256 TEXT NOT NULL
 );
+-- Suppression rules (v0.42): alerts that match an active rule are hidden from
+-- the queue, counts, incidents and forwarding, never deleted. Rules are kept
+-- after they end or expire. See suppress.py.
+CREATE TABLE IF NOT EXISTS suppressions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    target TEXT NOT NULL,
+    actor_like TEXT NOT NULL,
+    target_like TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    ended_at TEXT,
+    ended_by TEXT,
+    end_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_suppressions_category ON suppressions(category);
 CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id);
 -- v0.41: an actor's events after a given id, and how many it has up to one,
 -- which is what resuming a scan asks for on every ingest.
@@ -706,6 +725,31 @@ def add_alerts(conn: sqlite3.Connection, alerts: list[dict[str, Any]]) -> None:
                          "ON CONFLICT (id) DO NOTHING", [_alert_row(a) for a in alerts])
 
 
+# The test for "an active rule hides this alert" (v0.42), shared by every query
+# that needs it so they can't disagree. `?` is the current time. Shadowfax's
+# own accounts are never hidden, whatever a rule says.
+_SUPPRESSED_BY = """(SELECT MIN(x.id) FROM suppressions x
+       WHERE x.category = a.category AND x.ended_at IS NULL AND x.expires_at > ?
+         AND a.actor_id LIKE x.actor_like ESCAPE '\\' AND a.target LIKE x.target_like ESCAPE '\\'
+         AND a.actor_id NOT LIKE 'shadowfax-%')"""
+SUPPRESSION_MODES = ("hide", "include", "only")
+
+
+def _now_iso() -> str:
+    return _naive_now().isoformat()
+
+
+def _visible(mode: str, now: str) -> tuple[str, list[Any]]:
+    """A WHERE clause (or "") for which alerts to return, given a mode."""
+    if mode == "hide":
+        return f"{_SUPPRESSED_BY} IS NULL", [now]
+    if mode == "only":
+        return f"{_SUPPRESSED_BY} IS NOT NULL", [now]
+    if mode == "include":
+        return "", []
+    raise ValueError(f"suppressed must be one of {', '.join(SUPPRESSION_MODES)}")
+
+
 def query_alerts(
     conn: sqlite3.Connection,
     severity: list[str] | None = None,
@@ -716,8 +760,17 @@ def query_alerts(
     since: str | None = None,
     until: str | None = None,
     limit: int = 500,
+    suppressed: str = "hide",
 ) -> list[dict[str, Any]]:
+    """Alerts, newest first. `suppressed` (v0.42): "hide" leaves out alerts an
+    active rule mutes (the default, everywhere), "include" returns them too
+    and "only" returns just them. Each row says which rule, if any, mutes it."""
+    now = _now_iso()
     clauses, params = [], []
+    vis, vis_params = _visible(suppressed, now)
+    if vis:
+        clauses.append(vis)
+        params += vis_params
     if severity:
         clauses.append(f"a.severity IN ({','.join('?' * len(severity))})")
         params += severity
@@ -750,11 +803,12 @@ def query_alerts(
                    COALESCE(s.acknowledged, 0) AS acknowledged,
                    s.acknowledged_by AS acknowledged_by,
                    s.assigned_to     AS assigned_to,
-                   s.note            AS note
+                   s.note            AS note,
+                   {_SUPPRESSED_BY} AS suppressed_by
             FROM alerts a
             LEFT JOIN alert_state s ON s.alert_id = a.id
             {where} ORDER BY a.timestamp DESC, a.event_id DESC, a.id ASC LIMIT ?""",
-        (*params, limit),
+        (now, *params, limit),
     ).fetchall()
     out = []
     for r in rows:
@@ -826,7 +880,9 @@ def set_alert_state(
 
 
 def alert_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    rows = conn.execute("SELECT severity, COUNT(*) as n FROM alerts GROUP BY severity").fetchall()
+    """Alerts by severity, leaving out muted ones (v0.42)."""
+    rows = conn.execute(f"SELECT severity, COUNT(*) as n FROM alerts a WHERE {_SUPPRESSED_BY} IS NULL "
+                        "GROUP BY severity", (_now_iso(),)).fetchall()
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for r in rows:
         # An unrecognised severity should never reach the table -- ingest
@@ -842,8 +898,11 @@ def actor_risk_scores(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     # out-score one critical. This is the only change the ladder forces on
     # Shadowfax's scoring, and it is spelled out in findings-envelope.md.
     weight = {"critical": 10, "high": 5, "medium": 2, "low": 1, "info": 0}
+    # Muted alerts (v0.42) carry no risk: a rule says someone looked and
+    # decided they weren't worth anyone's time.
     rows = conn.execute("SELECT actor_id, MIN(actor_type) AS actor_type, severity, COUNT(*) AS n "
-                        "FROM alerts GROUP BY actor_id, severity").fetchall()
+                        f"FROM alerts a WHERE {_SUPPRESSED_BY} IS NULL GROUP BY actor_id, severity",
+                        (_now_iso(),)).fetchall()
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
         d = out.setdefault(r["actor_id"], {"actor_type": r["actor_type"], "score": 0,
@@ -852,6 +911,94 @@ def actor_risk_scores(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
         d[r["severity"]] = r["n"]
         d["score"] += weight.get(r["severity"], 0) * r["n"]
     return out
+
+
+def muted_count(conn: sqlite3.Connection) -> int:
+    """How many stored alerts an active rule mutes right now (v0.42)."""
+    return int(conn.execute(f"SELECT COUNT(*) AS n FROM alerts a WHERE {_SUPPRESSED_BY} IS NOT NULL",
+                            (_now_iso(),)).fetchone()["n"])
+
+
+def suppressed_ids(conn: sqlite3.Connection, alert_ids: list[str]) -> set[str]:
+    """Which of these alerts an active rule mutes right now (v0.42)."""
+    out: set[str] = set()
+    now = _now_iso()
+    for i in range(0, len(alert_ids), 500):
+        chunk = alert_ids[i:i + 500]
+        out |= {r["id"] for r in conn.execute(
+            f"SELECT a.id FROM alerts a WHERE a.id IN ({','.join('?' * len(chunk))}) "
+            f"AND {_SUPPRESSED_BY} IS NOT NULL", (*chunk, now))}
+    return out
+
+
+def _rule(r) -> dict[str, Any]:
+    d = dict(r)
+    d.pop("actor_like", None)
+    d.pop("target_like", None)
+    return d
+
+
+def create_suppression(conn: sqlite3.Connection, *, category: str, actor: str, target: str,
+                       reason: str, created_by: str, created_at: str, expires_at: str) -> dict[str, Any]:
+    import suppress
+    cur = conn.execute(
+        """INSERT INTO suppressions (category, actor, target, actor_like, target_like, reason,
+                                     created_by, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (category, actor, target, suppress.like(actor), suppress.like(target), reason,
+         created_by, created_at, expires_at))
+    return get_suppression(conn, int(cur.lastrowid))
+
+
+def get_suppression(conn: sqlite3.Connection, rule_id: int) -> dict[str, Any] | None:
+    r = conn.execute("SELECT * FROM suppressions WHERE id = ?", (rule_id,)).fetchone()
+    return _rule(r) if r else None
+
+
+def list_suppressions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every rule, newest first, with how many alerts each mutes right now
+    (counted by the first active rule that matches, as the queue does)."""
+    now = _now_iso()
+    rules = [_rule(r) for r in conn.execute("SELECT * FROM suppressions ORDER BY id DESC")]
+    hidden: dict[int, dict[str, int]] = {}
+    for r in conn.execute(f"SELECT {_SUPPRESSED_BY} AS rule_id, a.severity, COUNT(*) AS n FROM alerts a "
+                          f"WHERE {_SUPPRESSED_BY} IS NOT NULL GROUP BY 1, a.severity", (now, now)):
+        hidden.setdefault(int(r["rule_id"]), {})[r["severity"]] = int(r["n"])
+    for rule in rules:
+        rule["state"] = ("ended" if rule["ended_at"] else "expired" if rule["expires_at"] <= now else "active")
+        rule["muting"] = hidden.get(rule["id"], {})
+        rule["muting_total"] = sum(rule["muting"].values())
+    return rules
+
+
+def preview_suppression(conn: sqlite3.Connection, category: str, actor: str, target: str,
+                        sample: int = 5) -> dict[str, Any]:
+    """What a rule would mute if it were active now: counts by severity and a
+    few examples. Alerts already muted by another rule are counted too."""
+    import suppress
+    sql = ("FROM alerts a WHERE a.category = ? AND a.actor_id LIKE ? ESCAPE '\\' "
+           "AND a.target LIKE ? ESCAPE '\\' AND a.actor_id NOT LIKE 'shadowfax-%'")
+    args = (category, suppress.like(actor), suppress.like(target))
+    by_sev = {r["severity"]: int(r["n"]) for r in conn.execute(
+        f"SELECT a.severity, COUNT(*) AS n {sql} GROUP BY a.severity", args)}
+    examples = [dict(r) for r in conn.execute(
+        f"SELECT a.id, a.actor_id, a.target, a.severity, a.timestamp, a.message {sql} "
+        "ORDER BY a.timestamp DESC LIMIT ?", (*args, sample))]
+    actors = int(conn.execute(f"SELECT COUNT(DISTINCT a.actor_id) AS n {sql}", args).fetchone()["n"])
+    return {"by_severity": by_sev, "total": sum(by_sev.values()), "agents": actors, "examples": examples}
+
+
+def end_suppression(conn: sqlite3.Connection, rule_id: int, ended_by: str, reason: str | None) -> None:
+    conn.execute("UPDATE suppressions SET ended_at = ?, ended_by = ?, end_reason = ? "
+                 "WHERE id = ? AND ended_at IS NULL", (_now_iso(), ended_by, reason, rule_id))
+
+
+def known_categories(conn: sqlite3.Connection) -> set[str]:
+    return {r["category"] for r in conn.execute("SELECT DISTINCT category FROM alerts")}
+
+
+def event_count(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"])
 
 
 #Policy
@@ -896,15 +1043,16 @@ def case_note_counts(conn: sqlite3.Connection, actor_id: str, note_type: str) ->
 def get_alert(conn: sqlite3.Connection, alert_id: str) -> dict[str, Any] | None:
     """One alert with its analyst state merged in, or None if it doesn't exist."""
     row = conn.execute(
-        """SELECT a.*,
+        f"""SELECT a.*,
                   COALESCE(s.acknowledged, 0) AS acknowledged,
                   s.acknowledged_by AS acknowledged_by,
                   s.assigned_to     AS assigned_to,
-                  s.note            AS note
+                  s.note            AS note,
+                  {_SUPPRESSED_BY} AS suppressed_by
            FROM alerts a
            LEFT JOIN alert_state s ON s.alert_id = a.id
            WHERE a.id = ?""",
-        (alert_id,),
+        (_now_iso(), alert_id),
     ).fetchone()
     if row is None:
         return None
@@ -928,6 +1076,7 @@ def wipe_all(conn: sqlite3.Connection) -> None:
     # reset is an explicit, authorised wipe -- not a silent edit -- so the head
     # is reset openly rather than left claiming entries that no longer exist.
     conn.execute("DELETE FROM ledger_archives")
+    conn.execute("DELETE FROM suppressions")
     _write_ledger_head(conn, 0, ledger.GENESIS_HASH)
 
 

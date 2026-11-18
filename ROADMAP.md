@@ -411,3 +411,7 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       against a full scan throughout the test suite. `archive.py` moves old
       events into a file the ledger carries on from, and raises
       `evidence_archived` when it does.
+- [x] Muting false positives (`v0.42.0`): rules for one category, some agents
+      and some targets, each with a reason and an end date of 90 days at most,
+      recorded in the ledger. Muted alerts are hidden from the queue, counts,
+      incidents and forwarding, never deleted.

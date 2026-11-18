@@ -779,3 +779,32 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .intel-hits { margin: 4px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--text); }
 .intel-hits .mono { font-family: var(--mono); }
 
+
+/* Muted alerts (v0.42) */
+.alert-table tbody tr.muted td:not(.status-cell) { opacity: 0.45; }
+.cat-badge .muted-badge { display: block; width: fit-content; margin: 4px 0 0; }
+.muted-badge { margin-left: 6px; font-size: 10.5px; text-transform: none; letter-spacing: 0; color: var(--muted);
+  border: 1px dashed var(--border); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+.mute-btn { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 4px;
+  padding: 2px 7px; font-size: 11px; margin-left: 4px; }
+.mute-btn:hover { border-color: var(--accent); color: var(--accent); }
+.mute-rule { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; background: var(--panel-2); }
+.mute-rule.ended, .mute-rule.expired { opacity: 0.6; }
+.mute-rule-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.mute-rule-name { font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mute-state { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+.mute-where { color: var(--muted); font-size: 12.5px; margin-top: 6px; overflow-wrap: anywhere; }
+.mute-where .mono, .mute-rule-name .mono, .mute-preview .mono { font-family: var(--mono); color: var(--text); }
+.mute-reason { margin-top: 6px; font-size: 13px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.mute-meta { color: var(--muted-2); font-size: 11.5px; margin-top: 6px; }
+.mute-why { width: 100%; min-height: 70px; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px; font-size: 13px; resize: vertical; font-family: inherit; }
+.mute-preview { font-size: 12.5px; color: var(--text); border-left: 2px solid var(--accent); padding-left: 10px; }
+.mute-past-label { margin-top: 10px; }
+.show-muted { color: var(--muted); }
+.mute-end { margin-top: 8px; }
+.mute-end input { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 9px; font-size: 13px; }
+.tl-flag.muted { opacity: 0.55; }
+.tl-flag .muted-badge { margin: 0 6px 0 0; }

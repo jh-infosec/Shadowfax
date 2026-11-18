@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { SEVERITY_COLOUR, SEVERITY_ORDER } from "../constants.js";
 
-export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAssign, onExplain, onNotes, canAct }) {
+export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAssign, onExplain, onNotes, onMute, canAct }) {
   const [sortKey, setSortKey] = useState("timestamp");
   const [sortDir, setSortDir] = useState("desc");
 
@@ -44,7 +44,7 @@ export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAss
         {sorted.map((a) => (
           <tr
             key={a.id}
-            className={a.acknowledged ? "acknowledged" : undefined}
+            className={[a.acknowledged && "acknowledged", a.suppressed_by && "muted"].filter(Boolean).join(" ") || undefined}
             onClick={() => onSelectActor(a.actor_id)}
           >
             <td>
@@ -59,6 +59,11 @@ export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAss
                   nothing here; one that arrived over the findings envelope names
                   the tool that claimed it, and says plainly when that tool did
                   not verify its own claim. Who says so is part of the finding. */}
+              {a.suppressed_by && (
+                <span className="muted-badge" title="An active rule mutes this alert. Open Muted alerts for why.">
+                  muted · rule {a.suppressed_by}
+                </span>
+              )}
               {a.source_tool && (
                 <span className="src-badge" title={`reported by ${a.source_tool}`}>
                   via {a.source_tool}
@@ -150,6 +155,13 @@ export default function AlertTable({ alerts, onSelectActor, onAcknowledge, onAss
                         title="Case notes: what people checked and decided"
                         onClick={() => onNotes(a)}>
                   {a.note_count ? `Notes · ${a.note_count}` : "Note"}
+                </button>
+              )}
+              {/* Muting (v0.42): opens the rule form filled in from this alert. */}
+              {canAct && onMute && !a.suppressed_by && (
+                <button className="mute-btn" title="Mute alerts like this one, for a reason, for a while"
+                        onClick={() => onMute(a)}>
+                  Mute
                 </button>
               )}
               {!canAct && !a.acknowledged && !a.assigned_to && !a.note_count && (

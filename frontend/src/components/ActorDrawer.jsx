@@ -65,7 +65,10 @@ export default function ActorDrawer({ detail, onClose, onDraftProfile }) {
               <div className="tl-time">{e.timestamp.replace("T", " ").slice(0, 16)}</div>
               <div className="tl-event">{e.event_type} &rarr; {e.target}</div>
               {flags.map((f) => (
-                <div key={f.id} className="tl-flag" style={{ color: SEVERITY_COLOUR[f.severity] }}>
+                <div key={f.id} className={`tl-flag${f.suppressed_by ? " muted" : ""}`}
+                     style={{ color: SEVERITY_COLOUR[f.severity] }}>
+                  {/* v0.42: muted alerts stay on the timeline, marked. */}
+                  {f.suppressed_by ? <span className="muted-badge">muted · rule {f.suppressed_by}</span> : null}
                   {f.severity.toUpperCase()} &middot; {f.category}: {f.message}
                 </div>
               ))}

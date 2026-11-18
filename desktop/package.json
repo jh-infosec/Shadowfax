@@ -1,7 +1,7 @@
 {
   "name": "shadowfax-desktop",
   "productName": "Shadowfax",
-  "version": "0.41.0",
+  "version": "0.42.0",
   "description": "Shadowfax's dashboard as a desktop app, with notifications for new critical alerts.",
   "author": "jh-infosec",
   "license": "MIT",

@@ -10,6 +10,7 @@ import DigestDrawer from "./components/DigestDrawer.jsx";
 import LockoutsDrawer from "./components/LockoutsDrawer.jsx";
 import AccountsDrawer from "./components/AccountsDrawer.jsx";
 import IntelDrawer from "./components/IntelDrawer.jsx";
+import MuteDrawer from "./components/MuteDrawer.jsx";
 import TwoFactorModal from "./components/TwoFactorModal.jsx";
 import SubjectsDrawer from "./components/SubjectsDrawer.jsx";
 import ProfileDraftModal from "./components/ProfileDraftModal.jsx";
@@ -75,6 +76,11 @@ export default function App() {
   const [lockoutsOpen, setLockoutsOpen] = useState(false);
   const [accountsOpen, setAccountsOpen] = useState(false);
   const [intelOpen, setIntelOpen] = useState(false);
+  // Muting (v0.42): the drawer, the alert it was opened from (to fill in the
+  // form), and whether the table shows muted alerts too.
+  const [muteOpen, setMuteOpen] = useState(false);
+  const [muteDraft, setMuteDraft] = useState(null);
+  const [showMuted, setShowMuted] = useState(false);
   const [twoFactorOpen, setTwoFactorOpen] = useState(false);
   const [subjectsOpen, setSubjectsOpen] = useState(false);
   const [draftAgent, setDraftAgent] = useState(null);
@@ -123,6 +129,7 @@ export default function App() {
               actorType: [...filters.actorType],
               category: [...filters.category],
               search: debouncedSearch,
+              suppressed: showMuted ? "include" : undefined,
             })
           : Promise.resolve([]),
       ]);
@@ -134,7 +141,7 @@ export default function App() {
       setConnected(false);
       setError(err.message);
     }
-  }, [filters.severity, filters.actorType, filters.category, debouncedSearch]);
+  }, [filters.severity, filters.actorType, filters.category, debouncedSearch, showMuted]);
 
   // Keep a live handle to the latest refresh so the stream can call it without
   // re-subscribing every time the filters (and thus refresh) change.
@@ -286,6 +293,7 @@ export default function App() {
       else if (explainAlert) setExplainAlert(null);
       else if (accountsOpen) setAccountsOpen(false);
       else if (intelOpen) setIntelOpen(false);
+      else if (muteOpen) setMuteOpen(false);
       else if (subjectsOpen) setSubjectsOpen(false);
       else if (lockoutsOpen) setLockoutsOpen(false);
       else if (digestOpen) setDigestOpen(false);
@@ -296,7 +304,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [passwordOpen, policyOpen, twoFactorOpen, draftAgent, notesAlert, explainAlert, accountsOpen, intelOpen, subjectsOpen, lockoutsOpen, digestOpen,
+  }, [passwordOpen, policyOpen, twoFactorOpen, draftAgent, notesAlert, explainAlert, accountsOpen, intelOpen, muteOpen, subjectsOpen, lockoutsOpen, digestOpen,
       incidentsOpen, selectedActorId]);
 
   const handleLogout = async () => {
@@ -437,6 +445,10 @@ export default function App() {
           onOpenDigest={() => setDigestOpen(true)}
           onOpenSubjects={() => setSubjectsOpen(true)}
           onOpenIntel={() => setIntelOpen(true)}
+          onOpenMuted={() => { setMuteDraft(null); setMuteOpen(true); }}
+          mutedCount={stats ? stats.muted_count : 0}
+          showMuted={showMuted}
+          onShowMuted={setShowMuted}
           onOpenLockouts={() => setLockoutsOpen(true)}
           onOpenAccounts={() => setAccountsOpen(true)}
           canSeeLockouts={canAdmin}
@@ -455,6 +467,7 @@ export default function App() {
               onAssign={assignAlertToMe}
               onExplain={setExplainAlert}
               onNotes={setNotesAlert}
+              onMute={(a) => { setMuteDraft({ category: a.category, actor: a.actor_id, target: "*" }); setMuteOpen(true); }}
               canAct={canAnalyst}
             />
           </div>
@@ -491,6 +504,10 @@ export default function App() {
 
       {intelOpen && (
         <IntelDrawer onClose={() => setIntelOpen(false)} canAdmin={canAdmin} canAnalyst={canAnalyst} />
+      )}
+      {muteOpen && (
+        <MuteDrawer onClose={() => setMuteOpen(false)} canAnalyst={canAnalyst} draft={muteDraft}
+                    onChanged={() => refreshRef.current()} />
       )}
       {accountsOpen && (
         <AccountsDrawer me={user.username} onClose={() => setAccountsOpen(false)} />
