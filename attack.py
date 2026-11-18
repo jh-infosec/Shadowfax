@@ -53,6 +53,9 @@ CATEGORY_TO_TECHNIQUES: dict[str, list[str]] = {
     "mfa_removed": ["T1556"],
     # v0.33: a replaced session token presented again -- someone holds a copy.
     "session_token_reuse": ["T1550"],
+    # v0.41: removing old records from the database. Usually housekeeping, and
+    # also what Indicator Removal looks like.
+    "evidence_archived": ["T1070"],
     # v0.36: prompt injection. These are MITRE ATLAS techniques (AML.*), the
     # AI-specific counterpart to ATT&CK; ATLAS's tactic names match ATT&CK's,
     # so they sit on the same kill chain.

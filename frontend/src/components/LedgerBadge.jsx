@@ -69,9 +69,22 @@ export default function LedgerBadge({ eventCount }) {
               <p className="ledger-pop-line good">{report.summary}</p>
               <p className="ledger-pop-note">
                 Every event is hash-chained to the one before it. All{" "}
-                {report.entries} links were recomputed and matched, so no event
-                has been edited, deleted or reordered since it was recorded.
+                {report.entries - (report.archived || 0)} links stored here were
+                recomputed and matched, so no event has been edited, deleted or
+                reordered since it was recorded.
               </p>
+              {report.archived > 0 && (
+                // v0.41: old events moved out into archive files. The chain
+                // carries on from the last one, and `archive.py verify` checks
+                // the files themselves.
+                <p className="ledger-pop-note ledger-archived">
+                  The first {report.archived} events were moved into{" "}
+                  {report.archives.length === 1 ? "an archive file" : `${report.archives.length} archive files`}{" "}
+                  (latest: <code>{report.archives[report.archives.length - 1].file_name}</code>), and
+                  the chain here carries on from its last hash. Check the files with{" "}
+                  <code>archive.py verify</code>.
+                </p>
+              )}
               <div className="ledger-pop-label">Head hash</div>
               <code className="ledger-hash">{report.head}</code>
               <p className="ledger-pop-note">

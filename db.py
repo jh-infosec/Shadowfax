@@ -88,7 +88,27 @@ CREATE TABLE IF NOT EXISTS ledger_head (
     head_hash TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- Archives (v0.41): each time old events are moved out of the database into
+-- an archive file, a row here says which, where they went, and the hash the
+-- ledger now carries on from. Never deleted except by a full reset.
+CREATE TABLE IF NOT EXISTS ledger_archives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    archived_at TEXT NOT NULL,
+    cutoff TEXT NOT NULL,
+    through_event_id INTEGER NOT NULL,
+    events INTEGER NOT NULL,
+    alerts INTEGER NOT NULL,
+    start_count INTEGER NOT NULL,
+    start_hash TEXT NOT NULL,
+    end_count INTEGER NOT NULL,
+    end_hash TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    file_sha256 TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id);
+-- v0.41: an actor's events after a given id, and how many it has up to one,
+-- which is what resuming a scan asks for on every ingest.
+CREATE INDEX IF NOT EXISTS idx_events_actor_id ON events(actor_id, id);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -428,10 +448,13 @@ def get_ledger_head(conn: sqlite3.Connection) -> dict[str, Any]:
             "updated_at": row["updated_at"]}
 
 
-def ledger_entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Every entry in insertion order, with its stored chain hashes, ready for
-    `ledger.verify_chain`."""
-    rows = conn.execute("SELECT * FROM events ORDER BY id ASC").fetchall()
+def ledger_entries(conn: sqlite3.Connection, through_id: int | None = None) -> list[dict[str, Any]]:
+    """Every entry in insertion order (up to `through_id`, if given), with its
+    stored chain hashes, ready for `ledger.verify_chain`."""
+    if through_id is None:
+        rows = conn.execute("SELECT * FROM events ORDER BY id ASC").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM events WHERE id <= ? ORDER BY id ASC", (through_id,)).fetchall()
     out = []
     for r in rows:
         e = _row_to_event(r)
@@ -441,14 +464,38 @@ def ledger_entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return out
 
 
+class ArchivedPosition(LookupError):
+    """A ledger position whose entry has been moved into an archive file."""
+
+
+def ledger_archives(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every archive taken, oldest first (v0.41)."""
+    return [dict(r) for r in conn.execute("SELECT * FROM ledger_archives ORDER BY id ASC")]
+
+
+def ledger_checkpoint(conn: sqlite3.Connection) -> tuple[int, str]:
+    """(entries archived so far, the hash the first stored entry chains from)."""
+    row = conn.execute("SELECT end_count, end_hash FROM ledger_archives ORDER BY id DESC LIMIT 1").fetchone()
+    return (int(row["end_count"]), row["end_hash"]) if row else (0, ledger.GENESIS_HASH)
+
+
 def ledger_hash_at(conn: sqlite3.Connection, position: int) -> str | None:
     """The stored entry hash at a position (1 is the first entry), i.e. what
     the head was when the ledger had that many entries (v0.34). None past the
-    end."""
+    end. A position inside an archive (v0.41) is answered where an archive
+    starts or ends, and otherwise raises ArchivedPosition naming the file."""
     if position <= 0:
         return ledger.GENESIS_HASH
+    archived, start = ledger_checkpoint(conn)
+    if position <= archived:
+        for a in ledger_archives(conn):
+            if position == a["end_count"]:
+                return a["end_hash"]
+            if a["start_count"] < position < a["end_count"]:
+                raise ArchivedPosition(a["file_name"])
+        raise ArchivedPosition("an archive")
     row = conn.execute("SELECT entry_hash FROM events ORDER BY id ASC LIMIT 1 OFFSET ?",
-                       (position - 1,)).fetchone()
+                       (position - archived - 1,)).fetchone()
     return row["entry_hash"] if row is not None else None
 
 
@@ -543,6 +590,29 @@ def get_events_for_actor(conn: sqlite3.Connection, actor_id: str) -> list[dict[s
     return [_row_to_event(r) for r in rows]
 
 
+def get_events_for_actor_after(conn: sqlite3.Connection, actor_id: str,
+                               after_id: int) -> list[dict[str, Any]]:
+    """An actor's events stored after `after_id`, in the usual order (v0.41)."""
+    rows = conn.execute(
+        "SELECT * FROM events WHERE actor_id = ? AND id > ? ORDER BY timestamp ASC, id ASC",
+        (actor_id, after_id)).fetchall()
+    return [_row_to_event(r) for r in rows]
+
+
+def actor_mark(conn: sqlite3.Connection, actor_id: str, through_id: int) -> tuple[int, str | None]:
+    """(how many of an actor's events have ids up to `through_id`, the ledger
+    hash of event `through_id`) (v0.41).
+
+    A resumed scan compares this with what it saw. The hash commits to every
+    event stored before that one, so a rolled-back write whose id SQLite later
+    hands to a different event, an archive or a reset all change the mark.
+    """
+    n = conn.execute("SELECT COUNT(*) FROM events WHERE actor_id = ? AND id <= ?",
+                     (actor_id, through_id)).fetchone()[0]
+    row = conn.execute("SELECT entry_hash FROM events WHERE id = ?", (through_id,)).fetchone()
+    return int(n), (row[0] if row else None)
+
+
 def get_all_events(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute("SELECT * FROM events ORDER BY timestamp ASC, id ASC").fetchall()
     return [_row_to_event(r) for r in rows]
@@ -579,30 +649,61 @@ def _row_to_event(r: sqlite3.Row) -> dict[str, Any]:
 
 #Alert storage
 
-def replace_alerts_for_actor(conn: sqlite3.Connection, actor_id: str, alerts: list[dict[str, Any]]) -> None:
-    """Rebuild alerts for a single actor.
+_ALERT_COLUMNS = ("id", "event_id", "actor_id", "actor_type", "timestamp", "severity", "category",
+                  "message", "target", "attack", "source_tool", "validated", "evidence")
 
-    Alert ids are deterministic (see detectors.alert_identity), so this
-    delete-and-reinsert reproduces the same id for an unchanged alert. Analyst
-    state in alert_state is keyed on that id and is not touched here, so it
-    survives the rebuild.
+
+def _alert_row(a: dict[str, Any]) -> tuple:
+    return (a["id"], a["event_id"], a["actor_id"], a["actor_type"], a["timestamp"],
+            a["severity"], a["category"], a["message"], a["target"],
+            json.dumps(a.get("attack", [])),
+            a.get("source_tool"),
+            None if a.get("validated") is None else int(bool(a["validated"])),
+            a.get("evidence"))
+
+
+def replace_alerts_for_actor(conn: sqlite3.Connection, actor_id: str, alerts: list[dict[str, Any]]) -> None:
+    """Make the stored alerts for one actor exactly `alerts`.
+
+    Alert ids are deterministic (see detectors.alert_identity), so an unchanged
+    alert keeps its id. Analyst state in alert_state is keyed on that id and is
+    not touched here, so it survives.
+
+    Until v0.41 this deleted every alert the actor had and inserted them all
+    again, which for a noisy agent meant rewriting thousands of rows to add
+    one. Now only rows that are new, gone or different are written; the result
+    is the same table.
     """
-    conn.execute("DELETE FROM alerts WHERE actor_id = ?", (actor_id,))
+    cols = ", ".join(_ALERT_COLUMNS)
+    have: dict[str, tuple] = {}
+    for r in conn.execute(f"SELECT {cols} FROM alerts WHERE actor_id = ?", (actor_id,)):
+        row = tuple(r[c] for c in _ALERT_COLUMNS)   # by name: PostgreSQL rows are dicts
+        have[row[0]] = row
+    want: dict[str, tuple] = {}
     for a in alerts:
-        conn.execute(
-            """INSERT INTO alerts (id, event_id, actor_id, actor_type, timestamp,
-                                   severity, category, message, target, attack,
-                                   source_tool, validated, evidence)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                a["id"], a["event_id"], a["actor_id"], a["actor_type"], a["timestamp"],
-                a["severity"], a["category"], a["message"], a["target"],
-                json.dumps(a.get("attack", [])),
-                a.get("source_tool"),
-                None if a.get("validated") is None else int(bool(a["validated"])),
-                a.get("evidence"),
-            ),
-        )
+        row = _alert_row(a)
+        if row[0] in want:
+            raise sqlite3.IntegrityError(f"alert id {row[0]} appears twice")
+        want[row[0]] = row
+    stale = [(i,) for i, row in have.items() if want.get(i) != row]
+    fresh = [row for i, row in want.items() if have.get(i) != row]
+    if stale:
+        conn.executemany("DELETE FROM alerts WHERE id = ?", stale)
+    if fresh:
+        conn.executemany(f"INSERT INTO alerts ({cols}) VALUES ({', '.join('?' * len(_ALERT_COLUMNS))})", fresh)
+
+
+def add_alerts(conn: sqlite3.Connection, alerts: list[dict[str, Any]]) -> None:
+    """Store alerts that a resumed scan has just added (v0.41).
+
+    The scan only ever appends, so the actor's earlier alerts are already in
+    the table. One that is there already (another server process stored it
+    first, from the same events) is left as it is: same events, same alert.
+    """
+    if alerts:
+        cols = ", ".join(_ALERT_COLUMNS)
+        conn.executemany(f"INSERT INTO alerts ({cols}) VALUES ({', '.join('?' * len(_ALERT_COLUMNS))}) "
+                         "ON CONFLICT (id) DO NOTHING", [_alert_row(a) for a in alerts])
 
 
 def query_alerts(
@@ -826,6 +927,7 @@ def wipe_all(conn: sqlite3.Connection) -> None:
     # The ledger restarts from genesis along with the events it describes. A
     # reset is an explicit, authorised wipe -- not a silent edit -- so the head
     # is reset openly rather than left claiming entries that no longer exist.
+    conn.execute("DELETE FROM ledger_archives")
     _write_ledger_head(conn, 0, ledger.GENESIS_HASH)
 
 

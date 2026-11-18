@@ -209,6 +209,17 @@ def _run_checks(page, url: str, requested: list[str]) -> None:
     badge = page.inner_text(".ledger-badge")
     check("the ledger badge reports the chain verified", "verified" in badge.lower(),
           badge.replace("\n", " "))
+    # v0.41: after archive.py has moved old events into a file, the badge
+    # still reads verified and says where the rest went. CI archives inside
+    # the container before this runs and sets SHADOWFAX_EXPECT_ARCHIVE.
+    if os.environ.get("SHADOWFAX_EXPECT_ARCHIVE"):
+        page.click(".ledger-badge")
+        note = page.locator(".ledger-archived")
+        note_text = note.inner_text() if note.count() else ""
+        check("after an archive, the badge says the oldest events are in a file, and which",
+              note.count() == 1 and ".jsonl.gz" in note_text and "archive.py verify" in note_text,
+              note_text.replace("\n", " "))
+        page.click(".ledger-badge")
 
     # -- the kill chain is drawn, not just computed -------------------------
     page.click("text=Incidents")

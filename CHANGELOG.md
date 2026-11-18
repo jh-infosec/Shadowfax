@@ -1,5 +1,60 @@
 # Changelog
 
+## Version 0.41.0
+
+Long histories: recording stays fast as an agent's history grows, and old
+events can be archived without breaking the evidence chain.
+
+### What's new
+
+- **Recording an event no longer gets slower as history grows.** Every ingest
+  used to rescan the agent's whole history: at 50,000 events, one more took
+  829 ms. Each agent's scan is now kept running between events and fed only
+  the new ones, and only alerts that are new get written. The same event takes
+  11 ms, and 9 ms for an agent with 33,000 alerts (it was 1,196 ms).
+- **It's the same answer, not an approximation.** A kept scan is only resumed
+  while the policy and every intel feed are unchanged, new events sort after
+  the last one it saw, and the agent's event count and the ledger hash of that
+  event still match. Anything else starts a fresh scan. The test suite runs
+  with `SHADOWFAX_VERIFY_SCANS=1`, which checks every resumed scan against a
+  full one and fails on any difference, and throws a random stream of late,
+  early and same-second events at it.
+- **`bench.py`** measures it, with kept scans on and off, for a well-behaved
+  agent and (`--noisy`) one that breaks its allowlist constantly.
+- **Stored alerts are written as a difference.** Rebuilding an agent's alerts
+  used to delete and reinsert every one; now only new, gone or changed rows are
+  written.
+- **`archive.py`** moves old events into a gzipped JSON Lines file, with their
+  ledger hashes, the alerts that leave with them and a copy of the analyst
+  notes on those alerts. The ledger is cut at one point and carries on from the
+  file's last hash, so `/ledger/verify` still passes and the dashboard's badge
+  says where the rest went. The part being archived is verified first, and a
+  broken chain is refused. `archive.py verify` checks the files: each chain,
+  that each starts where the one before ended, and with `--against-db` that
+  they're the files the database recorded, byte for byte.
+- **`evidence_archived`,** the 34th detector, raised (medium, T1070) whenever
+  an archive is taken. Routine housekeeping looks exactly like someone covering
+  their tracks, so it's never silent.
+- **`GET /ledger/head?at=N`** still works across archives: at an archive's
+  boundary it returns the hash, and inside one it returns 410 naming the file.
+- The PostgreSQL compose setup has a `shadowfax-archives` volume, and the
+  deployment guide has a section on archiving.
+
+### Tested
+
+- 1,101 API checks, on SQLite and on PostgreSQL. The 44 new ones cover a
+  random 60-batch stream over four agents with late events, a rolled-back
+  write whose id SQLite reuses, a scan that moved on without its alerts being
+  stored, policy saves with and without changes, the cache bound, and archiving
+  end to end: a refused broken chain, edited, forged, cut-short and gapped
+  archive files, an edited alert caught only by the sha256, and a second
+  archive carrying on from the first.
+- Mutation checks: every safety check on resuming a scan, the alert difference,
+  and the archive's verification steps were broken one at a time, and each
+  break failed the suite.
+- CI now archives inside the packaged image, verifies the file and the server's
+  ledger, and checks the dashboard's badge afterwards.
+
 ## Version 0.40.0
 
 Housekeeping a security reviewer looks for first.

@@ -27,6 +27,7 @@ import secrets
 import sqlite3
 import threading
 from pathlib import Path
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -63,7 +64,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.40.0"
+VERSION = "0.41.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -121,6 +122,8 @@ RESERVED_EVENT_TYPES = {
     cases.UPDATE: "nothing -- Shadowfax records these itself",
     # v0.39: changes to threat intelligence feeds.
     "intel_feed_change": "nothing -- Shadowfax records these itself",
+    # v0.41: written by archive.py when old events are moved into a file.
+    "events_archived": "nothing -- archive.py records these itself",
 }
 
 # Recorded sign-in attempts are operational state for the throttle, not
@@ -594,11 +597,130 @@ def allow_ingest(identity: dict[str, Any] = Depends(_identity)) -> dict[str, Any
 
 # Internal helpers
 
-def _rescan_actor(conn: sqlite3.Connection, actor_id: str) -> list[dict[str, Any]]:
-    policy = db.get_policy(conn) or DEFAULT_POLICY
+# Resumable scans (v0.41)
+#
+# Alerts are a pure function of (an actor's events, policy, indicators), and
+# until v0.41 every ingest computed that function from scratch: one more event
+# for an agent with 50,000 meant reading and judging all 50,001 (0.76 s, and
+# growing). Now each actor's scan is kept alive between ingests and only fed
+# what's new. It is the same computation, resumed, not an approximation:
+#
+# * The scan is only resumed when the policy and every enabled feed are exactly
+#   what it started with, and the new events sort after everything it has seen.
+#   Anything else (an edit, a feed refresh, an event backdated before the last
+#   one) starts a fresh scan of the whole history, as before.
+# * Before resuming, the actor's event count up to the last one seen is checked
+#   against the scan's own count. A rolled-back transaction, a reset or an
+#   archive changes it, and the scan is thrown away rather than trusted.
+# * SHADOWFAX_VERIFY_SCANS=1 runs the full scan as well every time and records
+#   any difference. The test suite runs with it on.
+#
+# The cache is per process and bounded; losing it costs one full scan per actor.
+SCAN_CACHE_SIZE = int(os.environ.get("SHADOWFAX_SCAN_CACHE_ACTORS", "2000"))
+VERIFY_SCANS = os.environ.get("SHADOWFAX_VERIFY_SCANS") == "1"
+_scan_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+_scan_lock = threading.Lock()
+SCAN_STATS = {"full": 0, "resumed": 0, "only_new_written": 0, "mismatches": 0}
+
+
+def _scan_key(conn: sqlite3.Connection, policy: dict[str, Any]) -> tuple:
+    return (json.dumps(policy, sort_keys=True, default=str), db.intel_version(conn))
+
+
+def _full_scan(conn: sqlite3.Connection, actor_id: str, policy: dict[str, Any],
+               index: intel.Index, key: tuple) -> dict[str, Any]:
     events = db.get_events_for_actor(conn, actor_id)
-    alerts = detectors.run_for_actor(events, policy, _intel_index(conn))
-    db.replace_alerts_for_actor(conn, actor_id, alerts)
+    alerts: list[dict[str, Any]] = []
+    scan = detectors.start_scan(actor_id, policy, index, alerts) if events else None
+    for e in events:
+        scan.send(e)
+    last = events[-1] if events else None
+    last_id = max((e["id"] for e in events), default=0)
+    return {"key": key, "scan": scan, "alerts": alerts, "last_id": last_id, "stored": None,
+            "mark": db.actor_mark(conn, actor_id, last_id),
+            "last_order": (last["timestamp"], last["id"]) if last else ("", 0)}
+
+
+def _scan_actor(conn: sqlite3.Connection, actor_id: str) -> tuple[list[dict[str, Any]], int | None]:
+    """The actor's alerts, and, when the scan was resumed from one whose alerts
+    were all stored, how many of them are already in the table (the rest are
+    new). None means the table has to be compared in full."""
+    policy = db.get_policy(conn) or DEFAULT_POLICY
+    index = _intel_index(conn)
+    key = _scan_key(conn, policy)
+    with _scan_lock:
+        state = _scan_cache.pop(actor_id, None)
+        resumed = False
+        if (state is not None and state["key"] == key and state["scan"] is not None
+                and db.actor_mark(conn, actor_id, state["last_id"]) == state["mark"]):
+            new = db.get_events_for_actor_after(conn, actor_id, state["last_id"])
+            if all((e["timestamp"], e["id"]) > state["last_order"] for e in new):
+                stored = state["stored"] if state["stored"] == len(state["alerts"]) else None
+                state["stored"] = None   # until the caller says these are written
+                try:
+                    for e in new:
+                        state["scan"].send(e)
+                    if new:
+                        state["last_id"] = max(e["id"] for e in new)
+                        state["last_order"] = (new[-1]["timestamp"], new[-1]["id"])
+                        state["mark"] = db.actor_mark(conn, actor_id, state["last_id"])
+                    resumed = True
+                except Exception:
+                    state = None   # a scan that failed part-way can't be trusted
+        if not resumed:
+            state = _full_scan(conn, actor_id, policy, index, key)
+            stored = None
+            SCAN_STATS["full"] += 1
+        else:
+            SCAN_STATS["resumed"] += 1
+            if VERIFY_SCANS:
+                fresh = _full_scan(conn, actor_id, policy, index, key)
+                if fresh["alerts"] != state["alerts"]:
+                    SCAN_STATS["mismatches"] += 1
+                    print(f"[scan] resumed scan of {actor_id} differed from a full one; using the full one",
+                          flush=True)
+                    state, stored = fresh, None
+        _scan_cache[actor_id] = state
+        while len(_scan_cache) > SCAN_CACHE_SIZE:
+            _scan_cache.popitem(last=False)
+        return list(state["alerts"]), stored
+
+
+def _scan_stored(actor_id: str, n: int) -> None:
+    """The first `n` of the actor's kept alerts are now in the table."""
+    with _scan_lock:
+        state = _scan_cache.get(actor_id)
+        if state is not None and len(state["alerts"]) == n:
+            state["stored"] = n
+
+
+def _forget_scans() -> None:
+    with _scan_lock:
+        _scan_cache.clear()
+
+
+def _rescan_actor(conn: sqlite3.Connection, actor_id: str,
+                  retired: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Bring an actor's stored alerts up to date. With `retired`, also collect
+    the alerts this removed (only a full scan can remove any: a resumed one
+    only adds)."""
+    alerts, stored = _scan_actor(conn, actor_id)
+    if stored is not None:
+        db.add_alerts(conn, alerts[stored:])
+        SCAN_STATS["only_new_written"] += 1
+        if VERIFY_SCANS and sorted(a["id"] for a in db.query_alerts(conn, actor_id=actor_id, limit=10**9)) \
+                != sorted(a["id"] for a in alerts):
+            SCAN_STATS["mismatches"] += 1
+            print(f"[scan] stored alerts of {actor_id} drifted from its kept scan", flush=True)
+            db.replace_alerts_for_actor(conn, actor_id, alerts)
+    else:
+        if retired is not None:
+            after = {a["id"] for a in alerts}
+            retired.extend({"id": r["id"], "category": r["category"], "severity": r["severity"]}
+                           for r in conn.execute("SELECT id, category, severity FROM alerts WHERE actor_id = ?",
+                                                 (actor_id,)) if r["id"] not in after)
+        db.replace_alerts_for_actor(conn, actor_id, alerts)
+    _scan_stored(actor_id, len(alerts))
     # Queued in the same transaction as the alerts themselves, so a crash
     # between the two cannot lose one (v0.31).
     _forward_enqueue(conn, alerts)
@@ -614,12 +736,8 @@ def _rescan_after_ingest(conn: sqlite3.Connection, actor_id: str,
     already judged. That is written into the ledger under shadowfax-ingest and
     raises history_rewritten, naming the credential, so it is never silent.
     """
-    before = {r["id"]: (r["category"], r["severity"]) for r in conn.execute(
-        "SELECT id, category, severity FROM alerts WHERE actor_id = ?", (actor_id,))}
-    alerts = _rescan_actor(conn, actor_id)
-    after = {a["id"] for a in alerts}
-    retired = [{"id": i, "category": c, "severity": sv}
-               for i, (c, sv) in before.items() if i not in after]
+    retired: list[dict[str, Any]] = []
+    alerts = _rescan_actor(conn, actor_id, retired)
     if retired and SELF_MONITOR:
         _, label = ratelimit.principal_of(identity)
         db.insert_event(conn, {
@@ -1445,9 +1563,16 @@ def verify_ledger(identity: dict = Depends(allow_integrity_check)):
     with db.get_conn() as conn:
         entries = db.ledger_entries(conn)
         head = db.get_ledger_head(conn)
-    report = ledger.verify_chain(entries, head["entry_count"], head["head_hash"])
+        archived, start = db.ledger_checkpoint(conn)
+        archives = db.ledger_archives(conn)
+    report = ledger.verify_chain(entries, head["entry_count"], head["head_hash"],
+                                 start_hash=start, start_count=archived)
     report["summary"] = ledger.describe(report)
     report["recorded_head"] = head
+    # v0.41: where the entries no longer stored went. `archive.py verify`
+    # checks the files themselves against these hashes.
+    report["archives"] = [{k: a[k] for k in ("archived_at", "cutoff", "events", "start_count", "end_count",
+                                             "end_hash", "file_name", "file_sha256")} for a in archives]
     return report
 
 
@@ -1471,7 +1596,11 @@ def ledger_head(at: int | None = Query(None, ge=0),
             return head
         if at > head["entry_count"]:
             raise HTTPException(404, f"the ledger has {head['entry_count']} entries, not {at}")
-        return {"entry_count": at, "head_hash": db.ledger_hash_at(conn, at)}
+        try:
+            return {"entry_count": at, "head_hash": db.ledger_hash_at(conn, at)}
+        except db.ArchivedPosition as exc:
+            raise HTTPException(410, f"entry {at} has been archived, into {exc}; "
+                                     f"check it there with archive.py verify")
 
 
 @app.get("/assistant/status")
@@ -1515,6 +1644,7 @@ def update_policy(policy: dict[str, Any], identity: dict = Depends(require_role(
 
 @app.post("/reset")
 def reset(identity: dict = Depends(require_role("admin"))):
+    _forget_scans()
     with db.get_conn() as conn:
         db.wipe_all(conn)
         db.set_policy(conn, DEFAULT_POLICY)

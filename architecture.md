@@ -56,6 +56,13 @@ This trades a little CPU for correctness and restart-safety. There is no
 in-memory sliding-window state to reconstruct after a crash, and no
 possibility of stale alerts surviving a policy change.
 
+Since v0.41 the computation is kept running between events instead of being
+started again for each one (see "Resumable scans" under `app.py` below). That
+changes how long it takes, not what it produces: a kept scan is the same pass
+over the same events, resumed, and it's thrown away for a full one whenever
+that can't be shown. The in-memory state is a cache. Losing it on a restart
+costs one full scan per actor, never a wrong alert.
+
 ### Alert identity is deterministic
 
 An alert's id is a hash of the actor, the machine-stable `category` and the
@@ -177,6 +184,23 @@ and exposes statistics. Every endpoint carries an authentication dependency
 Also owns orchestration: `_rescan_actor` loads an actor's history, runs the
 detection engine and writes the resulting alerts back. `_rescan_all` does the
 same for every known actor.
+
+**Resumable scans (v0.41).** `detectors.start_scan` returns the detection pass
+as a generator that takes one event at a time, and `run_for_actor` is now just
+that generator fed a whole history. `_scan_actor` keeps one per actor in a
+bounded LRU (`SHADOWFAX_SCAN_CACHE_ACTORS`, default 2,000) with the key it was
+started under (the policy as sorted JSON, and `db.intel_version`), the last
+event it saw, and a mark: the actor's event count up to that event and that
+event's ledger hash. An ingest resumes it only if the key matches, the mark
+still matches the database, and every new event sorts after the last one seen.
+The mark catches a rolled-back write (SQLite can hand the same id to a
+different event afterwards, but not the same hash), a reset and an archive. A
+scan that raises part-way is discarded. Because a resumed scan only ever
+appends alerts, `_rescan_actor` writes just the new ones when the earlier ones
+are known to be stored, and needs no "before" snapshot to find retired alerts,
+since a resumed scan can't retire any. `SHADOWFAX_VERIFY_SCANS=1` runs a full
+scan beside every resumed one and counts any difference in `SCAN_STATS`; the
+test suite runs with it on and fails on a single mismatch.
 
 #### auth.py
 
@@ -645,6 +669,38 @@ its next request (sessions and users are read from the database each time); the
 dashboard sees the alert on its next refresh, since the event bus lives inside
 the server process.
 
+#### archive.py
+
+Retention (v0.41), run beside the database like `recover.py`. `plan(cutoff)`
+finds the ledger cut: the longest run of stored events, from the oldest
+stored, whose timestamps are all before the cutoff. The ledger is a chain in
+insertion order, so it can only be cut at one point; old events stored after a
+newer one wait for it. `run()` takes the write lock, verifies the part being
+archived (refusing a broken chain, which archiving would launder), deletes
+those events and the alerts on them, rescans the affected actors through the
+server's own `_rescan_actor`, and writes a gzipped JSON Lines file holding the
+events with their hashes, every alert that left (by id, before against after),
+and a copy of the analyst state on those alerts. The gzip header has no
+timestamp, so the same archive is the same bytes. The file is written under a
+temporary name and moved into place; then a `ledger_archives` row records its
+name, sha256 and last hash, and `events_archived` is written under
+`shadowfax-ingest`, raising `evidence_archived` (medium, T1070) even with
+self-monitoring off. If anything fails before the commit, the file is removed.
+
+`verify(files, against_db)` checks each file's chain from its own start hash,
+that each file starts where the previous one ended, and with `against_db` that
+each is byte for byte the file recorded and that the first stored event chains
+on from the last one. Alerts in a file aren't in the hash chain, so the sha256
+is what protects them.
+
+#### bench.py
+
+`python bench.py [--noisy]` measures the cost of recording one event against
+histories of 1,000, 10,000 and 50,000 events, with kept scans on and off
+(`SHADOWFAX_SCAN_CACHE_ACTORS=0`). Each measurement runs in a fresh process
+against a temporary SQLite file, through the API with an ingest key, so it
+times what an agent connector sees.
+
 #### timeutil.py
 
 Time, one way (v0.21): `normalise()` is strict -- ISO 8601 with an optional
@@ -747,6 +803,12 @@ data would make the proof depend on the thing being audited. What is proven is
 "these entries were appended in this order and none has changed since": a
 statement about the store, not about the world.
 
+Archives (v0.41): `verify_chain` takes a `start_hash` and `start_count`, the
+last hash and entry count of the most recent archive, so the first stored entry
+must chain to the last archived one. Counts and positions stay those of the
+whole ledger. `GET /ledger/head?at=N` answers at an archive's boundary and
+returns 410 naming the file for a position inside one.
+
 This is tamper-**evident**, not tamper-**proof**, and the module says so in its
 own docstring. It makes silent modification and deletion detectable by anyone who
 can read the log; it does not prevent them. An attacker with full write access
@@ -815,6 +877,15 @@ Tables:
   and `superseded_at` when a refresh replaced it. Replaced rows are kept until
   the session ends so that presenting one again can be recognised as reuse.
 - `api_keys`, ingest keys (also stored as a fingerprint) with a display prefix
+- `ledger_archives` (v0.41), one row per archive taken: the cutoff, how many
+  events and alerts, the ledger count and hash it starts and ends on, and the
+  file's name and sha256. Cleared only by a full reset.
+
+`replace_alerts_for_actor` (v0.41) writes only the rows that are new, gone or
+different, comparing by column; `add_alerts` inserts a resumed scan's new
+alerts, leaving any already stored (by another server process, from the same
+events) as they are. `actor_mark` gives a kept scan its safety check: the
+actor's event count up to an id, and the ledger hash at that id.
 
 Also provides alert querying (left-joining `alert_state`), severity counts and
 actor risk scoring. Risk score is a weighted sum of an actor's alerts: critical
@@ -1071,9 +1142,13 @@ the severity colours that `constants.js` refers to by variable name.
    reads the current head, computes `prev_hash`/`entry_hash`, inserts the row
    and advances `ledger_head` in the same transaction, so the log and its head
    record cannot drift apart
-3. Full event history loaded for each affected actor
-4. Detection engine evaluates that history against the active policy
-5. Existing alerts for the actor are deleted and replaced with the new set
+3. For each affected actor, its kept scan (v0.41) is checked and fed only the
+   new events; if there isn't one it can trust, the actor's full history is
+   loaded and scanned from the start
+4. Detection engine evaluates those events against the active policy
+5. The actor's stored alerts are brought in line with the result: a resumed
+   scan only adds alerts, so only the new ones are written; after a full scan
+   the stored set is compared and only differing rows are written
 6. A change is published on the bus; subscribed dashboards refetch
 
 ### On a sign-in attempt (v0.10)
@@ -1182,6 +1257,16 @@ These are accepted limitations of the current design, recorded so they are
 not rediscovered as bugs.
 
 ### Rescan cost grows with actor history
+
+Mostly resolved in v0.41: an ingest now resumes the actor's kept scan, so
+recording an event costs about the same at 50,000 events of history as at
+1,000 (`bench.py` measures it, and the README has the numbers). What's still
+linear: the first event for each actor after a restart, an event backdated
+before the last one seen, and anything that changes the policy or a threat
+intel feed, which rescans every actor in full. Those are rare by comparison,
+and archiving (`archive.py`) bounds how much history there is to scan.
+
+The original note, from before v0.41:
 
 Each rescan replays an actor's complete event history. This is linear in
 history length, and a policy change is linear in total events across all
@@ -1379,6 +1464,7 @@ pgcompat.py             cases.py                injection.py
 demo_gif.py             docs/demo.gif           shadowfax_agent.py
 intel.py                supply_chain.py         requirements.lock
 LICENSE                 SECURITY.md             ruff.toml
+archive.py              bench.py
 
 desktop/package.json    desktop/package-lock.json
 desktop/main.js         desktop/preload.js      desktop/connect-preload.js

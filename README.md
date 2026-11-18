@@ -33,7 +33,7 @@ is not a security boundary and doesn't block anything.
 
 **Detection**
 
-- 33 deterministic detectors, including AI agent tool call analysis (destructive
+- 34 deterministic detectors, including AI agent tool call analysis (destructive
   commands, out of scope actions, privilege escalation, data exfiltration)
 - Prompt-injection detection: instructions hidden in what an agent reads, the
   agent acting on them, and tools rewritten under the same name
@@ -86,6 +86,9 @@ is not a security boundary and doesn't block anything.
 - Two-factor sign-in (TOTP) with recovery codes, optionally required for admins
 - Sign-in throttling and lockout that doesn't reveal which usernames exist
 - A hash-chained event ledger, so edits, deletions and reordering are detectable
+- Recording an event takes about 10 ms whether the agent has a hundred events
+  behind it or fifty thousand
+- Old events can be archived into a file without breaking the evidence chain
 - Shadowfax monitors its own sign-in page and raises normal alerts about attacks
   on itself
 - Sends alerts to a SIEM over a signed webhook or syslog (CEF or JSON)
@@ -801,6 +804,90 @@ longer matches what you saved, history before that point was rewritten, even
 if `verify` passes. The [deployment guide](docs/deployment.md#6-keep-a-copy-of-the-ledger-head-somewhere-else)
 has the exact commands.
 
+## Long histories
+
+### Recording stays fast
+
+Alerts are worked out from an agent's whole history, so up to v0.40 every new
+event meant reading and judging everything that agent had ever done. Fine for a
+demo, slow for a busy agent: at 50,000 events, recording one more took most of
+a second. Now each agent's scan is kept running between events and only the new
+ones are fed to it, and only alerts that are new get written.
+
+`bench.py` measures it. It fills a throwaway database with one agent's events,
+records more one at a time through the API with an agent's key, and reports the
+median, with the kept scans on and off:
+
+```bash
+python bench.py           # a well-behaved agent
+python bench.py --noisy   # one that breaks its allowlist on most calls
+```
+
+| Events already stored | Scanning everything (v0.40) | Kept scan (v0.41) |
+| ---: | ---: | ---: |
+| 1,000 | 24 ms | 7 ms |
+| 10,000 | 183 ms | 7 ms |
+| 50,000 | 829 ms | 11 ms |
+| 50,000, noisy (about 33,000 alerts) | 1,196 ms | 9 ms |
+
+Those are from a small cloud VM on SQLite; yours will differ, the shape won't.
+The first event after a restart still scans the whole history once.
+
+This is the same calculation resumed, not an approximation, and it's careful
+about when it can resume. A scan is only kept going while the policy and every
+threat intel feed are exactly what it started with, and while new events sort
+after everything it has seen. Before trusting a kept scan, Shadowfax checks the
+agent's event count and the ledger hash of the last event it saw, which catches
+a rolled-back write, a reset or an archive. Anything else starts a fresh scan.
+The test suite runs with `SHADOWFAX_VERIFY_SCANS=1`, which does a full scan as
+well every time and fails the run if the two ever disagree, and it throws a
+random stream of late, early and same-second events at it to make sure.
+
+### Archiving old events
+
+Shadowfax keeps every event it's sent. That's the right default for evidence,
+but the database only grows. `archive.py` moves old events into a file and out
+of the database, and the ledger carries on from that file:
+
+```bash
+python archive.py run --older-than 365 --dry-run   # what would go
+python archive.py run --older-than 365             # do it
+python archive.py verify archives/*.jsonl.gz --against-db
+
+# with Docker
+docker exec -it shadowfax python archive.py run --older-than 365
+```
+
+The file is gzipped JSON Lines holding the events with their ledger hashes, the
+alerts that leave the database with them, and a copy of any analyst notes on
+those alerts. By default it goes in `archives/` beside the database, which in
+Docker is the data volume. Copy it somewhere safe: it's the only copy now.
+
+Some things it's careful about:
+
+- The ledger is a chain in the order events were stored, so it can only be cut
+  at one point. The archive takes the oldest stored events up to the first one
+  that's newer than the cutoff. An old event that was uploaded late stays until
+  the newer ones before it go too, and `--dry-run` tells you how many.
+- The part being archived is verified first. Archiving a broken chain would
+  hide the break, so it's refused.
+- The database records each archive's file name, sha256 and last hash.
+  `/ledger/verify` checks that what's still stored chains on from the last
+  archive, and the dashboard's ledger badge says so. `archive.py verify` checks
+  the files: each one's chain, that each starts where the one before ended, and
+  with `--against-db` that they're the files the database recorded, byte for
+  byte. Alerts in the file aren't part of the chain, so that last check is what
+  protects them.
+- It's written into the ledger and raises `evidence_archived` (medium, mapped to
+  ATT&CK T1070). Routine housekeeping looks exactly like someone covering their
+  tracks, so it's never silent.
+
+The agents whose history was archived have their alerts worked out again from
+what's left. Anything that depended on the archived events leaves with them
+(it's in the file), and a finding that's raised once per agent, like
+`undeclared_agent`, can come back on the first event that's left. On SQLite the
+database file doesn't shrink until it's compacted, so add `--vacuum`.
+
 ## The sign-in page
 
 Shadowfax has had a `brute_force_auth` detector since v0.1, but until v0.10 its
@@ -898,7 +985,7 @@ Some details worth knowing:
   Shadowfax's own detectors complete.
 - **A bad envelope is rejected whole,** with the field at fault named, so the
   person writing the other tool finds out what's wrong.
-- **Other tools can't use Shadowfax's own 33 detector categories,** so an alert
+- **Other tools can't use Shadowfax's own 34 detector categories,** so an alert
   reading `destructive_action` always means Shadowfax found it.
 - **Unvalidated findings are marked but not downgraded.** `validated: false`
   means the tool is repeating something the subject said about itself, like a
@@ -1138,7 +1225,8 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 1,046 checks against the API. To run the same checks on PostgreSQL, set
+That runs 1,101 checks against the API, with every resumed scan checked against
+a full one as it goes. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
 
@@ -1150,7 +1238,7 @@ python demo.py --fast          # put some data on the dashboard first
 python test_dashboard.py
 ```
 
-There are 75 checks, covering things like the alert rows rendering with severity
+There are 76 checks, covering things like the alert rows rendering with severity
 and ATT&CK technique, filters actually filtering, the kill chain being drawn, the
 ledger badge reading verified, the session token never appearing in a URL, and
 the Accounts drawer creating a user whose password really works. They refuse to
@@ -1193,7 +1281,8 @@ as a non-root user, serves the dashboard, raises the detections this README
 describes, and refuses `admin/admin` when started without credentials. It then
 starts the PostgreSQL compose setup exactly as the deployment guide does,
 replays the attack against that too, restarts it to check nothing is lost, and
-takes a backup.
+takes a backup. In between, it archives the oldest events inside the image and
+checks the archive file, the server's ledger and the dashboard's badge.
 
 Two more jobs cover the desktop app. **desktop** starts a server from the same
 commit, runs the app's tests against it under a virtual screen, then builds the
@@ -1269,6 +1358,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
 | 0.38 | The desktop app for Windows and Linux |
 | 0.39 | Threat intelligence feeds and watchlists |
 | 0.40 | MIT licence, security policy, pinned dependencies, vulnerability and code scanning |
+| 0.41 | Recording stays fast as history grows, archiving old events |
 
 Everything on the original list for 1.0 is done. Still open:
 

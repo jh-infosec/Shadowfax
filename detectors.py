@@ -58,6 +58,8 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "prompt_injection", "injection_followed", "tool_definition_changed",
     # v0.39: an agent reaching something a threat intelligence feed lists.
     "threat_intel_match",
+    # v0.41: old events moved out of the database into an archive file.
+    "evidence_archived",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
@@ -358,7 +360,32 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any],
     `intel_index` (v0.39) is the listed indicators of every enabled threat
     intelligence feed; alerts are then a pure function of (events, policy,
     indicators)."""
+    if not events:
+        return []
     alerts: list[dict[str, Any]] = []
+    scan = start_scan(events[0]["actor_id"], policy, intel_index, alerts)
+    for e in events:
+        scan.send(e)
+    return alerts
+
+
+def start_scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | None",
+               alerts: list[dict[str, Any]]):
+    """A scan of one actor's events that can be resumed (v0.41).
+
+    The same detectors as `run_for_actor`, as a generator: `scan.send(event)`
+    runs one event through them and appends any alerts to `alerts`. Feeding it
+    a prefix of the events and then the rest gives exactly what one pass over
+    all of them would, so a scan kept alive between ingests only has to look at
+    what's new, instead of the actor's whole history every time.
+    """
+    gen = _scan(actor_id, policy, intel_index, alerts)
+    next(gen)
+    return gen
+
+
+def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | None",
+          alerts: list[dict[str, Any]]):
 
     last_seen: datetime | None = None
     ever_blocked: set[str] = set()
@@ -378,8 +405,7 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any],
 
     # Agent permissions (v0.16). Resolved once: every event here is one actor's,
     # and a profile belongs to the actor, not to the event.
-    grant = (permissions.resolve(events[0]["actor_id"], policy) if events
-             else permissions.Resolution(None, None, None))
+    grant = permissions.resolve(actor_id, policy)
     undeclared_reported = False
     # One alert per distinct breach, on its first occurrence. An agent that
     # retries a denied tool forty times has committed one breach forty times;
@@ -416,7 +442,8 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any],
             alerts.append(_mk_alert(e, permissions.SEVERITY_UNDECLARED,
                 "undeclared_agent", permissions.undeclared_message(e["actor_id"])))
 
-    for e in events:
+    while True:
+        e = yield
         # Case notes (v0.35) are what analysts wrote about alerts, not behaviour
         # to judge: twenty notes in a busy minute is a team at work, not a
         # rate anomaly, and a note at 3am is not off-hours access.
@@ -531,6 +558,20 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any],
                     f"alert(s) already raised on '{meta.get('actor_id', '?')}' "
                     f"({', '.join(cats) or 'unknown'}) -- new events changed what the "
                     f"engine concluded about the past"))
+            continue
+
+        # Archiving (v0.41). archive.py moves old events out of the database
+        # into a file and the ledger carries on from that file's last hash.
+        # Usually routine housekeeping; it is also exactly what someone
+        # covering their tracks would do, so it is never silent. Medium, and
+        # raised even with self-monitoring off, like console recovery.
+        if e["event_type"] == "events_archived":
+            if e["actor_id"] == INGEST_ACTOR_ID:
+                alerts.append(_mk_alert(e, "medium", "evidence_archived",
+                    f"{meta.get('events', '?')} event(s) recorded before {meta.get('cutoff', '?')} were moved "
+                    f"out of the database into {meta.get('file', '?')} (sha256 "
+                    f"{str(meta.get('file_sha256', '?'))[:16]}…) by OS user '{meta.get('os_user', '?')}', with "
+                    f"{meta.get('alerts', 0)} alert(s) on them; the ledger now carries on from that file"))
             continue
 
         if e["event_type"] == "ingest_throttled":
@@ -858,5 +899,3 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any],
 
         last_seen = ts
         touched_targets.add(e["target"])
-
-    return alerts

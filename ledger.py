@@ -105,7 +105,9 @@ def compute_chain(events: list[dict[str, Any]],
 
 def verify_chain(entries: list[dict[str, Any]],
                  expected_count: int | None = None,
-                 expected_head: str | None = None) -> dict[str, Any]:
+                 expected_head: str | None = None,
+                 start_hash: str = GENESIS_HASH,
+                 start_count: int = 0) -> dict[str, Any]:
     """Walk the ledger and report whether it is intact.
 
     `entries` must be the stored rows in insertion order, each carrying the
@@ -116,25 +118,34 @@ def verify_chain(entries: list[dict[str, Any]],
     `expected_count` / `expected_head` come from the stored head record and are
     what catches truncation: a log with entries removed from the end still
     chains correctly on its own terms, but no longer matches the head.
+
+    `start_hash` / `start_count` (v0.41) are where an archive left off: the
+    first `start_count` entries were moved into archive files (see
+    archive.py), and the first entry still stored must chain to the last one
+    archived. Counts and positions are for the whole ledger, archived entries
+    included.
     """
-    prev = GENESIS_HASH
-    for position, row in enumerate(entries):
+    prev = start_hash
+    for i, row in enumerate(entries):
+        position = start_count + i
         stored_prev = row.get("prev_hash")
         stored_entry = row.get("entry_hash")
 
         if not stored_prev or not stored_entry:
-            return _broken(position, row, len(entries),
+            return _broken(position, row, start_count + len(entries),
                            "entry is missing its chain hashes (written before "
                            "the ledger existed, or cleared)")
 
         if stored_prev != prev:
-            return _broken(position, row, len(entries),
+            return _broken(position, row, start_count + len(entries),
                            "this entry does not chain to the one before it -- "
-                           "an entry was modified, deleted or reordered")
+                           "an entry was modified, deleted or reordered"
+                           + (" (or the first entry kept doesn't follow the last one archived)"
+                              if i == 0 and start_count else ""))
 
         recomputed = entry_hash(prev, row)
         if recomputed != stored_entry:
-            return _broken(position, row, len(entries),
+            return _broken(position, row, start_count + len(entries),
                            "the entry's content does not match its hash, so "
                            "this event was modified after it was recorded")
 
@@ -142,22 +153,25 @@ def verify_chain(entries: list[dict[str, Any]],
 
     # The chain is internally consistent. Now check it against the recorded
     # head, which is what makes truncation visible.
-    if expected_count is not None and expected_count != len(entries):
+    total = start_count + len(entries)
+    if expected_count is not None and expected_count != total:
         return {
             "ok": False,
-            "entries": len(entries),
-            "verified": len(entries),
+            "entries": total,
+            "verified": total,
+            "archived": start_count,
             "head": prev,
             "broken_at": None,
-            "reason": (f"the ledger holds {len(entries)} entries but the head "
+            "reason": (f"the ledger holds {total} entries but the head "
                        f"record expects {expected_count} -- entries were "
                        f"removed from the end of the log"),
         }
     if expected_head is not None and expected_head != prev:
         return {
             "ok": False,
-            "entries": len(entries),
-            "verified": len(entries),
+            "entries": total,
+            "verified": total,
+            "archived": start_count,
             "head": prev,
             "broken_at": None,
             "reason": ("the chain's head does not match the recorded head -- "
@@ -166,8 +180,9 @@ def verify_chain(entries: list[dict[str, Any]],
 
     return {
         "ok": True,
-        "entries": len(entries),
-        "verified": len(entries),
+        "entries": total,
+        "verified": total,
+        "archived": start_count,
         "head": prev,
         "broken_at": None,
         "reason": None,
@@ -194,8 +209,11 @@ def _broken(position: int, row: dict[str, Any], total: int,
 def describe(report: dict[str, Any]) -> str:
     """One human line for a verification report -- what the CLI prints."""
     if report["ok"]:
-        return (f"ledger intact: {report['entries']} entries verified, "
-                f"head {report['head'][:16]}…")
+        archived = report.get("archived") or 0
+        return (f"ledger intact: {report['entries'] - archived} entries verified, "
+                + (f"carrying on from {archived} archived ones (archive.py verify checks "
+                   f"those), " if archived else "")
+                + f"head {report['head'][:16]}…")
     where = report.get("broken_at")
     if where:
         return (f"LEDGER BROKEN at position {where['position']} "

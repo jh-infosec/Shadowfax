@@ -96,6 +96,8 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - shadowfax-secrets:/run/shadowfax-secrets:ro
+      # v0.41: where archive.py puts old events it moves out of the database.
+      - shadowfax-archives:/data/archives
     ports:
       # This machine only. With the https profile, people reach Shadowfax
       # through Caddy on 443 instead.
@@ -137,3 +139,4 @@ volumes:
   shadowfax-pgdata:
   shadowfax-secrets:
   shadowfax-caddy:
+  shadowfax-archives:

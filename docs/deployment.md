@@ -190,7 +190,37 @@ The same key can run the full check on a schedule:
 curl -fsS -H "X-API-Key: sk_shadowfax_..." https://shadowfax.example.com/ledger/verify | grep -q '"ok":true' || echo "LEDGER BROKEN"
 ```
 
-## 7. Upgrading
+## 7. Archive old events (optional)
+
+Shadowfax keeps every event forever unless you tell it otherwise. Once a year
+or so, you can move old events into an archive file. The ledger carries on from
+that file, so the evidence chain stays whole. The README's
+[archiving section](../README.md#archiving-old-events) explains what moves and
+what's checked.
+
+```bash
+docker compose exec shadowfax python archive.py run --older-than 365 --dry-run
+docker compose exec shadowfax python archive.py run --older-than 365
+```
+
+The file goes in the `shadowfax-archives` volume. Copy it out and keep it with
+your backups, because it's the only copy of those events now:
+
+```bash
+docker compose cp shadowfax:/data/archives ./archives
+```
+
+To check the files later, against what the database recorded:
+
+```bash
+docker compose exec shadowfax sh -c "python archive.py verify /data/archives/*.jsonl.gz --against-db"
+```
+
+Archiving raises a medium `evidence_archived` alert, so whoever watches the
+alerts sees it happened. That's on purpose: from the outside it looks the same
+as someone deleting evidence.
+
+## 8. Upgrading
 
 Take a backup first, then:
 
@@ -203,7 +233,7 @@ Database changes are applied automatically when Shadowfax starts. Read the
 [changelog](../CHANGELOG.md) for anything that affects you. For example,
 upgrading to v0.33 signs everyone out once.
 
-## 8. Other settings
+## 9. Other settings
 
 These can all go in `.env`:
 
@@ -228,6 +258,8 @@ To check on it: `docker compose ps` shows each container's health, and
   Backups (section 5) are how you recover.
 - **Two-factor secrets are stored readable** in the database, because they're
   needed to check codes. Keep the database, its volume and its backups private.
+- **It doesn't archive old events on its own.** Section 7 is a command you
+  run when you choose to.
 - **Docker's logs grow** until you limit them. Docker's documentation on the
   `json-file` logging driver explains how.
 

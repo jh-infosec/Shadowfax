@@ -250,6 +250,19 @@ jobs:
         # the narration said it would.
         run: python demo.py --fast --assert --no-colour
 
+      - name: Archive the oldest events inside the container, and check the file
+        # v0.41. archive.py runs where the database is, moves old events into a
+        # file on the data volume, and the ledger carries on from that file.
+        # Both checks must pass afterwards: the file's own, and the server's.
+        run: |
+          docker exec shadowfax python archive.py run --before 2026-08-01T02:20:00 --yes
+          docker exec shadowfax sh -c 'python archive.py verify /data/archives/*.jsonl.gz --against-db'
+          token=$(curl -fsS -X POST http://127.0.0.1:8000/auth/login \
+            -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin"}' \
+            | python -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+          curl -fsS http://127.0.0.1:8000/ledger/verify -H "Authorization: Bearer ${token}" \
+            | python -c 'import json,sys; r=json.load(sys.stdin); print(r["summary"]); assert r["ok"] and r["archived"] > 0'
+
       - name: Check the dashboard in a real browser
         # Building the dashboard proves it compiles, not that it works: Vite
         # exits 0 on a page that renders nothing. These assertions are what a
@@ -260,7 +273,7 @@ jobs:
         run: |
           pip install playwright
           python -m playwright install --with-deps chromium
-          python test_dashboard.py --url http://127.0.0.1:8000
+          SHADOWFAX_EXPECT_ARCHIVE=1 python test_dashboard.py --url http://127.0.0.1:8000
 
       - name: The CLI can gate on what it found
         # `check` exits non-zero WHEN ALERTS MATCH -- the inversion that lets an

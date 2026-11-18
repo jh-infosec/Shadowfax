@@ -69,8 +69,10 @@ COPY *.py attack_registry.json ./
 COPY --from=dashboard /build/dist ./frontend/dist
 
 # The database lives on a volume, so `docker compose down` does not throw away
-# an investigation and `docker compose down -v` deliberately does.
-RUN mkdir -p /data
+# an investigation and `docker compose down -v` deliberately does. Archives of
+# old events (v0.41) go in /data/archives; created here so a volume mounted
+# there starts out owned by the user below.
+RUN mkdir -p /data/archives
 
 # A non-root user, because a tool that spends its time telling you about
 # privilege escalation should not be running as root to say it.

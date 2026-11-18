@@ -403,3 +403,11 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       no dependencies, reports Claude Code through hooks, any MCP client through
       a proxy, and Python agents through a decorator. Fail-open, with a local
       spool while Shadowfax is down.
+- [x] Supply-chain hygiene (`v0.40.0`): MIT licence, SECURITY.md, Python
+      dependencies pinned with hashes, vulnerability checks on what ships, and
+      CodeQL, on every push and weekly.
+- [x] Long histories (`v0.41.0`): each agent's scan is kept between events, so
+      recording one costs about the same at 50,000 events as at 1,000, checked
+      against a full scan throughout the test suite. `archive.py` moves old
+      events into a file the ledger carries on from, and raises
+      `evidence_archived` when it does.

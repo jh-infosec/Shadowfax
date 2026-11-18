@@ -9,6 +9,8 @@ import sys
 
 # use an isolated DB file for this test run
 os.environ.setdefault("SHADOWFAX_TEST", "1")
+# Every resumed scan is checked against a full one while the tests run (v0.41).
+os.environ.setdefault("SHADOWFAX_VERIFY_SCANS", "1")
 import db as db_module
 db_module.DB_PATH = db_module.Path(__file__).parent / "test_shadowfax.db"
 if db_module.DB_PATH.exists():
@@ -5024,8 +5026,8 @@ _del39 = client.delete(f"/intel/feeds/{_wl39['id']}")
 check("removing a watchlist removes its matches",
       _del39.status_code == 200
       and not [a for a in _alerts37("intel-agent-2") if a["category"] == "threat_intel_match"])
-check("a new detector category, thirty-three in all",
-      "threat_intel_match" in _detectors.NATIVE_CATEGORIES and len(_detectors.NATIVE_CATEGORIES) == 33)
+check("a new detector category",
+      "threat_intel_match" in _detectors.NATIVE_CATEGORIES)
 app_module._intel_fetcher = None
 _srv39.shutdown()
 
@@ -5087,10 +5089,293 @@ _tl341 = [e["metadata"]["seq"] for e in client.get("/actors/tie-order").json()["
 check("events in the same second come back in the order they arrived, even after an update",
       _tl341 == list(range(12)) and _all341 == list(range(12)))
 
+print("\n== resumed scans give exactly what full scans give (v0.41) ==")
+# Each actor's scan is kept between ingests and fed only the new events. These
+# checks drive it through the awkward cases and compare the stored alerts with
+# a from-scratch run of the detectors over the whole history.
+import random as _rnd41
+import seed_data as _seed41
+
+def _stored41(actor):
+    with db_module.get_conn() as _c:
+        return sorted(a["id"] for a in db_module.query_alerts(_c, actor_id=actor, limit=100000))
+
+def _fresh41(actor):
+    with db_module.get_conn() as _c:
+        _pol = db_module.get_policy(_c) or app_module.DEFAULT_POLICY
+        return sorted(a["id"] for a in detectors_module.run_for_actor(
+            db_module.get_events_for_actor(_c, actor), _pol, app_module._intel_index(_c)))
+
+import detectors as detectors_module
+from datetime import datetime
+_rng41 = _rnd41.Random(41)
+_actors41 = [f"fuzz41-{i}" for i in range(4)]
+_clock41 = datetime(2026, 9, 1, 8, 0, 0)
+_before41 = dict(app_module.SCAN_STATS)
+_backdated41 = 0
+# Manifests have their own endpoint; everything else in the demo data is fair game.
+_vocab41 = [e for e in _seed41.SAMPLE_EVENTS if e["event_type"] != "capability_manifest"]
+for _round in range(60):
+    _batch = []
+    for _ in range(_rng41.randint(1, 6)):
+        _tmpl = dict(_rng41.choice(_vocab41))
+        _clock41 += timedelta(seconds=_rng41.choice([0, 1, 30, 400, 4000]))
+        _ts = _clock41
+        if _rng41.random() < 0.08:     # now and then, an event that arrives late
+            _ts = _clock41 - timedelta(hours=_rng41.randint(1, 30)); _backdated41 += 1
+        _tmpl.update(actor_id=_rng41.choice(_actors41), timestamp=_ts.strftime("%Y-%m-%dT%H:%M:%S"),
+                     metadata=dict(_tmpl.get("metadata") or {}))
+        _batch.append(_tmpl)
+    _r41 = client.post("/events", json=_batch)
+    if _r41.status_code != 200:
+        break
+check("a random stream of 60 batches over 4 agents is accepted", _r41.status_code == 200 and _backdated41 > 0)
+check("and every agent's stored alerts match a full rescan of its history",
+      all(_stored41(a) == _fresh41(a) for a in _actors41) and any(_stored41(a) for a in _actors41))
+check("most of that work resumed a scan rather than starting again, and wrote only the new alerts",
+      app_module.SCAN_STATS["resumed"] - _before41["resumed"] > 100
+      and app_module.SCAN_STATS["only_new_written"] - _before41["only_new_written"] > 50)
+check("a late event starts that agent's scan again from the beginning",
+      app_module.SCAN_STATS["full"] - _before41["full"] >= _backdated41 // 2)
+
+# A write that is rolled back. SQLite then hands the same id to the next event,
+# so the scan, which saw the rolled-back one, must notice it's gone.
+client.post("/events", json=[{"timestamp": "2026-10-01T09:00:00", "actor_id": "rollback41",
+                              "actor_type": "human", "event_type": "file_access", "target": "a"}])
+with db_module.get_conn() as _c:
+    for _i in range(6):
+        db_module.insert_event(_c, {"timestamp": f"2026-10-01T09:0{_i + 1}:00", "actor_id": "rollback41",
+                                    "actor_type": "human", "event_type": "auth_failure", "target": "vpn_gateway"})
+    _mid41 = _stored41("rollback41")
+    app_module._rescan_actor(_c, "rollback41")
+    _c.rollback()
+client.post("/events", json=[{"timestamp": "2026-10-01T09:01:00", "actor_id": "rollback41",
+                              "actor_type": "human", "event_type": "file_access", "target": "b"}])
+check("a rolled-back write leaves no trace in the next resumed scan",
+      _stored41("rollback41") == _fresh41("rollback41") and _stored41("rollback41") == _mid41)
+
+# A scan that moved on without its alerts being written (a failure between the
+# two) must not be trusted to know what's in the table.
+client.post("/events", json=[{"timestamp": "2026-10-01T10:00:00", "actor_id": "unwritten41",
+                              "actor_type": "human", "event_type": "file_access", "target": "a"}])
+with db_module.get_conn() as _c:
+    for _i in range(6):
+        db_module.insert_event(_c, {"timestamp": f"2026-10-01T10:0{_i + 1}:00", "actor_id": "unwritten41",
+                                    "actor_type": "human", "event_type": "auth_failure", "target": "vpn_gateway"})
+    app_module._scan_actor(_c, "unwritten41")
+    _c.commit()
+client.post("/events", json=[{"timestamp": "2026-10-01T10:09:00", "actor_id": "unwritten41",
+                              "actor_type": "human", "event_type": "file_access", "target": "b"}])
+check("alerts a scan found but never stored are stored at the next ingest",
+      _stored41("unwritten41") == _fresh41("unwritten41") and len(_stored41("unwritten41")) > 0)
+
+# A policy edit and an intel change both start every scan again.
+_pol41 = client.get("/policy").json()
+client.put("/policy", json=_pol41)    # every agent now has a kept scan
+_full41 = app_module.SCAN_STATS["full"]
+client.put("/policy", json=_pol41)
+check("saving the policy unchanged keeps the scans",
+      app_module.SCAN_STATS["full"] == _full41)
+client.put("/policy", json={**_pol41, "brute_force_max_failures": _pol41["brute_force_max_failures"] + 1})
+check("a real policy change starts every agent's scan again, and the alerts follow it",
+      app_module.SCAN_STATS["full"] - _full41 >= len(_actors41)
+      and all(_stored41(a) == _fresh41(a) for a in _actors41))
+client.put("/policy", json=_pol41)
+check("the scan cache stays within its bound",
+      len(app_module._scan_cache) <= app_module.SCAN_CACHE_SIZE)
+_size41 = app_module.SCAN_CACHE_SIZE
+app_module.SCAN_CACHE_SIZE = 2
+client.post("/events", json=[{"timestamp": "2026-10-02T09:00:00", "actor_id": a, "actor_type": "human",
+                              "event_type": "file_access", "target": "x"} for a in _actors41])
+check("and drops the least recently scanned agents when it's full",
+      len(app_module._scan_cache) == 2 and all(_stored41(a) == _fresh41(a) for a in _actors41))
+_gone41 = next(a for a in _actors41 if a not in app_module._scan_cache)
+client.post("/events", json=[{"timestamp": "2026-10-02T09:05:00", "actor_id": _gone41, "actor_type": "human",
+                              "event_type": "auth_failure", "target": "vpn_gateway"}])
+check("an agent that was dropped is simply scanned in full next time",
+      _stored41(_gone41) == _fresh41(_gone41) and _gone41 in app_module._scan_cache)
+app_module.SCAN_CACHE_SIZE = _size41
+# Alerts are now written as a difference, not deleted and inserted again.
+with db_module.get_conn() as _c:
+    _eid41 = _c.execute("SELECT MIN(id) FROM events").fetchone()[0]
+    _a41 = [{"id": f"diff41-{i}", "event_id": _eid41, "actor_id": "diff41", "actor_type": "human",
+             "timestamp": "2026-10-03T09:00:00", "severity": "low", "category": "test",
+             "message": f"m{i}", "target": "t"} for i in range(3)]
+    db_module.replace_alerts_for_actor(_c, "diff41", _a41)
+    _a41b = [dict(_a41[0], message="changed", attack=[{"id": "T1078"}]), _a41[2],
+             dict(_a41[1], id="diff41-new", validated=True)]
+    db_module.replace_alerts_for_actor(_c, "diff41", _a41b)
+    _rows41 = {a["id"]: a for a in db_module.query_alerts(_c, actor_id="diff41")}
+    db_module.replace_alerts_for_actor(_c, "diff41", [])
+    _gone41b = db_module.query_alerts(_c, actor_id="diff41")
+    _c.commit()
+check("rewriting an agent's alerts adds the new, drops the gone and updates the changed",
+      sorted(_rows41) == ["diff41-0", "diff41-2", "diff41-new"] and _rows41["diff41-0"]["message"] == "changed"
+      and _rows41["diff41-2"]["message"] == "m2" and _gone41b == [])
+import bench as _bench41
+_b41 = _bench41._measure(3000, 3, keep_scans=True, noisy=True), _bench41._measure(3000, 3, keep_scans=False, noisy=True)
+check("bench.py runs, and with 3,000 events stored a kept scan records the next one at least 3x faster",
+      _b41[0]["median"] * 3 < _b41[1]["median"])
+check("no resumed scan in this whole run differed from a full one",
+      app_module.SCAN_STATS["mismatches"] == 0 and app_module.VERIFY_SCANS)
+
+print("\n== archiving old events (v0.41) ==")
+import archive as archive_mod
+import gzip as _gz41
+import tempfile as _tf41
+from pathlib import Path as _P41
+_dir41 = _P41(_tf41.mkdtemp())
+# The demo data's first few events (a brute force on user-jsmith) are the
+# oldest stored, so the ledger can be cut just after them.
+_cut41 = "2026-08-01T02:20:00"
+with db_module.get_conn() as _c:
+    _plan41 = archive_mod.plan(_c, _cut41)
+    _n_before41 = _c.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+check("a dry run says what would go and changes nothing",
+      _plan41["events"] > 0 and _plan41["through_event_id"] > 0
+      and client.get("/stats").json()["event_count"] == _n_before41)
+_old_alert41 = next(a for a in client.get("/alerts", params={"limit": 2000}).json()
+                    if a["event_id"] <= _plan41["through_event_id"])
+client.patch(f"/alerts/{_old_alert41['id']}/state", json={"note": "looked at this in August"})
+with db_module.get_conn() as _c:   # the note is itself recorded as an event
+    _n_before41 = _c.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+
+# A ledger that's been tampered with where the archive would cut is refused.
+with db_module.get_conn() as _c:
+    _victim41 = _c.execute("SELECT id, target FROM events WHERE id <= ? ORDER BY id LIMIT 1",
+                           (_plan41["through_event_id"],)).fetchone()
+    _c.execute("UPDATE events SET target = 'edited' WHERE id = ?", (_victim41["id"],)); _c.commit()
+try:
+    archive_mod.run(_cut41, _dir41)
+    _refused41 = False
+except ValueError as _exc:
+    _refused41 = "doesn't verify" in str(_exc)
+with db_module.get_conn() as _c:
+    _same41 = _c.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"] == _n_before41
+    _c.execute("UPDATE events SET target = ? WHERE id = ?", (_victim41["target"], _victim41["id"])); _c.commit()
+check("a broken chain isn't archived (that would hide the break), and nothing moves",
+      _refused41 and _same41 and not list(_dir41.iterdir()))
+
+_res41 = archive_mod.run(_cut41, _dir41)
+_file41 = _P41(_res41["file"])
+_v41 = client.get("/ledger/verify").json()
+check("every agent that lost history has its alerts worked out again from what's left",
+      all(_stored41(a) == _fresh41(a) for a in _plan41["actors"]))
+check("the events go into a file and out of the database",
+      _file41.exists() and _res41["events"] == _plan41["events"]
+      and client.get("/stats").json()["event_count"] == _n_before41 - _plan41["events"] + 1)
+check("the ledger still verifies, carrying on from the archive",
+      _v41["ok"] and _v41["archived"] == _plan41["events"] and "archived" in _v41["summary"]
+      and len(_v41["archives"]) == 1 and _v41["archives"][0]["file_sha256"] == _res41["file_sha256"])
+_hd41 = client.get("/ledger/head").json()
+check("the head still counts every entry ever recorded",
+      _hd41["entry_count"] == _v41["entries"] and _v41["entries"] > _plan41["events"])
+check("a saved head from where the archive ends still checks out",
+      client.get("/ledger/head", params={"at": _res41["end_count"]}).json()["head_hash"] == _res41["end_hash"])
+check("one from inside the archive points to the file",
+      client.get("/ledger/head", params={"at": 2}).status_code == 410
+      and _file41.name in client.get("/ledger/head", params={"at": 2}).json()["detail"])
+_ea41 = [a for a in client.get("/alerts", params={"limit": 2000}).json() if a["category"] == "evidence_archived"]
+check("archiving raises evidence_archived, naming the file and its hash",
+      len(_ea41) == 1 and _ea41[0]["severity"] == "medium" and _file41.name in _ea41[0]["message"]
+      and _res41["file_sha256"][:16] in _ea41[0]["message"] and _ea41[0]["actor_id"] == "shadowfax-ingest")
+check("and nobody can post that event themselves",
+      client.post("/events", json=[{"timestamp": "2026-11-01T00:00:00", "actor_id": "x", "actor_type": "human",
+                                    "event_type": "events_archived", "target": "x"}]).status_code == 400)
+_hdr41, _ev41, _al41, _st41 = archive_mod.read(_file41)
+check("the file holds the events with their hashes, the alerts that left with them, and the analyst notes",
+      len(_ev41) == _res41["events"] and all("entry_hash" in e for e in _ev41)
+      and _old_alert41["id"] in {a["id"] for a in _al41}
+      and any(s["alert_id"] == _old_alert41["id"] and s["note"] == "looked at this in August" for s in _st41))
+check("the same archive is the same bytes (no timestamp in the gzip header)",
+      _gz41.open(_file41).read() and _file41.read_bytes()[4:8] == b"\x00\x00\x00\x00")
+_ok41, _lines41 = archive_mod.verify([_file41], against_db=True)
+check("archive.py verify: the file's chain, and that it's the file the database recorded",
+      _ok41 and any("byte for byte" in ln for ln in _lines41) and any("carries on" in ln for ln in _lines41))
+
+def _rewrite41(src, dst, change, rechain=False):
+    h, ev, al, st = archive_mod.read(src)
+    ev = [dict(e) for e in ev]
+    change(ev)
+    if rechain:   # a forger who recomputes every hash in the file
+        for (prev, entry), e in zip(_ledger41.compute_chain(ev, h["start_hash"]), ev):
+            e["prev_hash"], e["entry_hash"] = prev, entry
+        h = dict(h, end_hash=ev[-1]["entry_hash"])
+    archive_mod._write(dst, h, ev, al, st)
+    return dst
+
+import ledger as _ledger41
+_t1 = _rewrite41(_file41, _dir41 / "edited.jsonl.gz", lambda ev: ev[1].update(target="somewhere-else"))
+check("an event edited inside the file fails verification", not archive_mod.verify([_t1])[0])
+_t2 = _rewrite41(_file41, _dir41 / "forged.jsonl.gz", lambda ev: ev[1].update(target="somewhere-else"), True)
+_ok2, _l2 = archive_mod.verify([_t2], against_db=True)
+check("a forged file with every hash recomputed chains on its own, but isn't the file the database recorded",
+      archive_mod.verify([_t2])[0] and not _ok2 and any("not the file the database recorded" in ln for ln in _l2))
+_h5, _e5, _a5, _s5 = archive_mod.read(_file41)
+archive_mod._write(_dir41 / "alert-edited.jsonl.gz", _h5, _e5,
+                   [dict(a, message="nothing to see here") for a in _a5], _s5)
+_ok5, _l5 = archive_mod.verify([_dir41 / "alert-edited.jsonl.gz"], against_db=True)
+check("alerts in the file aren't in the hash chain, so an edited one is caught by the file's sha256",
+      archive_mod.verify([_dir41 / "alert-edited.jsonl.gz"])[0] and not _ok5)
+_t3 = _rewrite41(_file41, _dir41 / "short.jsonl.gz", lambda ev: ev.pop())
+check("a file with its last event cut off fails", not archive_mod.verify([_t3])[0])
+
+# The agents whose history went are rescanned from what's left, and their
+# kept scans don't go stale.
+_aff41 = [a for a in _plan41["actors"] if not a.startswith("shadowfax")][0]
+_hr41 = len([a for a in client.get("/alerts", params={"limit": 3000}).json() if a["category"] == "history_rewritten"])
+client.post("/events", json=[{"timestamp": "2026-11-02T09:00:00", "actor_id": _aff41, "actor_type": "human",
+                              "event_type": "file_access", "target": "after-archive"}])
+check("an archived agent's next event is judged on what's left, without a false history_rewritten",
+      _stored41(_aff41) == _fresh41(_aff41)
+      and len([a for a in client.get("/alerts", params={"limit": 3000}).json()
+               if a["category"] == "history_rewritten"]) == _hr41)
+
+# A second archive carries on from the first.
+_late41 = client.post("/events", json=[{"timestamp": "2020-01-01T00:00:00", "actor_id": "late41",
+                                        "actor_type": "human", "event_type": "file_access", "target": "x"}])
+with db_module.get_conn() as _c:
+    _plan41b = archive_mod.plan(_c, "2026-08-01T03:00:00")
+check("an old event stored after newer ones stays until they go (the ledger is cut at one point)",
+      _plan41b["older_but_kept"] >= 1)
+_res41b = archive_mod.run("2026-08-01T03:00:00", _dir41)
+_file41b = _P41(_res41b["file"])
+check("a second archive starts where the first ended",
+      _res41b["start_count"] == _res41["end_count"] and _res41b["start_hash"] == _res41["end_hash"]
+      and client.get("/ledger/verify").json()["ok"])
+_okb, _lb = archive_mod.verify([_file41b, _file41], against_db=True)
+check("both files verify together, in either order given",
+      _okb and sum("byte for byte" in ln for ln in _lb) == 2)
+_okc, _lc = archive_mod.verify([_file41b])
+check("the later one alone verifies, with a note that earlier ones weren't checked",
+      _okc and any("weren't checked" in ln for ln in _lc))
+_t4 = _rewrite41(_file41, _dir41 / "gap.jsonl.gz", lambda ev: ev.pop(), True)
+_okd, _ld = archive_mod.verify([_t4, _file41b])
+check("a first file that doesn't end where the second starts is a gap",
+      not _okd and any("doesn't start where" in ln for ln in _ld))
+check("nothing to archive is said plainly",
+      archive_mod.main(["run", "--before", "2000-01-01", "--dry-run"]) == 0)
+check("the command line verifies too",
+      archive_mod.main(["verify", str(_file41), str(_file41b), "--against-db"]) == 0
+      and archive_mod.main(["verify", str(_t1)]) == 1)
+_ci41 = _P41(".github/workflows/ci.yml").read_text(encoding="utf-8")
+check("CI archives inside the packaged image, checks the file and the server's ledger, then the dashboard",
+      "docker exec shadowfax python archive.py run" in _ci41 and "--against-db" in _ci41
+      and 'r["archived"] > 0' in _ci41 and "SHADOWFAX_EXPECT_ARCHIVE=1 python test_dashboard.py" in _ci41
+      and _ci41.index("archive.py run") < _ci41.index("SHADOWFAX_EXPECT_ARCHIVE=1"))
+check("evidence_archived is a protected category of its own, thirty-four in all, mapped to ATT&CK",
+      "evidence_archived" in _detectors.NATIVE_CATEGORIES and len(_detectors.NATIVE_CATEGORIES) == 34
+      and "evidence_archived" in _correlate._CATEGORY_PHRASE)
+check("and the resumed scans never disagreed with full ones through all of that",
+      app_module.SCAN_STATS["mismatches"] == 0)
+
 print("\n== reset ==")
 r = client.post("/reset")
 check("POST /reset returns 200", r.status_code == 200)
 r = client.get("/stats")
 check("reset restores 40 seed events", r.json()["event_count"] == 40)
+check("a reset also forgets the archives, since the ledger starts again",
+      client.get("/ledger/verify").json()["archives"] == [] and client.get("/ledger/verify").json()["ok"])
+check("and forgets every kept scan", not any(a.startswith("fuzz41") for a in app_module._scan_cache))
 
 print("\nAll checks passed.")
