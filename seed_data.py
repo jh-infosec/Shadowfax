@@ -71,9 +71,7 @@ DEFAULT_POLICY = {
     },
     "canary_tokens": ["decoy_credential_store_A"],
     "blocked_targets": ["prod_model_hosting_platform", "external_open_internet"],
-    # v0.43: three days. An hour meant every agent raised dormant_reappearance
-    # after lunch and every morning; a weekend is still under three days.
-    "dormancy_threshold_minutes": 4320,
+    "dormancy_threshold_minutes": 60,
     # Actors whose quiet periods are normal, and so must not raise
     # dormant_reappearance (v0.10). Shadowfax's own sign-in endpoint only emits
     # an event when someone fails to authenticate, so a long silence is the
@@ -120,14 +118,10 @@ DEFAULT_POLICY = {
     ],
     # The rules of engagement. A tool call whose destination host, IP or port
     # falls outside this fires out_of_scope_action. Set "enabled": false to
-    # switch scope checking off. v0.43: "tasks" says which work is on the
-    # engagement (patterns allowed). Without it every agent's every call is held
-    # to the engagement, and a coding agent reading documentation raises an
-    # alert per page.
+    # switch scope checking off.
     "engagement_scope": {
         "enabled": True,
         "severity": "high",
-        "tasks": ["engagement_*"],
         "allowed_domains": ["target-corp.example", "assets.target-corp.example"],
         "allowed_ip_ranges": ["10.10.0.0/16", "192.168.56.0/24"],
         "allowed_ports": [80, 443, 22, 8080],

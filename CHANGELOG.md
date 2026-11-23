@@ -1,56 +1,5 @@
 # Changelog
 
-## Version 0.43.0
-
-How noisy Shadowfax is on ordinary work, measured, published and held down.
-
-### What's new
-
-- **`noise.py`** builds two weeks of believable, harmless activity (three
-  coding agents through Claude Code, a research agent, a CI runner, an ops
-  agent, a nightly backup and three people), about 12,000 events, and runs
-  every detector over it. It measures with the shipped policy and with a
-  profile per agent, and runs 14 attacks through both, which must all be
-  caught. The README shows the results, and a test keeps that table identical
-  to what the script measures.
-- **It found Shadowfax was very noisy:** 2,423 alerts in those two weeks,
-  202 per 1,000 events. Now it's 11, or 0.92 per 1,000, and 5 with profiles.
-  What's left is explained in the README. The fixes:
-  - The engagement scope applies only to the tasks in its new `tasks` list
-    (`engagement_*` in the shipped policy). It was checking every agent, so a
-    coding agent reading documentation raised an alert per page (1,710).
-  - The shipped dormancy threshold is three days, up from an hour, which fired
-    after every lunch break and every night (309).
-  - The same injected content from the same place is reported once per agent,
-    not every time it's read (270). Every read is still watched for the agent
-    acting on it.
-  - Lateral movement counts only machines new to the agent, so a CI runner's
-    usual build machines count once (114).
-  - A large internal transfer is reported the first time, then only when it's
-    more than twice the largest before it. External ones are reported every
-    time, as before.
-- **Six attacks aim at exactly those changes** (a CI runner with a normal
-  history sweeping new machines, a backup five times its usual size, three
-  weeks of silence, the engagement going off scope, a poisoned page acted on
-  the second time it's read, and hidden instructions) and are all caught.
-- **CI runs `python noise.py --check`,** which fails if benign alerts go over
-  the budget or an attack is missed.
-- **Upgrading:** your saved policy keeps its settings. To get the quieter
-  defaults, set `dormancy_threshold_minutes` to `4320` and add
-  `"tasks": ["engagement_*"]` to `engagement_scope`. The other changes apply
-  without touching anything.
-
-### Tested
-
-- 1,153 API checks, on SQLite and on PostgreSQL. The 16 new ones cover the
-  noise budget and the README table, and each change on its own, including
-  that a policy without `tasks` behaves as before.
-- Each change was broken on purpose (too lax, or switched off) and
-  `noise.py --check` failed every time, either on the budget or on the attack
-  aimed at it.
-- The demo still raises all 15 of its expected detections, and the 83
-  dashboard checks pass.
-
 ## Version 0.42.0
 
 Muting false positives, with a reason and an end date.
