@@ -57,7 +57,14 @@ _MAX_TOKENS = 600
 _TIMEOUT_SECONDS = 30
 
 
+# v0.44: the public demo switches the model off, so strangers clicking
+# "explain" can't spend the operator's API credit. See public_demo.py.
+MODEL_OFF = False
+
+
 def _api_key() -> str | None:
+    if MODEL_OFF:
+        return None
     key = os.environ.get(_API_KEY_ENV)
     return key.strip() if key and key.strip() else None
 

@@ -1,5 +1,48 @@
 # Changelog
 
+## Version 0.44.0
+
+A public demo mode, and a README short enough to read.
+
+### What's new
+
+- **Demo mode.** Start the server with `SHADOWFAX_DEMO=1` and it becomes
+  something you can link to:
+  - The sign-in page gets a **Look around as a visitor** button, which signs in
+    to a shared, read-only `visitor` account. The server enforces read-only on
+    every endpoint, and the visitor account's password and two-factor can't be
+    changed, since either would lock every other visitor out.
+  - On start and then every hour (`SHADOWFAX_DEMO_RESET_MINUTES`), the server
+    resets its data and replays the scripted attack against itself, so there's
+    always something fresh to look at. The replay checks itself like
+    `demo.py --assert`, and anything it fails to raise is logged.
+  - A banner tells visitors it's a demo and when the next reset is.
+  - The assistant uses its built-in explanations in demo mode, so visitors
+    can't spend your model credit, unless `SHADOWFAX_DEMO_ALLOW_MODEL=1`.
+  - Only the newest 500 visitor sessions are kept.
+  - `docs/public-demo.md` explains it and how to host one.
+- **The README went from 1,512 lines to 180.** It says what Shadowfax is, how
+  well it works (noise, speed, tests), how to try it and where everything else
+  lives. The detail moved, unchanged, into guides under `docs/`: getting
+  started, connecting agents, detection, investigating, evidence and history,
+  securing Shadowfax, developing and testing, and a tour of the screenshots.
+- **Start-up counts events instead of loading them all.**
+
+### Tested
+
+- 1,172 API checks, on SQLite and on PostgreSQL. The 19 new ones cover demo
+  mode end to end (the visitor door open only in demo mode, every write refused
+  to a visitor, the shared account protected, the session cap, the assistant
+  kept off a model, a full replay raising everything it should, and a replay
+  that doesn't being reported), and the docs: the README stays short, links
+  every guide and is linked back, and every link and anchor in the README and
+  the guides resolves.
+- 7 new browser checks, run against a demo-mode server as a visitor, and a CI
+  step that starts the built image in demo mode and checks it that way.
+- Seven mutations to the demo's safeguards and the docs checks, each caught.
+- The environment this was built in was wiped between versions and rebuilt
+  from the v0.43.0 package; everything passed on the rebuild before any change.
+
 ## Version 0.43.0
 
 How noisy Shadowfax is on ordinary work, measured, published and held down.

@@ -50,6 +50,7 @@ import digest as digest_mod
 import envelope
 import forward
 import intel
+import public_demo
 import suppress
 import ledger
 import limits
@@ -65,7 +66,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.43.0"
+VERSION = "0.44.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -248,7 +249,7 @@ async def lifespan(app: FastAPI):
         if db.get_policy(conn) is None:
             db.set_policy(conn, DEFAULT_POLICY)
             conn.commit()
-        if not db.get_all_events(conn):
+        if db.event_count(conn) == 0:
             _load_events(conn, SAMPLE_EVENTS)
             conn.commit()
         elif db.alert_row_count(conn) == 0:
@@ -266,9 +267,58 @@ async def lifespan(app: FastAPI):
     if INTEL_FETCH:
         threading.Thread(target=_intel_loop, args=(intel_stop,), name="shadowfax-intel",
                          daemon=True).start()
+    demo_stop = threading.Event()
+    if public_demo.ENABLED:
+        _demo_start(demo_stop)
     yield
+    demo_stop.set()
     intel_stop.set()
     FORWARD_WORKER.stop()
+
+
+# Public demo (v0.44; see public_demo.py).
+
+_demo_caller: Any = None    # tests replace the loopback HTTP with the test client
+
+
+def _demo_accounts(conn: sqlite3.Connection) -> str:
+    """Make sure the shared visitor (viewer) and the replay's operator (admin)
+    exist. The operator gets a new random password on every start, kept only
+    in this process; the visitor's is random and never used: visitors get a
+    session from POST /auth/visitor instead. Returns the operator's password."""
+    password = auth.generate_password()
+    for name, role, pw in ((public_demo.OPERATOR, "admin", password),
+                           (public_demo.VISITOR, "viewer", auth.generate_password())):
+        pw_hash, salt = auth.hash_password(pw)
+        user = db.get_user_by_username(conn, name)
+        if user is None:
+            db.create_user(conn, name, pw_hash, salt, role)
+        else:
+            db.set_password(conn, user["id"], pw_hash, salt, must_change=False)
+            if user["role"] != role:
+                db.set_role(conn, user["id"], role)
+            if user.get("disabled"):
+                db.set_disabled(conn, user["id"], False)
+    conn.commit()
+    return password
+
+
+def _demo_start(stop: threading.Event) -> None:
+    if not public_demo.ALLOW_MODEL:
+        assistant.MODEL_OFF = True
+    with db.get_conn() as conn:
+        password = _demo_accounts(conn)
+    print(f"SHADOWFAX: public demo mode. Visitors can look around read-only; the data resets every "
+          f"{public_demo.RESET_MINUTES} minute(s).", flush=True)
+    public_demo.start(public_demo.OPERATOR, password, stop, _demo_caller)
+
+
+def _refuse_shared_visitor(identity: dict[str, Any]) -> None:
+    """The visitor account is shared by everyone looking at the demo: changing
+    its password or turning on two-factor would lock all of them out."""
+    if public_demo.ENABLED and identity.get("username") == public_demo.VISITOR:
+        raise HTTPException(403, "the visitor account is shared, so its password and two-factor "
+                                 "can't be changed")
 
 
 # Alert forwarding (v0.31; see forward.py). Configured from the environment
@@ -1807,6 +1857,40 @@ def _second_factor(conn: sqlite3.Connection, user: dict, req: "LoginRequest", re
 
 # Authentication endpoints
 
+@app.get("/demo")
+def demo_status():
+    """Whether this server is a public demo, and when its data next resets.
+    Unauthenticated, because the sign-in page asks before anyone has signed
+    in. Says nothing a visitor couldn't see on the page anyway."""
+    if not public_demo.ENABLED:
+        return {"enabled": False}
+    return public_demo.STATE.as_dict()
+
+
+@app.post("/auth/visitor")
+def visitor_session():
+    """A session for the shared, read-only visitor account (v0.44). Only in
+    demo mode; elsewhere this endpoint doesn't exist."""
+    if not public_demo.ENABLED:
+        raise HTTPException(404, "Not Found")
+    with db.get_conn() as conn:
+        user = db.get_user_by_username(conn, public_demo.VISITOR)
+        if user is None or user["role"] != "viewer":
+            raise HTTPException(503, "the demo isn't ready yet")
+        token = auth.new_session_token()
+        issued = datetime.now(timezone.utc)
+        expires = issued + timedelta(hours=SESSION_TTL_HOURS)
+        token_expires = _token_expiry(issued, expires)
+        db.create_session(conn, auth.token_fingerprint(token), user["id"], expires.isoformat(),
+                          token_expires.isoformat())
+        db.trim_sessions(conn, user["id"], public_demo.MAX_VISITOR_SESSIONS)
+        conn.commit()
+    return {"token": token,
+            "user": {"username": user["username"], "role": "viewer", "must_change_password": False,
+                     "totp_enabled": False, "must_enrol_2fa": False},
+            "expires_at": expires.isoformat(), **_token_timing(issued, token_expires)}
+
+
 @app.post("/auth/login")
 def login(req: LoginRequest, request: Request):
     """Sign in, subject to backoff and lockout (v0.10).
@@ -2142,6 +2226,7 @@ def totp_setup(req: TotpSetupRequest, request: Request,
     otpauth:// URI an authenticator app reads from a QR code. Nothing changes
     for sign-in until a code from the app confirms it (POST /auth/totp/confirm),
     so a mistyped secret cannot lock anyone out."""
+    _refuse_shared_visitor(identity)
     source, now = _client_source(request), _naive_utc_now()
     with db.get_conn() as conn:
         user = _check_current_password(conn, identity["username"], req.current_password,
@@ -2161,6 +2246,7 @@ def totp_confirm(req: TotpConfirmRequest, request: Request,
                  identity: dict = Depends(require_enrolling)):
     """Finish turning two-factor on with a first code from the app. Returns the
     recovery codes -- once."""
+    _refuse_shared_visitor(identity)
     source, now = _client_source(request), _naive_utc_now()
     with db.get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -2185,6 +2271,7 @@ def totp_disable(req: TotpDisableRequest, request: Request,
                  identity: dict = Depends(require_user)):
     """Turn your own two-factor off: current password and a current code (or a
     recovery code), so neither a stolen session nor a stolen password alone can."""
+    _refuse_shared_visitor(identity)
     source, now = _client_source(request), _naive_utc_now()
     with db.get_conn() as conn:
         user = _check_current_password(conn, identity["username"], req.current_password,
@@ -2235,6 +2322,7 @@ def change_password(req: ChangePasswordRequest, request: Request,
     Every other session the user has is ended; the one making the change stays
     signed in. Streams those sessions opened close at their next keepalive.
     """
+    _refuse_shared_visitor(identity)
     source = _client_source(request)
     now = _naive_utc_now()
     window_start = now - timedelta(minutes=LOGIN_THROTTLE.window_minutes)
@@ -2382,6 +2470,7 @@ def totp_new_recovery_codes(req: RecoveryCodesRequest, request: Request,
     list may have been seen. The password and a current code from the app, both:
     a fresh set of codes is as good as a second factor. Every old code stops
     working; the new ones are returned once."""
+    _refuse_shared_visitor(identity)
     source, now = _client_source(request), _naive_utc_now()
     with db.get_conn() as conn:
         user = _check_current_password(conn, identity["username"], req.current_password,

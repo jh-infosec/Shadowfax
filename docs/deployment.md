@@ -2,7 +2,7 @@
 
 This guide takes Shadowfax from "running on my laptop" to running on a server
 that other people can use: PostgreSQL for storage, HTTPS in front, backups,
-and a copy of the evidence ledger kept somewhere safe.
+and a copy of the evidence ledger kept somewhere safe. Back to the [README](../README.md).
 
 Everything here uses `docker-compose.postgres.yml` and the `Caddyfile` from
 the repository. CI starts the PostgreSQL setup on every push and runs the
@@ -194,8 +194,8 @@ curl -fsS -H "X-API-Key: sk_shadowfax_..." https://shadowfax.example.com/ledger/
 
 Shadowfax keeps every event forever unless you tell it otherwise. Once a year
 or so, you can move old events into an archive file. The ledger carries on from
-that file, so the evidence chain stays whole. The README's
-[archiving section](../README.md#archiving-old-events) explains what moves and
+that file, so the evidence chain stays whole. The
+[archiving section](evidence.md#archiving-old-events) explains what moves and
 what's checked.
 
 ```bash
@@ -237,7 +237,7 @@ Upgrades never change your saved policy. So when a version ships better
 defaults, you choose whether to take them. v0.43 is one: setting
 `dormancy_threshold_minutes` to `4320` and adding `"tasks": ["engagement_*"]`
 to `engagement_scope` in **Edit policy** removes most false alarms on ordinary
-agent work. The README's "How noisy is it?" section explains why.
+agent work. [How noisy is it?](detection.md#how-noisy-is-it) explains why.
 
 ## 9. Other settings
 
@@ -251,7 +251,7 @@ These can all go in `.env`:
 | `ANTHROPIC_API_KEY` | lets the investigation assistant use a model |
 | `SHADOWFAX_PORT` | the server-local port for Shadowfax (default 8000) |
 
-The README's [configuration table](../README.md#configuration) lists
+The [configuration table](getting-started.md#configuration) lists
 everything else. To use one of those, add it to the `environment` section of
 `docker-compose.postgres.yml`.
 

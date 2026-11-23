@@ -808,3 +808,11 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   border-radius: 6px; padding: 7px 9px; font-size: 13px; }
 .tl-flag.muted { opacity: 0.55; }
 .tl-flag .muted-badge { margin: 0 6px 0 0; }
+
+/* Public demo (v0.44) */
+.demo-banner { background: var(--panel-2); border-bottom: 1px solid var(--border); color: var(--muted);
+  font-size: 12.5px; padding: 7px 20px; }
+.login-demo { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-soft);
+  display: flex; flex-direction: column; gap: 10px; }
+.login-demo-note { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.login-visitor { width: 100%; padding: 9px; }

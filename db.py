@@ -1236,6 +1236,17 @@ def delete_session(conn: sqlite3.Connection, token_fp: str) -> None:
         delete_session_family(conn, row["family"])
 
 
+def trim_sessions(conn: sqlite3.Connection, user_id: int, keep: int) -> int:
+    """Keep only a user's newest `keep` sessions (v0.44: the shared demo
+    visitor, so anyone pressing the button repeatedly can't grow the table)."""
+    rows = conn.execute("SELECT token_fp FROM sessions WHERE user_id = ? ORDER BY expires_at DESC, token_fp",
+                        (user_id,)).fetchall()
+    stale = [(r["token_fp"],) for r in rows[keep:]]
+    if stale:
+        conn.executemany("DELETE FROM sessions WHERE token_fp = ?", stale)
+    return len(stale)
+
+
 def delete_sessions_for_user(conn: sqlite3.Connection, user_id: int,
                              keep_fp: str | None = None) -> int:
     """End every session a user has -- except, optionally, the one asking.

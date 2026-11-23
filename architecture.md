@@ -669,6 +669,24 @@ its next request (sessions and users are read from the database each time); the
 dashboard sees the alert on its next refresh, since the event bus lives inside
 the server process.
 
+#### public_demo.py
+
+Demo mode (v0.44), on when `SHADOWFAX_DEMO=1`. At start-up `app._demo_accounts`
+makes sure two accounts exist: `visitor` (viewer, random password nobody uses)
+and `demo-operator` (admin, a new random password on every start, held only in
+memory). `public_demo.start` runs a daemon thread that calls `reset_once` now
+and every `RESET_MINUTES`: it replays `demo.Demo` (subclassed so `call` can go
+through an injected caller in tests, and over loopback HTTP to `SELF_URL`
+otherwise) with `assert_expectations=True` and stdout captured, and records
+when it ran, when it runs next, and anything the replay failed to raise
+(logged with a `[demo]` prefix). The replay's own `POST /reset` is what wipes
+the data. `GET /demo` (unauthenticated) reports the state; `POST /auth/visitor`
+(404 unless demo mode) issues a normal viewer session for `visitor` and trims
+that account to its newest `MAX_VISITOR_SESSIONS` (`db.trim_sessions`).
+`_refuse_shared_visitor` guards password change and every two-factor endpoint.
+`assistant.MODEL_OFF` makes `_api_key()` report no key, so explanations stay
+deterministic.
+
 #### suppress.py
 
 Mute rules (v0.42). Pure: `like()` turns a `*` pattern into a SQL LIKE
@@ -1519,7 +1537,10 @@ demo_gif.py             docs/demo.gif           shadowfax_agent.py
 intel.py                supply_chain.py         requirements.lock
 LICENSE                 SECURITY.md             ruff.toml
 archive.py              bench.py                suppress.py
-noise.py
+noise.py                public_demo.py
+docs/getting-started.md docs/agents.md          docs/detection.md
+docs/investigation.md   docs/evidence.md        docs/security.md
+docs/development.md     docs/tour.md            docs/public-demo.md
 
 desktop/package.json    desktop/package-lock.json
 desktop/main.js         desktop/preload.js      desktop/connect-preload.js
@@ -1563,4 +1584,5 @@ frontend/src/components/SubjectReport.jsx
 frontend/src/components/SubjectsDrawer.jsx
 frontend/src/components/ProfileDraftModal.jsx
 frontend/src/components/MuteDrawer.jsx
+frontend/src/components/DemoBanner.jsx
 ```

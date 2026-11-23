@@ -420,3 +420,6 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       events as shipped; four detectors now judge each actor against its own
       history, and it's 0.92, with every attack in the set still caught. CI
       holds both numbers to a budget.
+- [x] A public demo (`v0.44.0`): `SHADOWFAX_DEMO=1` adds a read-only visitor
+      sign-in and replays the scripted attack every hour. The README is now
+      180 lines, with the detail in guides under `docs/`.

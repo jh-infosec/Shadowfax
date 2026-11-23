@@ -281,6 +281,33 @@ jobs:
           python -m playwright install --with-deps chromium
           SHADOWFAX_EXPECT_ARCHIVE=1 python test_dashboard.py --url http://127.0.0.1:8000
 
+      - name: The public demo mode, as a stranger sees it
+        # v0.44. The same image with SHADOWFAX_DEMO=1: it replays the scripted
+        # attack against itself on start, anyone can look around as a
+        # read-only visitor, and the visitor can't change anything.
+        run: |
+          docker run -d --name shadowfax-demo -p 8001:8000 -e SHADOWFAX_DEMO=1 shadowfax:ci
+          for attempt in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8001/demo 2>/dev/null \
+                | python -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("resets", 0) >= 1 else 1)'; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8001/demo
+          docker logs shadowfax-demo 2>&1 | grep -q "public demo mode"
+          if docker logs shadowfax-demo 2>&1 | grep -q "\[demo\]"; then
+            docker logs shadowfax-demo; exit 1
+          fi
+          token=$(curl -fsS -X POST http://127.0.0.1:8001/auth/visitor \
+            | python -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8001/reset \
+            -H "Authorization: Bearer ${token}")
+          echo "a visitor asking to reset the data -> ${code}"
+          test "${code}" = "403"
+          python test_dashboard.py --url http://127.0.0.1:8001 --public-demo
+          docker rm -f shadowfax-demo
+
       - name: The CLI can gate on what it found
         # `check` exits non-zero WHEN ALERTS MATCH -- the inversion that lets an
         # agent harness fail its own build. The replay leaves criticals behind,

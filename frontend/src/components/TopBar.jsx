@@ -50,8 +50,13 @@ export default function TopBar({ stats, connected, onReset, canReset, user, onLo
             {user.username}
             <span className="user-role">{user.role}</span>
           </div>
-          <button className="btn" onClick={onChangePassword}>Change password</button>
-          <button className="btn" onClick={onTwoFactor}>Two-factor</button>
+          {/* The shared demo visitor (v0.44) can't change either. */}
+          {user.username !== "visitor" && (
+            <>
+              <button className="btn" onClick={onChangePassword}>Change password</button>
+              <button className="btn" onClick={onTwoFactor}>Two-factor</button>
+            </>
+          )}
           <button className="btn" onClick={onLogout}>Sign out</button>
         </div>
       )}

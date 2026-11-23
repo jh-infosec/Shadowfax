@@ -871,6 +871,53 @@ def run_required_2fa(url: str, headed: bool) -> int:
     return 0
 
 
+def run_public_demo(url: str, headed: bool) -> int:
+    """A server started with SHADOWFAX_DEMO=1 (v0.44), as a stranger would
+    see it: no account, a visitor button, everything visible, nothing
+    changeable, and a banner saying when it resets."""
+    from playwright.sync_api import sync_playwright
+    print(f"\n== the public demo, in a real browser ({url}) ==")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=not headed)
+        page = browser.new_page(viewport={"width": 1500, "height": 950})
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e).strip().splitlines()[0]))
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+        try:
+            page.goto(url, wait_until="networkidle")
+            page.wait_for_selector(".login-visitor", timeout=15000)
+            check("the sign-in page offers a look around without an account",
+                  "public demo" in page.inner_text(".login-demo"))
+            page.click(".login-visitor")
+            page.wait_for_selector(".table-wrap tbody tr", timeout=20000)
+            page.wait_for_timeout(1500)
+            check("the visitor sees the attack's alerts", page.locator(".table-wrap tbody tr").count() > 5)
+            check("with a banner saying it's a demo and when it resets",
+                  "resets every" in page.inner_text(".demo-banner"))
+            check("signed in as the read-only visitor",
+                  "visitor" in page.inner_text(".user-box") and "viewer" in page.inner_text(".user-box").lower())
+            check("with nothing to change: no acknowledge, mute, policy, password or two-factor buttons",
+                  page.locator(".ack-btn, .mute-btn").count() == 0
+                  and page.locator("button:has-text('Edit policy')").count() == 0
+                  and page.locator("button:has-text('Change password')").count() == 0
+                  and page.locator("button:has-text('Two-factor')").count() == 0)
+            page.click("text=Incidents")
+            page.wait_for_selector(".drawer .incident-row", timeout=10000)
+            check("and the incidents, kill chain included, are there to explore",
+                  page.locator(".incident-row", has_text="demo-agent-1").count() >= 1)
+        except Exception as exc:
+            check("the visitor flow completed", False, f"{type(exc).__name__}: {str(exc).strip().splitlines()[0]}")
+        finally:
+            check("no page errors", not errors, "; ".join(errors[:3]))
+            browser.close()
+    print()
+    if failures:
+        print(f"{len(failures)} check(s) failed")
+        return 1
+    print(f"All {passed} checks passed.")
+    return 0
+
+
 def _role_of(url: str, username: str) -> str | None:
     admin = _api(url, "POST", "/auth/login", {"username": USERNAME, "password": PASSWORD})["token"]
     return next((u["role"] for u in _api(url, "GET", "/users", None, admin)
@@ -929,6 +976,8 @@ def main(argv: list[str] | None = None) -> int:
                         "$SHADOWFAX_ADMIN_PASSWORD, else admin)")
     parser.add_argument("--headed", action="store_true",
                         help="show the browser, for watching or debugging")
+    parser.add_argument("--public-demo", action="store_true",
+                        help="check a server started with SHADOWFAX_DEMO=1, as a visitor")
     parser.add_argument("--required-2fa", action="store_true",
                         help="only the checks for a server started with "
                              "SHADOWFAX_REQUIRE_ADMIN_2FA=1 (v0.27); the admin "
@@ -937,6 +986,8 @@ def main(argv: list[str] | None = None) -> int:
     global USERNAME, PASSWORD
     USERNAME = args.username or USERNAME
     PASSWORD = args.password or PASSWORD
+    if args.public_demo:
+        return run_public_demo(args.url, args.headed)
     if args.required_2fa:
         return run_required_2fa(args.url, args.headed)
     return run(args.url, args.headed)

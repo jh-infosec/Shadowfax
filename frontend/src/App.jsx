@@ -11,6 +11,7 @@ import LockoutsDrawer from "./components/LockoutsDrawer.jsx";
 import AccountsDrawer from "./components/AccountsDrawer.jsx";
 import IntelDrawer from "./components/IntelDrawer.jsx";
 import MuteDrawer from "./components/MuteDrawer.jsx";
+import DemoBanner from "./components/DemoBanner.jsx";
 import TwoFactorModal from "./components/TwoFactorModal.jsx";
 import SubjectsDrawer from "./components/SubjectsDrawer.jsx";
 import ProfileDraftModal from "./components/ProfileDraftModal.jsx";
@@ -81,6 +82,8 @@ export default function App() {
   const [muteOpen, setMuteOpen] = useState(false);
   const [muteDraft, setMuteDraft] = useState(null);
   const [showMuted, setShowMuted] = useState(false);
+  // v0.44: whether this server is a public demo, and when it next resets.
+  const [demo, setDemo] = useState(null);
   const [twoFactorOpen, setTwoFactorOpen] = useState(false);
   const [subjectsOpen, setSubjectsOpen] = useState(false);
   const [draftAgent, setDraftAgent] = useState(null);
@@ -95,6 +98,14 @@ export default function App() {
   // Role helpers. admin > analyst > viewer.
   const canAnalyst = user && (user.role === "analyst" || user.role === "admin");
   const canAdmin = user && user.role === "admin";
+
+  useEffect(() => {
+    if (!user) return undefined;
+    const load = () => api.getDemo().then((d) => setDemo(d && d.enabled ? d : null)).catch(() => {});
+    load();
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, [user]);
 
   // A 401 anywhere (an expired or revoked session) drops us back to login.
   useEffect(() => {
@@ -433,6 +444,7 @@ export default function App() {
         />
       )}
       {error && <div className="error-banner">{error}</div>}
+      {demo && <DemoBanner demo={demo} />}
 
       <div className="body">
         <Sidebar

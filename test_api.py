@@ -2236,10 +2236,17 @@ import re as _re30
 from pathlib import Path as _P30
 _root30 = _P30(__file__).parent
 _readme30 = (_root30 / "README.md").read_text(encoding="utf-8")
-_imgs30 = _re30.findall(r"!\[[^\]]*\]\((?!https?://)([^)\s]+)\)", _readme30)
-check("the README shows screenshots", len(_imgs30) >= 7)
+# v0.44: most screenshots moved into the guides under docs/, so images are
+# collected from the README and every guide, each resolved from its own file.
+_pages30 = [_root30 / "README.md"] + sorted((_root30 / "docs").glob("*.md"))
+_imgs30 = []
+for _pg in _pages30:
+    for _ref in _re30.findall(r"!\[[^\]]*\]\((?!https?://)([^)\s]+)\)", _pg.read_text(encoding="utf-8")):
+        _imgs30.append(str((_pg.parent / _ref).resolve().relative_to(_root30.resolve())))
+_readme_imgs30 = _re30.findall(r"!\[[^\]]*\]\((?!https?://)([^)\s]+)\)", _readme30)
+check("the README and the guides show screenshots", len(set(_imgs30)) >= 12 and len(_readme_imgs30) >= 3)
 _missing30 = [p for p in _imgs30 if not (_root30 / p).is_file()]
-check("every image the README shows is in the repository", not _missing30)
+check("every image they show is in the repository", not _missing30)
 check("and each is a real PNG (or, for the demo, a real GIF), not an empty or renamed file",
       all(((_root30 / p).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n" if p.endswith(".png")
            else (_root30 / p).read_bytes()[:6] in (b"GIF89a", b"GIF87a"))
@@ -2247,13 +2254,14 @@ check("and each is a real PNG (or, for the demo, a real GIF), not an empty or re
           for p in _imgs30 if (_root30 / p).is_file()))
 _shots30 = sorted(p.name for p in (_root30 / "docs" / "screenshots").glob("*.png"))
 check("and no screenshot sits unused",
-      sorted(_P30(p).name for p in _imgs30 if p.startswith("docs/screenshots/")) == _shots30)
+      sorted({_P30(p).name for p in _imgs30 if p.startswith("docs/screenshots/")}) == _shots30)
 _gif36 = _root30 / "docs" / "demo.gif"
 check("the README leads with the demo GIF, small enough to load on a phone (v0.36)",
-      _imgs30 and _imgs30[0] == "docs/demo.gif" and _gif36.is_file()
+      _readme_imgs30 and _readme_imgs30[0] == "docs/demo.gif" and _gif36.is_file()
       and _gif36.stat().st_size < 8_000_000)
 check("every image has alt text, for screen readers and broken connections",
-      all(alt.strip() for alt in _re30.findall(r"!\[([^\]]*)\]\((?!https?://)", _readme30)))
+      all(alt.strip() for _pg in _pages30
+          for alt in _re30.findall(r"!\[([^\]]*)\]\((?!https?://)", _pg.read_text(encoding="utf-8"))))
 import py_compile as _pc30
 _pc30.compile(str(_root30 / "screenshots.py"), doraise=True)
 _pc30.compile(str(_root30 / "demo_gif.py"), doraise=True)
@@ -4036,8 +4044,9 @@ _readme34 = (_root34 / "README.md").read_text(encoding="utf-8")
 check("the README links the deployment guide", "docs/deployment.md" in _readme34)
 check("the guide's backup command writes where the compose file mounts backups",
       "-f /backups/shadowfax.sql" in _guide34 and "pg_dump -U shadowfax -d shadowfax --clean" in _guide34)
-check("neither the README nor the guide uses long dashes",
-      not _re34.search("[—–]| -- ", _readme34 + _guide34))
+_docs34 = "".join(p.read_text(encoding="utf-8") for p in sorted((_root34 / "docs").glob("*.md")))
+check("neither the README nor any guide in docs/ uses long dashes",
+      not _re34.search("[—–]| -- ", _readme34 + _guide34 + _docs34))
 if _ci_path.exists():
     _steps34 = _ci["jobs"]["container"]["steps"]
     _pgstep34 = next((st for st in _steps34 if "docker-compose.postgres.yml" in str(st.get("run", ""))), None)
@@ -5396,8 +5405,13 @@ check("it's a real workload: over 10,000 events from ten actors",
       _r43["shipped"]["events"] > 10_000 and _r43["shipped"]["actors"] == 10)
 check("and the same numbers every time (it's seeded)", _noise43.run() == _r43)
 _readme43 = _P43("README.md").read_text(encoding="utf-8")
-check("the README's noise table is exactly what noise.py measures now",
-      _noise43.markdown(_r43) in _readme43)
+check("the detection guide's noise table is exactly what noise.py measures now",
+      _noise43.markdown(_r43) in _P43("docs/detection.md").read_text(encoding="utf-8"))
+check("and the README's summary quotes the same numbers",
+      f"**{_r43['shipped']['per_1000']} alerts per 1,000 events**" in _readme43
+      and f"**{_r43['profiled']['per_1000']}**" in _readme43
+      and f"all\n  {len(_r43['attacks_shipped'])} attacks" in _readme43
+      and f"({len(_r43['attacks_profiled'])} with profiles)" in _readme43)
 check("CI runs the noise check", "python noise.py --check" in _P43(".github/workflows/ci.yml").read_text(encoding="utf-8"))
 check("a budget over what's measured is caught",
       _noise43.problems({**_r43, "shipped": {**_r43["shipped"], "per_1000": 99.0}}) != [])
@@ -5452,6 +5466,135 @@ check("the same content from the same page is reported once, however often it's 
 check("the shipped policy says which tasks are on the engagement",
       _noise43.shipped_policy()["engagement_scope"]["tasks"] == ["engagement_*"])
 check("and its default dormancy threshold is three days", _noise43.shipped_policy()["dormancy_threshold_minutes"] == 4320)
+
+print("\n== the README and the guides (v0.44) ==")
+import re as _re44
+from pathlib import Path as _P44
+_root44 = _P44(__file__).parent
+_readme44 = (_root44 / "README.md").read_text(encoding="utf-8")
+_guides44 = sorted((_root44 / "docs").glob("*.md"))
+check("the README is short: under 250 lines, with the detail in docs/",
+      len(_readme44.splitlines()) < 250 and len(_guides44) >= 10)
+check("it links every guide, and every guide links back",
+      all(f"docs/{g.name}" in _readme44 for g in _guides44)
+      and all("../README.md" in g.read_text(encoding="utf-8") for g in _guides44))
+
+def _slug44(heading):
+    h = heading.strip().lower()
+    h = _re44.sub(r"[^\w\- ]", "", h)
+    return h.replace(" ", "-")
+
+def _anchors44(path):
+    text = path.read_text(encoding="utf-8")
+    text = _re44.sub(r"(?ms)^```.*?^```", "", text)   # headings inside code don't count
+    return {_slug44(m) for m in _re44.findall(r"(?m)^#{1,6} (.+)$", text)}
+
+_broken44 = []
+for _page in [_root44 / "README.md", _root44 / "architecture.md", _root44 / "SECURITY.md"] + _guides44:
+    _text = _re44.sub(r"(?ms)^```.*?^```", "", _page.read_text(encoding="utf-8"))
+    for _target in _re44.findall(r"\]\(([^)\s]+)\)", _text):
+        if _re44.match(r"[a-z]+:", _target):
+            continue
+        _file, _, _frag = _target.partition("#")
+        _dest = (_page.parent / _file).resolve() if _file else _page.resolve()
+        if not _dest.exists():
+            _broken44.append(f"{_page.name}: {_target}")
+        elif _frag and _dest.suffix == ".md" and _frag not in _anchors44(_dest):
+            _broken44.append(f"{_page.name}: {_target}")
+check("every link in the README and the guides goes somewhere that exists, anchors included",
+      not _broken44)
+if _broken44:
+    print("   broken:", _broken44[:8])
+_ci44 = (_root44 / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+check("CI runs the built image in demo mode and checks it as a visitor",
+      "-e SHADOWFAX_DEMO=1 shadowfax:ci" in _ci44 and "test_dashboard.py --url http://127.0.0.1:8001 --public-demo" in _ci44
+      and 'test "${code}" = "403"' in _ci44)
+
+print("\n== the public demo (v0.44) ==")
+import public_demo as _pd44
+import assistant as _as44
+check("off by default: /demo says so, and there's no visitor sign-in",
+      client.get("/demo").json() == {"enabled": False}
+      and TestClient(app).post("/auth/visitor").status_code == 404)
+
+def _caller44(method, path, body, token):
+    c = TestClient(app)
+    r = c.request(method, path, json=body, headers={"Authorization": f"Bearer {token}"} if token else {})
+    try:
+        return r.status_code, r.json()
+    except ValueError:
+        return r.status_code, {"detail": r.text}
+
+_saved44 = (_pd44.ENABLED, app_module.SELF_MONITOR, _as44.MODEL_OFF, os.environ.get("ANTHROPIC_API_KEY"))
+_pd44.ENABLED = True
+app_module.SELF_MONITOR = True     # the replay's fourth act is Shadowfax watching its own front door
+try:
+    with db_module.get_conn() as _c:
+        _op1 = app_module._demo_accounts(_c)
+        _op2 = app_module._demo_accounts(_c)
+    check("the replay's operator gets a new password every start, and the old one stops working",
+          _op1 != _op2 and TestClient(app).post("/auth/login", json={"username": "demo-operator",
+                                                                     "password": _op1}).status_code == 401)
+    _vis = TestClient(app).post("/auth/visitor")
+    check("anyone can get a visitor session, with no password", _vis.status_code == 200
+          and _vis.json()["user"] == {"username": "visitor", "role": "viewer", "must_change_password": False,
+                                      "totp_enabled": False, "must_enrol_2fa": False})
+    _v = TestClient(app)
+    _v.headers.update({"Authorization": f"Bearer {_vis.json()['token']}"})
+    check("a visitor can see the alerts, incidents and ledger", all(
+        _v.get(u).status_code == 200 for u in ("/alerts", "/incidents", "/stats", "/suppressions")))
+    check("and change nothing: events, policy, rules, notes, reset, users", all(
+        code == 403 for code in (
+            _v.post("/events", json=[{"timestamp": "2026-11-01T00:00:00", "actor_id": "x", "actor_type": "human",
+                                      "event_type": "file_access", "target": "x"}]).status_code,
+            _v.put("/policy", json=client.get("/policy").json()).status_code,
+            _v.post("/suppressions", json={"category": "allowlist_violation", "actor": "x", "target": "*",
+                                           "reason": "visitor trying it", "days": 1}).status_code,
+            _v.post("/reset").status_code,
+            _v.post("/users", json={"username": "v2", "password": TEST_PW, "role": "admin"}).status_code)))
+    check("not even the shared account's own password or two-factor, which would lock everyone else out",
+          _v.post("/auth/password", json={"current_password": "x", "new_password": "y" * 16}).status_code == 403
+          and _v.post("/auth/totp/setup", json={"current_password": "x"}).status_code == 403)
+    _old_max = _pd44.MAX_VISITOR_SESSIONS
+    _pd44.MAX_VISITOR_SESSIONS = 3
+    for _ in range(5):
+        TestClient(app).post("/auth/visitor")
+    with db_module.get_conn() as _c:
+        _vid = db_module.get_user_by_username(_c, "visitor")["id"]
+        _nvs = _c.execute("SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?", (_vid,)).fetchone()["n"]
+    _pd44.MAX_VISITOR_SESSIONS = _old_max
+    check("pressing the button over and over can't grow the sessions table, oldest go first",
+          _nvs == 3 and _v.get("/alerts").status_code == 401)
+    _v.headers.update({"Authorization": f"Bearer {TestClient(app).post('/auth/visitor').json()['token']}"})
+
+    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test-not-real"
+    _as44.MODEL_OFF = True
+    check("in demo mode the assistant never calls a model on a stranger's behalf",
+          _as44.llm_configured() is False)
+    _as44.MODEL_OFF = False
+
+    _probs = _pd44.reset_once("demo-operator", _op2, _caller44)
+    _st44 = client.get("/demo").json()
+    check("a reset replays the whole scripted attack, and everything it says it raises is raised",
+          _probs == [] and _st44["enabled"] and _st44["resets"] >= 1 and _st44["reset_minutes"] >= 1)
+    check("/demo says when the next reset is", _st44["next_reset_at"] > _st44["last_reset_at"])
+    check("afterwards the visitor sees the attack's kill chain",
+          any(i["actor_id"] == "demo-agent-1" for i in _v.get("/incidents").json()))
+    app_module.SELF_MONITOR = False     # now the fourth act can't raise what it promises
+    _miss44 = _pd44.reset_once("demo-operator", _op2, _caller44)
+    app_module.SELF_MONITOR = True
+    check("a reset whose replay doesn't raise everything it says it will is reported",
+          _miss44 and any("brute_force_auth" in m for m in _miss44))
+    check("a replay that goes wrong is reported, not hidden",
+          _pd44.reset_once("demo-operator", "wrong-password", _caller44) != []
+          and _pd44.STATE.last_problem)
+finally:
+    _pd44.ENABLED, app_module.SELF_MONITOR, _as44.MODEL_OFF = _saved44[:3]
+    if _saved44[3] is None:
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+    else:
+        os.environ["ANTHROPIC_API_KEY"] = _saved44[3]
+check("with demo mode off again, the visitor door is shut", TestClient(app).post("/auth/visitor").status_code == 404)
 
 print("\n== archiving old events (v0.41) ==")
 import archive as archive_mod

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import * as api from "../api.js";
 
 export default function Login({ onAuthenticated }) {
@@ -11,6 +11,22 @@ export default function Login({ onAuthenticated }) {
   const [needsCode, setNeedsCode] = useState(false);
   const [code, setCode] = useState("");
   const [useRecovery, setUseRecovery] = useState(false);
+  // v0.44: on a public demo, anyone can look around read-only.
+  const [demo, setDemo] = useState(null);
+  useEffect(() => {
+    api.getDemo().then((d) => d && d.enabled && setDemo(d)).catch(() => {});
+  }, []);
+
+  const lookAround = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      onAuthenticated(await api.visitor());
+    } catch (err) {
+      setError(typeof err.detail === "string" ? err.detail : err.message);
+      setBusy(false);
+    }
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -119,6 +135,19 @@ export default function Login({ onAuthenticated }) {
         <button className="btn primary login-submit" type="submit" disabled={busy}>
           {busy ? "Signing in…" : needsCode ? "Verify" : "Sign in"}
         </button>
+
+        {demo && !needsCode && (
+          <div className="login-demo">
+            <div className="login-demo-note">
+              This is a public demo. Look around without an account: you can see everything and
+              change nothing, and the data resets every {demo.reset_minutes} minutes with a fresh
+              run of the scripted attack.
+            </div>
+            <button type="button" className="btn login-visitor" onClick={lookAround} disabled={busy}>
+              Look around as a visitor
+            </button>
+          </div>
+        )}
       </form>
     </div>
   );

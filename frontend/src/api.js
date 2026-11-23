@@ -186,6 +186,19 @@ export async function login(username, password, second = {}) {
   return data.user; // { username, role }
 }
 
+// The public demo (v0.44). /demo is open to anyone; /auth/visitor only exists
+// in demo mode and hands out a read-only session for the shared visitor.
+export function getDemo() {
+  return request("/demo");
+}
+
+export async function visitor() {
+  const data = await request("/auth/visitor", { method: "POST" });
+  setToken(data.token);
+  scheduleRefresh(data.refresh_after_seconds);
+  return data.user;
+}
+
 export async function logout() {
   try {
     await request("/auth/logout", { method: "POST" });
