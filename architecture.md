@@ -927,6 +927,34 @@ which is safe because alerts are a pure function of events and policy.
 The detection engine. One pass over an actor's ordered events, maintaining
 window state locally, emitting alerts as rules are violated.
 
+**Judged against the actor's own normal (v0.43).** Four detectors that
+fired on ordinary work now compare an actor with its own earlier history in
+the same pass, which keeps them pure functions of the events: lateral movement
+counts only spots first touched inside the window (`spot_first_seen`); an
+internal transfer over the threshold is reported when it's more than twice
+the largest earlier one to that destination (`largest_internal`), external
+ones always; the same injected content from the same source is reported once
+per actor (`injection_reported`), while every read still feeds the
+follow-through check; and the engagement scope applies only to calls whose
+task matches `engagement_scope.tasks` (`_in_engagement`), or to every call
+when a policy has no `tasks`, as before. The shipped dormancy threshold went
+from an hour to three days. Lateral movement still raises one alert per step
+past the threshold rather than one per sweep: a single alert would move to a
+different step when a late event arrives, and that reads as
+`history_rewritten`.
+
+#### noise.py
+
+The noise measurement (v0.43). Builds two seeded weeks of harmless activity
+(coding agents through `shadowfax_agent.call_event`/`result_event`, so the
+events have the real connector's shape; a research agent, a CI runner, an ops
+agent, a backup service and three people), runs `detectors.run_for_actor`
+over it with the shipped policy and with a profile per agent, and runs a list
+of attacks through both. An attack counts as caught only if its category is
+raised on the scenario's last event, so history at the start of a scenario
+can't satisfy it. `--check` fails over `BUDGET` or on any missed attack; CI
+runs it, and `test_api` checks the README's table is `markdown(run())`.
+
 Current categories: `allowlist_violation`, `canary_triggered`,
 `blocked_target_access`, `dormant_reappearance`, `capability_resurrection`,
 `brute_force_auth`, `impossible_travel`, `privilege_escalation`,
@@ -1491,6 +1519,7 @@ demo_gif.py             docs/demo.gif           shadowfax_agent.py
 intel.py                supply_chain.py         requirements.lock
 LICENSE                 SECURITY.md             ruff.toml
 archive.py              bench.py                suppress.py
+noise.py
 
 desktop/package.json    desktop/package-lock.json
 desktop/main.js         desktop/preload.js      desktop/connect-preload.js

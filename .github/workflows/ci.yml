@@ -102,6 +102,12 @@ jobs:
         # rules that are off and why.
         run: ruff check .
 
+      - name: Noise on ordinary work, and attacks still caught
+        # v0.43. Two weeks of harmless agent and human activity through every
+        # detector: fails if benign alerts go over the budget in noise.py, or
+        # if any of the attacks there stops being caught.
+        run: python noise.py --check
+
       - name: Run the test suite
         # Exits non-zero on the first failure and names the check that broke.
         run: python test_api.py

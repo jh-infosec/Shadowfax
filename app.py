@@ -65,7 +65,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.42.0"
+VERSION = "0.43.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:

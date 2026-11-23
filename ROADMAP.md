@@ -415,3 +415,8 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       and some targets, each with a reason and an end date of 90 days at most,
       recorded in the ledger. Muted alerts are hidden from the queue, counts,
       incidents and forwarding, never deleted.
+- [x] Measured noise (`v0.43.0`): `noise.py` runs two weeks of ordinary agent
+      and human work through every detector. It found 202 alerts per 1,000
+      events as shipped; four detectors now judge each actor against its own
+      history, and it's 0.92, with every attack in the set still caught. CI
+      holds both numbers to a budget.

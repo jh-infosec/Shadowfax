@@ -233,6 +233,12 @@ Database changes are applied automatically when Shadowfax starts. Read the
 [changelog](../CHANGELOG.md) for anything that affects you. For example,
 upgrading to v0.33 signs everyone out once.
 
+Upgrades never change your saved policy. So when a version ships better
+defaults, you choose whether to take them. v0.43 is one: setting
+`dormancy_threshold_minutes` to `4320` and adding `"tasks": ["engagement_*"]`
+to `engagement_scope` in **Edit policy** removes most false alarms on ordinary
+agent work. The README's "How noisy is it?" section explains why.
+
 ## 9. Other settings
 
 These can all go in `.env`:

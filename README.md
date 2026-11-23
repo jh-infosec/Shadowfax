@@ -33,6 +33,8 @@ is not a security boundary and doesn't block anything.
 
 **Detection**
 
+- About one alert per 1,000 events of ordinary agent work, measured and held
+  there by CI (see [How noisy is it?](#how-noisy-is-it))
 - 34 deterministic detectors, including AI agent tool call analysis (destructive
   commands, out of scope actions, privilege escalation, data exfiltration)
 - Prompt-injection detection: instructions hidden in what an agent reads, the
@@ -806,6 +808,88 @@ longer matches what you saved, history before that point was rewritten, even
 if `verify` passes. The [deployment guide](docs/deployment.md#6-keep-a-copy-of-the-ledger-head-somewhere-else)
 has the exact commands.
 
+## How noisy is it?
+
+A detector that cries wolf gets switched off, so alongside "does it catch
+attacks" the question is "how often does it bother you when nothing is wrong".
+`noise.py` answers it. It builds two weeks of believable, harmless activity
+and runs every detector over it:
+
+- three coding agents working through Claude Code, reported through the real
+  connector code, reading and editing files, running tests and git, and
+  reading documentation
+- a research agent reading the news, including security articles that quote
+  prompt-injection phrases while explaining them
+- a CI runner that tests, builds and deploys across six internal machines
+  several times a day
+- an operations agent checking logs and metrics around the clock
+- a backup service that copies a few gigabytes to an internal bucket nightly
+- three people signing in each morning, sometimes mistyping their password
+
+It measures that twice: with the policy Shadowfax ships with, and with each
+agent given a [permission profile](#agent-permissions) saying what it's for.
+Then it runs a set of attacks through the same policies, and each one has to
+be caught. Six of them aim at the exact places v0.43 made quieter.
+
+```bash
+python noise.py           # the report
+python noise.py --check   # what CI runs
+```
+
+| | Policy as shipped | With a profile per agent |
+| --- | ---: | ---: |
+| Events | 11,976 | 11,976 |
+| Alerts | 11 | 5 |
+| Alerts per 1,000 events | 0.92 | 0.42 |
+| Actors with any alert | 7 of 10 | 3 of 10 |
+| Attacks caught | 13 of 13 | 14 of 14 |
+
+| Benign alerts by category | Policy as shipped | With a profile per agent |
+| --- | ---: | ---: |
+| `exfiltration_volume` | 1 | 1 |
+| `lateral_movement` | 2 | 2 |
+| `prompt_injection` | 2 | 2 |
+| `undeclared_agent` | 6 | 0 |
+
+What's left, and why it stays:
+
+- `undeclared_agent` is once per agent that has no profile. That's the
+  prompt to write one, and it goes away when you do.
+- `prompt_injection` fires once for each of the two security articles that
+  quote injection phrases. It can't tell an explanation from an instruction,
+  so it reports each page once. If an agent then acts on the page,
+  `injection_followed` is the alert that matters.
+- `lateral_movement` fires twice on the CI runner's first pipeline, at the
+  fifth and sixth build machines, when they're all new to it, and never again.
+- `exfiltration_volume` fires on the backup's first night. Later nights are
+  judged against the largest copy it has made before.
+
+Before v0.43 the same two weeks raised 2,423 alerts as shipped, 202 per 1,000
+events. Almost all of them were the engagement scope applying to every agent
+(1,710), a one-hour dormancy threshold firing after every lunch break (309),
+the same pages being reported every time they were read (270), and the CI
+runner's routine machines counting as lateral movement (114). The changes:
+
+- The engagement scope now applies to the tasks named in its `tasks` list
+  (`engagement_*` in the shipped policy), not to every agent.
+- The dormancy threshold is three days, so a weekend doesn't count.
+- The same injected content from the same place is reported once per agent.
+  Every read is still watched for the agent acting on it.
+- Lateral movement counts only machines that are new to the agent.
+- A large transfer to an internal destination is reported the first time,
+  and again only when it's more than twice the largest before it. External
+  destinations are reported every time, as before.
+
+CI fails if either measurement goes over its budget (in `noise.py`), or if any
+attack stops being caught, and a test checks this table matches what
+`noise.py` measures. The numbers can't quietly go stale or get worse.
+
+**If you started on an earlier version,** your saved policy still has the
+old settings, because Shadowfax never changes a policy you own. To get the
+quieter defaults, open **Edit policy** and set `dormancy_threshold_minutes`
+to `4320`, and add `"tasks": ["engagement_*"]` (or your own task names) to
+`engagement_scope`. The other three changes apply without touching anything.
+
 ## Long histories
 
 ### Recording stays fast
@@ -1271,7 +1355,7 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 1,137 checks against the API, with every resumed scan checked against
+That runs 1,153 checks against the API, with every resumed scan checked against
 a full one as it goes. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
@@ -1406,6 +1490,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md) and the plan is in
 | 0.40 | MIT licence, security policy, pinned dependencies, vulnerability and code scanning |
 | 0.41 | Recording stays fast as history grows, archiving old events |
 | 0.42 | Muting false positives, with a reason and an end date |
+| 0.43 | Noise measured on two weeks of ordinary work and held down in CI |
 
 Everything on the original list for 1.0 is done. Still open:
 

@@ -200,7 +200,7 @@ class Demo:
 
         self.narrate("The agent fetches the next page on its reading list.",
                      "nothing about injection yet; the sample policy notes that "
-                     "this agent is undeclared and the site is outside its scope")
+                     "this agent is undeclared")
         self.observed(self.send(20, "tool_call", "https://blog.example/llm-tips",
                                 actor=READER, task=task, tool="curl",
                                 arguments="-s https://blog.example/llm-tips"))
