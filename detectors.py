@@ -6,6 +6,7 @@ returns any alerts that should be raised.
 """
 
 from __future__ import annotations
+import fnmatch
 import hashlib
 import ipaddress
 from collections import deque
@@ -315,6 +316,18 @@ def _intel_alerts(event: dict, meta: dict, ts: datetime, index: "intel.Index") -
     return out
 
 
+def _in_engagement(event: dict, scope: dict) -> bool:
+    """Whether the engagement scope applies to this call (v0.43). With `tasks`
+    set, only calls made for one of those tasks (`*` patterns allowed) are held
+    to it; a coding agent fetching documentation isn't on the engagement.
+    Without it, every tool call is, as before."""
+    tasks = scope.get("tasks")
+    if tasks is None:
+        return True
+    task = (event.get("task") or "").lower()
+    return any(fnmatch.fnmatchcase(task, str(t).lower()) for t in tasks)
+
+
 def _scope_violation(event: dict, meta: dict, scope: dict) -> str | None:
     """Message describing how a tool call left the engagement scope, or None."""
     host, port = _tool_call_destination(event, meta)
@@ -393,6 +406,12 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
     auth_failures: deque[datetime] = deque()
     auth_locations: deque[tuple[datetime, str]] = deque()
     recent_targets: deque[tuple[datetime, str]] = deque()
+    # v0.43: when each lateral-movement spot was first touched.
+    spot_first_seen: dict[str, datetime] = {}
+    # v0.43: the largest earlier transfer to each internal destination, and the
+    # injected content already reported (source, markers).
+    largest_internal: dict[str, int] = {}
+    injection_reported: set[tuple[str, str]] = set()
     recent_privilege: str | None = None
     recent_events: deque[datetime] = deque()
     rate_history: list[int] = []
@@ -596,6 +615,16 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
             if found:
                 hidden = any(f["marker"] == "hidden text" for f in found)
                 tool = (meta.get("tool") or "a tool")
+                # v0.43: the same content from the same place is one finding.
+                # An agent re-reading a page about prompt injection every day
+                # raised a new alert every time. The follow-through check below
+                # still watches every read.
+                seen_key = (injection.source_of(e)[:500], injection.evidence(found))
+                if seen_key in injection_reported:
+                    injected.append((e, injection.planted(injection.indicators(text), own_indicators),
+                                     injection.summary(found), ts))
+                    continue
+                injection_reported.add(seen_key)
                 alerts.append(_mk_alert(e, "high" if hidden else "medium", "prompt_injection",
                     f"content returned to the agent by {tool} from "
                     f"{injection.source_of(e)[:120] or 'an unnamed source'} contains "
@@ -772,15 +801,23 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
         if e["event_type"] == "tool_call":
             host, _port = _tool_call_destination(e, meta)
             spot = host if host and _internal_host(host) else None
+        #
+        # v0.43: only places new to this actor count. A CI runner that reaches
+        # the same six build machines on every push isn't moving anywhere; one
+        # reaching six it has never touched is. (Each step past the threshold
+        # still raises its own alert: reporting a sweep once would let a late
+        # event move that alert to another step, which reads as history
+        # being rewritten.)
         if e["event_type"] != "completion_claim" and spot is not None:
-            recent_targets.append((ts, spot))
             window = timedelta(minutes=policy.get("lateral_movement_window_minutes", 15))
+            spot_first_seen.setdefault(spot, ts)
+            recent_targets.append((ts, spot))
             while recent_targets and ts - recent_targets[0][0] > window:
                 recent_targets.popleft()
-            distinct = {t for _, t in recent_targets}
+            distinct = {t for _, t in recent_targets if ts - spot_first_seen[t] <= window}
             if len(distinct) >= policy.get("lateral_movement_max_distinct_targets", 6):
                 alerts.append(_mk_alert(e, "high", "lateral_movement",
-                    f"{len(distinct)} distinct targets touched within "
+                    f"{len(distinct)} distinct targets it had never touched before, within "
                     f"{policy.get('lateral_movement_window_minutes', 15)} min"))
 
         # off hours
@@ -797,11 +834,20 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
             size = meta.get("bytes_transferred", 0)
             external = e["target"] in policy.get("exfil_external_targets", [])
             threshold = policy.get("exfil_bytes_threshold", 500_000_000)
-            if size >= threshold:
+            # v0.43: inside the network, judged against what this actor
+            # usually sends there. A backup that copies 3 GB to the same bucket
+            # every night is reported the first night, and again only if a
+            # night is more than twice the largest before it. Anything over the
+            # threshold to an external destination is always reported.
+            previous = largest_internal.get(e["target"], 0) if not external else 0
+            if size >= threshold and (external or size > 2 * previous):
                 sev = "critical" if external else "high"
                 dest = "external" if external else "internal"
+                usual = f", over twice its previous largest of {previous:,}" if previous else ""
                 alerts.append(_mk_alert(e, sev, "exfiltration_volume",
-                    f"{size:,} bytes transferred to {dest} destination (threshold {threshold:,})"))
+                    f"{size:,} bytes transferred to {dest} destination (threshold {threshold:,}{usual})"))
+            if not external and isinstance(size, (int, float)):
+                largest_internal[e["target"]] = max(previous, int(size))
 
         # Threat intelligence (v0.39): something this event reached is on a feed.
         # Matched if it was listed at the time, or listed only later: the agent
@@ -835,7 +881,7 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
                     break  # one destructive-action alert per tool call
 
             scope = policy.get("engagement_scope")
-            if scope and scope.get("enabled"):
+            if scope and scope.get("enabled") and _in_engagement(e, scope):
                 violation = _scope_violation(e, meta, scope)
                 if violation:
                     alerts.append(_mk_alert(e, scope.get("severity", "high"),
