@@ -84,7 +84,9 @@ from typing import Any
 
 POLICY_KEY = "agent_permissions"
 
-GRANT_KEYS = ("allowed_tools", "denied_tools", "allowed_targets", "denied_targets")
+# v0.46: allowed_delegates, the agents this one may hand work to (see handoff.py).
+GRANT_KEYS = ("allowed_tools", "denied_tools", "allowed_targets", "denied_targets", "allowed_delegates")
+HANDOFF_EVENT = "agent_handoff"
 PROFILE_KEYS = frozenset(GRANT_KEYS + ("description",))
 SECTION_KEYS = frozenset({"enabled", "unprofiled_agents", "profiles"})
 UNPROFILED_MODES = ("ignore", "alert")
@@ -241,6 +243,16 @@ def evaluate(event: dict[str, Any], profile: dict[str, Any],
             elif not _tool_matches(tool.lower(), allowed):
                 breaches.append(Breach(SEVERITY_NOT_GRANTED,
                     f"tool '{tool}' is not among the granted tools"))
+
+    # v0.46: handing work to another agent is judged against allowed_delegates,
+    # not against the targets the agent may touch: the target is an agent.
+    if event.get("event_type") == HANDOFF_EVENT:
+        to = str(event.get("target") or "")
+        delegates = profile.get("allowed_delegates")
+        if delegates is not None and not any(fnmatch.fnmatchcase(to, p) for p in delegates):
+            breaches.append(Breach(SEVERITY_NOT_GRANTED,
+                f"handed work to '{to}', which is not among the agents it may delegate to"))
+        return breaches
 
     # A completion claim is a report about work, not an access, so it has no
     # target to authorise -- the same exemption lateral movement makes.

@@ -488,6 +488,7 @@ export default function App() {
 
       {actorDetail && (
         <ActorDrawer detail={actorDetail} onClose={() => setSelectedActorId(null)}
+                     onSelectActor={setSelectedActorId}
                      onDraftProfile={canAnalyst ? setDraftAgent : undefined} />
       )}
 

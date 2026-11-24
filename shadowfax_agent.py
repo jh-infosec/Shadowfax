@@ -57,7 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-VERSION = "0.45.0"
+VERSION = "0.46.0"
 DEFAULT_URL = "http://127.0.0.1:8000"
 ACTOR_TYPE = "ai_agent"
 
@@ -417,6 +417,16 @@ def result_event(agent_id: str, tool: str, args: Any, output: Any, *,
     return make_event(agent_id, "tool_result", target, meta, task, timestamp)
 
 
+def handoff_event(agent_id: str, to_agent: str, message: Any, *, task: str | None = None,
+                  extra: dict[str, Any] | None = None, timestamp: str | None = None) -> dict[str, Any]:
+    """Handing work to another agent (v0.46): the target is the receiving
+    agent's id, and the message is what was passed on."""
+    meta = {"to": to_agent, "message": text_of(message)}
+    meta.update(extra or {})
+    meta["reported_by"] = f"shadowfax_agent/{VERSION}"
+    return make_event(agent_id, "agent_handoff", to_agent, meta, task, timestamp)
+
+
 # -- the reporter ------------------------------------------------------------------
 
 class Reporter:
@@ -479,6 +489,14 @@ class Reporter:
                     **extra: Any) -> dict[str, Any]:
         event = result_event(self.agent_id, tool, arguments, output, task=self.config.task,
                              extra=extra)
+        self.send(event)
+        return event
+
+    def handoff(self, to_agent: str, message: Any, **extra: Any) -> dict[str, Any]:
+        """Report handing work to another agent (v0.46). `message` is what was
+        passed on. Shadowfax writes the receiving half into the other agent's
+        timeline itself, and follows an injection if one is carried across."""
+        event = handoff_event(self.agent_id, to_agent, message, task=self.config.task, extra=extra)
         self.send(event)
         return event
 

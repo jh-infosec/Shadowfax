@@ -816,3 +816,10 @@ table.alert-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   display: flex; flex-direction: column; gap: 10px; }
 .login-demo-note { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
 .login-visitor { width: 100%; padding: 9px; }
+
+/* Hand-offs between agents (v0.46) */
+.tl-handoff .tl-agent-link { font-family: var(--mono); padding: 0; }
+.taint-badge { margin-left: 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--crit); background: var(--crit-dim); border-radius: 4px; padding: 1px 6px; }
+.tl-handoff-msg { color: var(--muted); font-size: 12px; margin-top: 3px; white-space: pre-wrap;
+  overflow-wrap: anywhere; max-height: 4.5em; overflow: hidden; }

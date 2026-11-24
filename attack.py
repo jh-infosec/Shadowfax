@@ -56,6 +56,10 @@ CATEGORY_TO_TECHNIQUES: dict[str, list[str]] = {
     # v0.41: removing old records from the database. Usually housekeeping, and
     # also what Indicator Removal looks like.
     "evidence_archived": ["T1070"],
+    # v0.46: injection carried from one agent to another in a hand-off, and a
+    # restricted agent using a better-equipped one (a confused deputy).
+    "injection_spread": ["AML.T0051.001", "AML.T0053"],
+    "delegated_escalation": ["T1548"],
     # v0.36: prompt injection. These are MITRE ATLAS techniques (AML.*), the
     # AI-specific counterpart to ATT&CK; ATLAS's tactic names match ATT&CK's,
     # so they sit on the same kill chain.

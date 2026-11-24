@@ -618,6 +618,15 @@ def get_events_for_actor_after(conn: sqlite3.Connection, actor_id: str,
     return [_row_to_event(r) for r in rows]
 
 
+def get_events_for_actor_since(conn: sqlite3.Connection, actor_id: str,
+                               since: str) -> list[dict[str, Any]]:
+    """An actor's events from `since` on, in the usual order (v0.46)."""
+    rows = conn.execute(
+        "SELECT * FROM events WHERE actor_id = ? AND timestamp >= ? ORDER BY timestamp ASC, id ASC",
+        (actor_id, since)).fetchall()
+    return [_row_to_event(r) for r in rows]
+
+
 def actor_mark(conn: sqlite3.Connection, actor_id: str, through_id: int) -> tuple[int, str | None]:
     """(how many of an actor's events have ids up to `through_id`, the ledger
     hash of event `through_id`) (v0.41).

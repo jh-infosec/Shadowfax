@@ -32,10 +32,14 @@ block anything.
 - **Knows what each agent is for.** Permission profiles say which tools and
   targets an agent was given, so its first step outside them is reported with
   no baseline needed. Shadowfax can draft a profile from what an agent did.
-- **Catches what matters for agents.** 34 deterministic detectors, including
+- **Catches what matters for agents.** 36 deterministic detectors, including
   prompt injection and an agent acting on it, destructive commands, data
   leaving, credentials being touched, and threat intelligence feeds checked
   against everything agents reach, even before an entry was listed.
+- **Follows work between agents.** When one agent hands work to another,
+  Shadowfax follows it: an injection one agent read and passed on is caught
+  when another acts on it, and so is a restricted agent getting a
+  better-equipped one to do what it can't.
 - **Puts it in context.** Every alert is mapped to MITRE ATT&CK or ATLAS,
   related alerts become incidents, and an attack that moves through the kill
   chain in order is flagged.
@@ -53,15 +57,15 @@ block anything.
 ## How well it works
 
 - **Noise:** on two weeks of ordinary work (about 12,000 events from coding
-  agents, a research agent, a CI runner, an ops agent, a nightly backup and
-  three people) it raises **0.92 alerts per 1,000 events** with the policy it
-  ships with, and **0.42** once each agent has a profile, while catching all
-  13 attacks in the same run (14 with profiles). CI fails if either number gets
+  agents and the planner handing them work, a research agent, a CI runner, an
+  ops agent, a nightly backup and three people) it raises **0.99 alerts per 1,000 events** with the policy it
+  ships with, and **0.41** once each agent has a profile, while catching all
+  14 attacks in the same run (16 with profiles). CI fails if either number gets
   worse. [How that's measured](docs/detection.md#how-noisy-is-it).
 - **Speed:** recording an event takes about 10 ms whether the agent has 1,000
   events of history or 50,000. [The benchmark](docs/evidence.md#recording-stays-fast).
-- **Tests:** every push runs 1,179 API checks on SQLite and again on
-  PostgreSQL, 90 checks in a real browser, the desktop app's own tests, the
+- **Tests:** every push runs 1,200 API checks on SQLite and again on
+  PostgreSQL, 93 checks in a real browser, the desktop app's own tests, the
   scripted attack against the built image, and vulnerability and code
   scanning. [What CI checks](docs/development.md#continuous-integration).
 
@@ -116,7 +120,7 @@ There's more in [the tour](docs/tour.md).
 | Guide | What's in it |
 | --- | --- |
 | [Getting started](docs/getting-started.md) | Every way to run it, PostgreSQL, the command line, the desktop app, all settings |
-| [Connecting agents](docs/agents.md) | Claude Code, MCP clients, Python agents, permission profiles, capability manifests |
+| [Connecting agents](docs/agents.md) | Claude Code, MCP clients, Python agents, agents handing work to each other, permission profiles, capability manifests |
 | [Detection](docs/detection.md) | How noisy it is, prompt injection, threat intelligence, muting false positives, other tools' findings, SIEMs |
 | [Investigating](docs/investigation.md) | Case notes and the investigation assistant |
 | [Evidence and history](docs/evidence.md) | The hash-chained ledger, speed on long histories, archiving |
@@ -175,6 +179,7 @@ in [ROADMAP.md](ROADMAP.md). The most recent versions:
 | 0.43 | Noise measured on two weeks of ordinary work and held down in CI |
 | 0.44 | A public demo mode, and this shorter README |
 | 0.45 | One-click hosting for the demo on Render, and code signing through SignPath |
+| 0.46 | Following work between agents: injections that spread, and confused deputies |
 
 ## Licence
 

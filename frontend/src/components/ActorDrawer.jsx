@@ -4,7 +4,7 @@ import PermissionsPanel from "./PermissionsPanel.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
 import SubjectReport from "./SubjectReport.jsx";
 
-export default function ActorDrawer({ detail, onClose, onDraftProfile }) {
+export default function ActorDrawer({ detail, onClose, onDraftProfile, onSelectActor }) {
   if (!detail) return null;
   const { actor_id, events, alerts, risk, permissions, manifest, subject_report } = detail;
 
@@ -63,7 +63,27 @@ export default function ActorDrawer({ detail, onClose, onDraftProfile }) {
               style={worst ? { "--sevcolor": SEVERITY_COLOUR[worst.severity] } : undefined}
             >
               <div className="tl-time">{e.timestamp.replace("T", " ").slice(0, 16)}</div>
-              <div className="tl-event">{e.event_type} &rarr; {e.target}</div>
+              {/* v0.46: hand-offs link to the other agent, and a received
+                  hand-off that carries an injection says so. */}
+              {e.event_type === "agent_handoff" || e.event_type === "handoff_received" ? (
+                <div className="tl-event tl-handoff">
+                  {e.event_type === "agent_handoff" ? "handed work to " : "work handed over by "}
+                  {onSelectActor ? (
+                    <button className="link-btn tl-agent-link" onClick={() => onSelectActor(e.target)}>
+                      {e.target}
+                    </button>
+                  ) : e.target}
+                  {e.metadata?.taint && (
+                    <span className="taint-badge"
+                          title={`carries what an injection planted in ${e.metadata.taint.source}`}>
+                      tainted
+                    </span>
+                  )}
+                  {e.metadata?.message && <div className="tl-handoff-msg">{e.metadata.message}</div>}
+                </div>
+              ) : (
+                <div className="tl-event">{e.event_type} &rarr; {e.target}</div>
+              )}
               {flags.map((f) => (
                 <div key={f.id} className={`tl-flag${f.suppressed_by ? " muted" : ""}`}
                      style={{ color: SEVERITY_COLOUR[f.severity] }}>

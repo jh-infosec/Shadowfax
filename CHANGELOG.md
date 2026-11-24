@@ -1,5 +1,57 @@
 # Changelog
 
+## Version 0.46.0
+
+Following work between agents.
+
+### What's new
+
+- **Hand-offs.** An agent reports handing work to another with
+  `Reporter.handoff(to, message)`, or any client posts an `agent_handoff`
+  event whose target is the receiving agent. Shadowfax writes the other half,
+  `handoff_received`, into the receiving agent's timeline itself, saying who
+  it came from. Nobody can post that half directly.
+- **`injection_spread`** (critical, ATLAS AML.T0051.001 and AML.T0053). If the
+  sender read injected content in the last hour and its hand-off passes on
+  something planted there, the received hand-off is marked tainted, with the
+  source. The receiving agent using that thing raises this, naming every agent
+  the injection passed through, along chains of any length. The receiver
+  doesn't also get `injection_followed`, since it never read the injection.
+- **`delegated_escalation`** (ATT&CK T1548): a confused deputy. An agent does
+  something its own profile allows but the sender's doesn't, within an hour of
+  being handed work.
+- **`allowed_delegates`** in a profile says which agents it may hand work to.
+  Handing work to anyone else is a `permission_violation`, and delegation a
+  profile plans for this way is never reported as escalation, since an
+  orchestrator can't do its workers' jobs by design.
+- Instructions aimed at an AI inside a hand-off's message raise
+  `prompt_injection` on the receiver.
+- Fanning work out to many agents isn't lateral movement.
+- **The dashboard** shows both sides of a hand-off on each agent's timeline,
+  links to the other agent, and marks tainted ones.
+- **The scripted attack has a new Act 4:** a planner reads a poisoned ticket
+  and hands the work on, and the coder that never saw the ticket acts on it.
+  17 expectations now, all checked with `--assert`, in CI and in demo mode.
+- **The noise measurement** has a planner handing each coding agent its work
+  every morning, with no false alarms from the hand-offs, and two more
+  attacks. The shipped budget went from 0.95 to 1.0 alerts per 1,000 events,
+  because the new planner, like every agent without a profile, raises one
+  `undeclared_agent`. With profiles it's 0.41.
+- 36 detector categories.
+
+### Tested
+
+- 1,200 API checks, on SQLite and on PostgreSQL. The 21 new ones cover a clean
+  hand-off, every refusal, a fan-out to eight agents, taint and where it came
+  from, `injection_spread` one and two hand-offs on, a clean URL passed on,
+  instructions inside a hand-off, the confused deputy (and its time window,
+  and the same action with no hand-off), planned delegation, and
+  `allowed_delegates`.
+- 3 new browser checks: the tainted hand-off on the coder's timeline, and the
+  link back to the planner.
+- Eight mutations to the hand-off logic, each caught by the API suite or
+  `noise.py`.
+
 ## Version 0.45.0
 
 Getting the demo online and the installer signed.

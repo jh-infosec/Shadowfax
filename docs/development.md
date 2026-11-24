@@ -9,7 +9,7 @@ pip install -r requirements-dev.txt
 python test_api.py
 ```
 
-That runs 1,179 checks against the API, with every resumed scan checked against
+That runs 1,200 checks against the API, with every resumed scan checked against
 a full one as it goes. To run the same checks on PostgreSQL, set
 `SHADOWFAX_DATABASE_URL` to an empty test database first. **The suite wipes the
 database it's pointed at**, so never point it at real data.
@@ -22,7 +22,7 @@ python demo.py --fast          # put some data on the dashboard first
 python test_dashboard.py
 ```
 
-There are 83 checks (and 7 more for a server in demo mode, run with
+There are 86 checks (and 7 more for a server in demo mode, run with
 `--public-demo`), covering things like the alert rows rendering with severity
 and ATT&CK technique, filters actually filtering, the kill chain being drawn, the
 ledger badge reading verified, the session token never appearing in a URL, and

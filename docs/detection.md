@@ -12,6 +12,8 @@ and runs every detector over it:
 - three coding agents working through Claude Code, reported through the real
   connector code, reading and editing files, running tests and git, and
   reading documentation
+- a planner that reads the issue tracker each morning and hands each coding
+  agent a task
 - a research agent reading the news, including security articles that quote
   prompt-injection phrases while explaining them
 - a CI runner that tests, builds and deploys across six internal machines
@@ -32,18 +34,18 @@ python noise.py --check   # what CI runs
 
 | | Policy as shipped | With a profile per agent |
 | --- | ---: | ---: |
-| Events | 11,976 | 11,976 |
-| Alerts | 11 | 5 |
-| Alerts per 1,000 events | 0.92 | 0.42 |
-| Actors with any alert | 7 of 10 | 3 of 10 |
-| Attacks caught | 13 of 13 | 14 of 14 |
+| Events | 12,088 | 12,088 |
+| Alerts | 12 | 5 |
+| Alerts per 1,000 events | 0.99 | 0.41 |
+| Actors with any alert | 8 of 11 | 3 of 11 |
+| Attacks caught | 14 of 14 | 16 of 16 |
 
 | Benign alerts by category | Policy as shipped | With a profile per agent |
 | --- | ---: | ---: |
 | `exfiltration_volume` | 1 | 1 |
 | `lateral_movement` | 2 | 2 |
 | `prompt_injection` | 2 | 2 |
-| `undeclared_agent` | 6 | 0 |
+| `undeclared_agent` | 7 | 0 |
 
 What's left, and why it stays:
 
@@ -139,6 +141,18 @@ How it decides:
 The honest limit: a careful attacker can write an injection that reads like
 normal prose, and these markers won't see it. `injection_followed` will still
 catch the agent acting on it, as long as it reuses something from the content.
+
+### When the injection is passed on
+
+An agent that reads an injection doesn't have to be the one that acts on it.
+If it hands work to another agent and passes on something the injection
+planted, Shadowfax marks the hand-off as tainted, and the other agent using
+that thing raises `injection_spread` (critical, ATLAS AML.T0051.001 and
+AML.T0053), naming every agent it passed through. The receiving agent
+doesn't also get `injection_followed`: it never read the injection itself.
+[Agents that hand work to each other](agents.md#agents-that-hand-work-to-each-other)
+covers reporting hand-offs, and `delegated_escalation`, the confused deputy.
+
 
 ## Threat intelligence
 
@@ -268,7 +282,7 @@ Some details worth knowing:
   Shadowfax's own detectors complete.
 - **A bad envelope is rejected whole,** with the field at fault named, so the
   person writing the other tool finds out what's wrong.
-- **Other tools can't use Shadowfax's own 34 detector categories,** so an alert
+- **Other tools can't use Shadowfax's own 36 detector categories,** so an alert
   reading `destructive_action` always means Shadowfax found it.
 - **Unvalidated findings are marked but not downgraded.** `validated: false`
   means the tool is repeating something the subject said about itself, like a

@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import attack
 import envelope
+import handoff
 import injection
 import intel
 import manifest
@@ -61,6 +62,9 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "threat_intel_match",
     # v0.41: old events moved out of the database into an archive file.
     "evidence_archived",
+    # v0.46: agents handing work to each other: an injection passed on from
+    # one agent to another, and an agent used to get round another's limits.
+    "injection_spread", "delegated_escalation",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
@@ -449,6 +453,13 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
     tool_definitions: dict[str, str] = {}
     poisoned_reported: set[str] = set()
     injection_window = timedelta(minutes=policy.get("prompt_injection_window_minutes", 60))
+    # v0.46: work handed over by other agents. What a tainted hand-off planted
+    # (when, indicators, the taint), who handed work over and when, and the
+    # (sender, finding) pairs already reported as delegated escalation.
+    spread: list[tuple[datetime, set[str], dict]] = []
+    delegators: list[tuple[datetime, str]] = []
+    escalations_reported: set[tuple[str, str]] = set()
+    delegation_window = timedelta(minutes=policy.get("delegation_window_minutes", 60))
 
     def report_undeclared(e: dict) -> None:
         nonlocal undeclared_reported
@@ -609,8 +620,18 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
         # behavioural detectors and the permission checks judge the call that
         # fetched it, not the content. Here the content is read for
         # instructions aimed at the agent.
-        if e["event_type"] == injection.EVENT_TYPE:
-            text = injection.content_of(e)
+        # v0.46: work handed over by another agent. Remember who and what it
+        # carried, then read its message like any other content.
+        if e["event_type"] == handoff.RECEIVED:
+            sender = str(meta.get("from") or e.get("target") or "")
+            if sender:
+                delegators.append((ts, sender))
+            taint = meta.get("taint")
+            if isinstance(taint, dict) and taint.get("indicators"):
+                spread.append((ts, {str(i).lower() for i in taint["indicators"]}, taint))
+
+        if e["event_type"] in (injection.EVENT_TYPE, handoff.RECEIVED):
+            text = handoff.content_text(e)
             found = injection.scan(text)
             if found:
                 hidden = any(f["marker"] == "hidden text" for f in found)
@@ -625,10 +646,12 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
                                      injection.summary(found), ts))
                     continue
                 injection_reported.add(seen_key)
+                where = (f"the work handed over by '{meta.get('from', '?')}'"
+                         if e["event_type"] == handoff.RECEIVED else
+                         f"content returned to the agent by {tool} from "
+                         f"{injection.source_of(e)[:120] or 'an unnamed source'}")
                 alerts.append(_mk_alert(e, "high" if hidden else "medium", "prompt_injection",
-                    f"content returned to the agent by {tool} from "
-                    f"{injection.source_of(e)[:120] or 'an unnamed source'} contains "
-                    f"instructions aimed at an AI ({injection.summary(found)})",
+                    f"{where} contains instructions aimed at an AI ({injection.summary(found)})",
                     evidence=injection.evidence(found)[:400]))
                 fresh = injection.planted(injection.indicators(text), own_indicators)
                 injected.append((e, fresh, injection.summary(found), ts))
@@ -639,7 +662,26 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
         # what the agent is known to have used.
         if e["event_type"] == "tool_call":
             text = injection.call_text(e)
-            for src, fresh, markers, src_ts in reversed(injected):
+            # v0.46: something an injection planted in another agent's reading,
+            # passed on in a hand-off, used here. Reported instead of
+            # injection_followed: this agent never read the injection itself.
+            spread_hit = None
+            for when, planted_here, taint in reversed(spread):
+                if ts - when > injection_window:
+                    continue
+                hit = next((i for i in sorted(planted_here, key=len, reverse=True) if i in text), None)
+                if hit:
+                    spread_hit = (hit, when, taint)
+                    break
+            if spread_hit:
+                hit, when, taint = spread_hit
+                chain = " → ".join([str(a) for a in taint.get("via") or []] + [e["actor_id"]])
+                alerts.append(_mk_alert(e, "critical", "injection_spread",
+                    f"called {meta.get('tool') or 'a tool'} with '{hit[:120]}', which was planted by "
+                    f"instructions aimed at an AI ({taint.get('markers') or 'injected content'}) in "
+                    f"{str(taint.get('source') or 'content')[:120]}, read by another agent and passed "
+                    f"on in a hand-off at {str(when)[:19]}; the injection spread {chain}"))
+            for src, fresh, markers, src_ts in ([] if spread_hit else reversed(injected)):
                 if ts - src_ts > injection_window:
                     continue
                 hit = next((i for i in sorted(fresh, key=len, reverse=True) if i in text), None)
@@ -704,8 +746,10 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
         # agent permissions: what this agent was declared to be allowed to do,
         # against what it did. The only detector that needs no baseline -- an
         # agent's very first action can breach its profile.
+        own_breaches: list = []
         if grant.profile is not None:
             breaches = permissions.evaluate(e, grant.profile)
+            own_breaches = breaches
             message = permissions.violation_message(grant, breaches) if breaches else ""
             if breaches and message not in breaches_reported:
                 breaches_reported.add(message)
@@ -713,6 +757,38 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
                     "permission_violation", message))
         else:
             report_undeclared(e)
+
+        # v0.46: a confused deputy. This agent did something its own profile
+        # allows, soon after another agent handed it work, and that other
+        # agent's profile doesn't allow it. Judged only when the sender has a
+        # profile (without one, nothing says what it may do), and not when
+        # that profile lists this agent in allowed_delegates.
+        if e["event_type"] == "tool_call" and not own_breaches and delegators:
+            for when, sender in reversed(delegators):
+                if ts - when > delegation_window or sender == e["actor_id"]:
+                    continue
+                theirs = permissions.resolve(sender, policy)
+                if theirs.profile is None:
+                    continue
+                # Delegation someone planned: the sender's profile names this
+                # agent among the ones it may hand work to. An orchestrator
+                # can't do its workers' jobs by design; that isn't escalation.
+                planned = theirs.profile.get("allowed_delegates")
+                if planned is not None and any(fnmatch.fnmatchcase(e["actor_id"], p) for p in planned):
+                    continue
+                breaches = permissions.evaluate(e, theirs.profile)
+                if not breaches:
+                    continue
+                why = "; ".join(b.reason for b in breaches)
+                if (sender, why) in escalations_reported:
+                    break
+                escalations_reported.add((sender, why))
+                alerts.append(_mk_alert(e, permissions.worst(breaches), "delegated_escalation",
+                    f"did this {str(ts - when).split('.')[0]} after '{sender}' handed it work, and "
+                    f"'{sender}' isn't allowed to do it itself (profile '{theirs.name}': {why}); "
+                    f"'{sender}' may be getting round its limits through this agent",
+                    discriminator=sender))
+                break
 
         # allowlist
         task = e.get("task")
@@ -808,7 +884,7 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
         # still raises its own alert: reporting a sweep once would let a late
         # event move that alert to another step, which reads as history
         # being rewritten.)
-        if e["event_type"] != "completion_claim" and spot is not None:
+        if e["event_type"] not in ("completion_claim", handoff.HANDOFF) and spot is not None:
             window = timedelta(minutes=policy.get("lateral_movement_window_minutes", 15))
             spot_first_seen.setdefault(spot, ts)
             recent_targets.append((ts, spot))

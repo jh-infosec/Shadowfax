@@ -427,3 +427,7 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       180 lines, with the detail in guides under `docs/`.
 - [x] Hosting the demo (`v0.45.0`): `render.yaml` runs it on Render's free
       plan in demo mode, rebuilt on every push to `main`.
+- [x] Following work between agents (`v0.46.0`): hand-offs reported with
+      `Reporter.handoff`, an injection passed from one agent to another caught
+      as `injection_spread`, a confused deputy as `delegated_escalation`, and
+      `allowed_delegates` in profiles.

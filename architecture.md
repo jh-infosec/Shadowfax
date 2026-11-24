@@ -669,6 +669,33 @@ its next request (sessions and users are read from the database each time); the
 dashboard sees the alert on its next refresh, since the event bus lives inside
 the server process.
 
+#### handoff.py
+
+Agents handing work to each other (v0.46). Pure helpers shared by the server
+and `noise.py`: `refusal` (no target, itself, a reserved account),
+`taint_of(sender_events, handoff_event, window)` and `received(event, taint)`.
+When `POST /events` stores an `agent_handoff`, `app._deliver_handoff` reads the
+sender's last day of events, works out the taint, and writes a
+`handoff_received` (a reserved event type) into the receiver's timeline at the
+same timestamp, then both agents are rescanned. Taint means: within the
+prompt-injection window, the sender read content (a tool result, or a tainted
+hand-off of its own) with injection markers, and the hand-off's message
+carries an indicator planted there that the sender hadn't used before. It
+records the source, the markers, the indicators and `via`, the agents it has
+passed through, so chains extend hand-off by hand-off.
+
+Writing the received half into the receiver's own history is what keeps
+detection per actor and pure. In `detectors._scan`, a `handoff_received` is
+content (its message goes through the injection scan, attributed to the
+sender), adds its taint to `spread`, and the sender to `delegators`. A tool
+call that uses a spread indicator raises `injection_spread` and skips the
+`injection_followed` check for that call. A tool call within the receiver's
+own profile but outside the sender's, within `delegation_window_minutes`
+(60), raises `delegated_escalation`, unless the sender has no profile or
+lists the receiver in `allowed_delegates`. `permissions.evaluate` judges an
+`agent_handoff` against `allowed_delegates` instead of the target lists, and
+lateral movement ignores hand-offs.
+
 #### public_demo.py
 
 Demo mode (v0.44), on when `SHADOWFAX_DEMO=1`. At start-up `app._demo_accounts`
@@ -1538,6 +1565,7 @@ intel.py                supply_chain.py         requirements.lock
 LICENSE                 SECURITY.md             ruff.toml
 archive.py              bench.py                suppress.py
 noise.py                public_demo.py          render.yaml
+handoff.py
 CODE_SIGNING.md         .signpath/artifact-configuration.xml
 docs/getting-started.md docs/agents.md          docs/detection.md
 docs/investigation.md   docs/evidence.md        docs/security.md

@@ -123,6 +123,7 @@ def run(url: str, headed: bool) -> int:
             _run_case_notes_checks(browser, url)
             _run_intel_checks(browser, url)
             _run_mute_checks(browser, url)
+            _run_handoff_checks(browser, url)
         except Exception as exc:
             # A component that throws on mount takes the whole page with it, and
             # the first thing to notice is a selector that never appears. Report
@@ -869,6 +870,33 @@ def run_required_2fa(url: str, headed: bool) -> int:
         return 1
     print(f"All {passed} checks passed.")
     return 0
+
+
+def _run_handoff_checks(browser, url: str) -> None:
+    """Hand-offs (v0.46): the scripted attack's fourth act leaves a tainted
+    hand-off on coder-agent-2's timeline. It says so, shows the message as
+    text, and links back to the planner that sent it."""
+    context = browser.new_context(viewport={"width": 1400, "height": 900})
+    page = context.new_page()
+    page.goto(url, wait_until="networkidle")
+    page.fill('input[autocomplete="username"]', USERNAME)
+    page.fill('input[type="password"]', PASSWORD)
+    page.click('button[type="submit"]')
+    page.wait_for_selector(".table-wrap tbody tr", timeout=15000)
+    page.locator(".alert-table tbody tr", has_text="injection_spread").first.click()
+    page.wait_for_selector(".drawer .tl-handoff", timeout=10000)
+    received = page.locator(".drawer .tl-handoff", has_text="work handed over by")
+    check("the coder's timeline shows the hand-off it received, marked tainted",
+          received.count() >= 1 and received.first.locator(".taint-badge").count() == 1
+          and "collect.evil.example" in received.first.inner_text())
+    check("and the alert on its next step is injection_spread",
+          "injection_spread" in page.inner_text(".drawer"))
+    received.first.locator(".tl-agent-link").click()
+    page.wait_for_selector(".drawer-actor:has-text('planner-agent-2')", timeout=10000)
+    check("clicking the sender opens the planner, whose side says who it handed the work to",
+          page.locator(".drawer .tl-handoff", has_text="handed work to").count() >= 1
+          and "prompt_injection" in page.inner_text(".drawer"))
+    context.close()
 
 
 def run_public_demo(url: str, headed: bool) -> int:

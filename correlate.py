@@ -53,6 +53,8 @@ _CATEGORY_PHRASE = {
     "mfa_removed": "two-factor removed from an account",
     "forwarding_failed": "alerts that did not reach the SIEM",
     "evidence_archived": "old events moved into an archive file",
+    "injection_spread": "an injection passed on from another agent",
+    "delegated_escalation": "an agent used to get round another's limits",
 }
 
 

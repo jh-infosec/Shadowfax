@@ -84,7 +84,7 @@ docker compose exec shadowfax python demo.py
 docker exec shadowfax python demo.py --password <the password from the log>
 ```
 
-The attack plays out in four acts against the running instance, and the alerts
+The attack plays out in five acts against the running instance, and the alerts
 show up on the dashboard as it happens. The GIF at the top of this page is a
 recording of it.
 

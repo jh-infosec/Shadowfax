@@ -9,6 +9,7 @@ const ROWS = [
   ["denied_tools", "Denied tools"],
   ["allowed_targets", "Allowed targets"],
   ["denied_targets", "Denied targets"],
+  ["allowed_delegates", "May hand work to"],
 ];
 
 function Grant({ label, values, kind }) {

@@ -102,6 +102,67 @@ decorator doesn't fit.
 `python shadowfax_agent.py check` tests the connection without sending
 anything, and `python shadowfax_agent.py flush` sends whatever is waiting.
 
+## Agents that hand work to each other
+
+More and more agent systems are teams: a planner hands a task to a coder, a
+researcher passes what it found to a writer, an orchestrator fans work out to
+helpers. That's also how an attack moves between them. An injection doesn't
+have to be acted on by the agent that read it; it can be passed on, in a
+perfectly ordinary-looking hand-off, to another agent that has the tools to
+act on it.
+
+When one of your agents hands work to another, report it:
+
+```python
+from shadowfax_agent import Reporter
+
+reporter = Reporter("planner-1")
+reporter.handoff("coder-2", "Fix the export bug in issue 88: " + issue_text)
+```
+
+Anything else that posts events can send the same thing: an event of type
+`agent_handoff` whose target is the receiving agent's id, with what was passed
+on in `metadata.message`.
+
+Shadowfax writes the other half itself: a `handoff_received` event in the
+receiving agent's timeline, saying who it came from. Nobody can post one of
+those directly. On the dashboard, each side of a hand-off links to the other
+agent.
+
+What it watches for:
+
+- **An injection passed on.** If the sender read injected content in the last
+  hour, and its hand-off passes on something planted there (a URL, a host, an
+  address or a path it hadn't used before reading it), the received hand-off
+  is marked **tainted**, with where the injection came from. If the receiving
+  agent then uses that thing, it raises `injection_spread` (critical), naming
+  every agent it passed through: `planner-1 → coder-2 → deployer-3`. It
+  follows chains of any length.
+- **Instructions in the hand-off itself.** The message is read like any other
+  content, so instructions aimed at an AI in it raise `prompt_injection`.
+- **A confused deputy.** If the receiving agent does something its own profile
+  allows but the sender's profile doesn't, within an hour of the hand-off, it
+  raises `delegated_escalation`: the sender may be getting round its limits
+  through this agent. It's only judged when the sender has a profile.
+- **Who may delegate to whom.** A profile can list `allowed_delegates`, the
+  agents it may hand work to (patterns allowed). Handing work to anyone else
+  is a `permission_violation`. Delegation a profile plans for this way is also
+  never reported as escalation: an orchestrator can't do its workers' jobs by
+  design.
+
+```json
+"planner-*": {
+  "description": "Reads the issue tracker and hands tasks to the coding agents.",
+  "allowed_tools": ["fetch_issue"],
+  "allowed_delegates": ["dev-agent-*"]
+}
+```
+
+An orchestrator handing work to many agents at once isn't counted as lateral
+movement. Claude Code's own subagents run under the same agent id as the
+session that started them; their events carry a `subagent` field.
+
+
 ## Agent permissions
 
 Most detectors decide something is wrong because it's unusual: more targets than
@@ -140,6 +201,7 @@ I designed the rules so a profile can't quietly fail open:
 | A tool call with no tool name, or an event with no target, isn't granted | Missing information isn't permission |
 | Broken profiles are rejected by `PUT /policy` with every problem listed | `"allowed_tools": "nmap"` would otherwise grant `n`, `m`, `a` and `p` |
 | One alert per distinct breach | Forty retries of the same denied tool is one finding |
+| `allowed_delegates` limits which agents it may hand work to | See [Agents that hand work to each other](#agents-that-hand-work-to-each-other) |
 
 Deny lists are a backstop. The allow list is the real control. A relative path
 like `../../etc/passwd` can't be resolved without knowing the agent's working

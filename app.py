@@ -49,6 +49,7 @@ import detectors
 import digest as digest_mod
 import envelope
 import forward
+import handoff
 import intel
 import public_demo
 import suppress
@@ -66,7 +67,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.45.0"
+VERSION = "0.46.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -128,6 +129,9 @@ RESERVED_EVENT_TYPES = {
     "events_archived": "nothing -- archive.py records these itself",
     # v0.42: suppression rules created and ended, written by /suppressions.
     suppress.CHANGE_EVENT: "nothing -- Shadowfax records these itself",
+    # v0.46: the receiving half of a hand-off, written by Shadowfax when an
+    # agent reports handing work over (agent_handoff).
+    handoff.RECEIVED: "an agent_handoff from the agent handing the work over",
 }
 
 # Recorded sign-in attempts are operational state for the throttle, not
@@ -311,6 +315,23 @@ def _demo_start(stop: threading.Event) -> None:
     print(f"SHADOWFAX: public demo mode. Visitors can look around read-only; the data resets every "
           f"{public_demo.RESET_MINUTES} minute(s).", flush=True)
     public_demo.start(public_demo.OPERATOR, password, stop, _demo_caller)
+
+
+def _deliver_handoff(conn: sqlite3.Connection, event: dict[str, Any]) -> str:
+    """Write the receiving half of a hand-off into the other agent's timeline
+    (v0.46), marked as tainted if it passes on something an injection planted
+    in what the sender read. Returns the receiving agent's id."""
+    policy = db.get_policy(conn) or DEFAULT_POLICY
+    window = timedelta(minutes=policy.get("prompt_injection_window_minutes", 60))
+    at = timeutil.parse(event["timestamp"])
+    # A day back, so a URL the sender was already using before an injection
+    # mentioned it doesn't count as planted.
+    since = (at - max(window, timedelta(days=1))).isoformat()
+    history = db.get_events_for_actor_since(conn, event["actor_id"], since)
+    taint = handoff.taint_of(history, event, window)
+    received = handoff.received(event, taint)
+    db.insert_event(conn, received)
+    return received["actor_id"]
 
 
 def _refuse_shared_visitor(identity: dict[str, Any]) -> None:
@@ -929,6 +950,10 @@ def ingest_events(events: list[EventRequest], response: Response,
                                  f"event; use {RESERVED_EVENT_TYPES[reserved[0]]}")
     for ev in events:
         _refuse_reserved_actor(ev.actor_id)
+        if ev.event_type == handoff.HANDOFF:
+            why = handoff.refusal(ev.model_dump(), RESERVED_ACTORS)
+            if why:
+                raise HTTPException(400, why)
     if len(events) > LIMITS.max_events_per_request:
         # Each affected actor is rescanned, so the batch bounds the work one
         # request can cause. 413 with the number, so a client can split.
@@ -939,8 +964,11 @@ def ingest_events(events: list[EventRequest], response: Response,
     with db.get_conn() as conn:
         affected_actors: set[str] = set()
         for ev in events:
-            db.insert_event(conn, ev.model_dump())
+            event = ev.model_dump()
+            event["id"] = db.insert_event(conn, event)
             affected_actors.add(ev.actor_id)
+            if ev.event_type == handoff.HANDOFF:
+                affected_actors.add(_deliver_handoff(conn, event))
         new_alerts: list[dict[str, Any]] = []
         for actor_id in affected_actors:
             new_alerts.extend(_rescan_after_ingest(conn, actor_id, identity))
