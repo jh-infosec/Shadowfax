@@ -67,7 +67,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.46.0"
+VERSION = "0.47.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -1313,7 +1313,7 @@ def actor_detail(actor_id: str, identity: dict = Depends(require_role("viewer"))
         risk = db.actor_risk_scores(conn).get(actor_id, EMPTY_RISK)
         policy = db.get_policy(conn) or DEFAULT_POLICY
         return {"actor_id": actor_id, "events": events, "alerts": alerts, "risk": risk,
-                "permissions": permissions.describe(actor_id, policy),
+                "permissions": permissions.describe(actor_id, policy, detectors.session_of(events)),
                 "manifest": manifest.describe(events, policy),
                 "subject_report": subjects.report(actor_id, events, alerts)}
 
@@ -1438,10 +1438,13 @@ def actor_permissions(
     """
     with db.get_conn() as conn:
         policy = db.get_policy(conn) or DEFAULT_POLICY
-    out = {"actor_id": actor_id, **permissions.describe(actor_id, policy)}
+        # A Claude Code subagent (`<session>:<type>`) works under its session's
+        # profile when it has none of its own (v0.47), once its events say so.
+        session = detectors.session_of(db.get_events_for_actor(conn, actor_id)) if ":" in actor_id else None
+    out = {"actor_id": actor_id, **permissions.describe(actor_id, policy, session)}
     if tool is not None or target is not None:
         out["check"] = {"tool": tool, "target": target,
-                        **permissions.check(actor_id, policy, tool, target, actor_type)}
+                        **permissions.check(actor_id, policy, tool, target, actor_type, session)}
     return out
 
 

@@ -141,6 +141,9 @@ def _workdays():
 def coding_agent(rng: random.Random, clock: Clock, agent_id: str) -> list[dict]:
     """Claude Code sessions, through the connector's own event builders."""
     out = []
+    # The subagents draw from their own stream, so adding them in v0.47 left
+    # every other actor's two weeks exactly as they were.
+    sub = random.Random(f"{agent_id}-subagents")
     for day in _workdays():
         for _session in range(rng.randint(2, 4)):
             t = day + timedelta(hours=rng.uniform(8.0, 17.0))
@@ -174,7 +177,38 @@ def coding_agent(rng: random.Random, clock: Clock, agent_id: str) -> list[dict]:
                 out += clock.stamp([agent.call_event(agent_id, tool, args, timestamp=ts,
                                                      extra={"session_id": f"s-{day:%m%d}", "exit_status": "ok"}),
                                     agent.result_event(agent_id, tool, args, output, timestamp=ts)])
+            if sub.random() < 0.3:
+                out += explore_subagent(sub, clock, agent_id, t)
     return out
+
+
+def explore_subagent(rng: random.Random, clock: Clock, agent_id: str, t: datetime) -> list[dict]:
+    """v0.47: a session sends Claude Code's Explore subagent to look something
+    up, through the same hook code a real session runs."""
+    run = f"sub{clock.next_id}"
+    hook = lambda payload, when: agent.hook_events({"session_id": "s", **payload}, agent_id,   # noqa: E731
+                                                   timestamp=_iso(when))
+    out = hook({"hook_event_name": "PreToolUse", "tool_name": "Agent",
+                "tool_input": {"description": "Find the order total code", "subagent_type": "Explore",
+                               "prompt": "Find every place that builds an order total and list the files."}}, t)
+    for _ in range(rng.randint(4, 10)):
+        t += timedelta(seconds=rng.randint(2, 20))
+        if rng.random() < 0.7:
+            payload = {"tool_name": "Grep", "tool_input": {"pattern": "total", "path": "/home/dev/shop"},
+                       "tool_response": "src/models.py:40:    total = sum(line.price for line in lines)"}
+        else:
+            url, text = rng.choice(DOC_PAGES)
+            payload = {"tool_name": "WebFetch", "tool_input": {"url": url, "prompt": "What does it say?"},
+                       "tool_response": text}
+        out += hook({"hook_event_name": "PostToolUse", "agent_id": run, "agent_type": "Explore", **payload}, t)
+    t += timedelta(seconds=5)
+    out += hook({"hook_event_name": "SubagentStop", "agent_id": run, "agent_type": "Explore",
+                 "last_assistant_message": "Order totals are built in src/models.py and src/routes/orders.py. "
+                                           "The rounding follows https://docs.python.org/3/library/pathlib.html"}, t)
+    out += hook({"hook_event_name": "PostToolUse", "tool_name": "Agent",
+                 "tool_input": {"subagent_type": "Explore", "prompt": "Find every place that builds an order total."},
+                 "tool_response": {"status": "completed"}}, t)
+    return clock.stamp(out)
 
 
 def research_agent(rng: random.Random, clock: Clock, agent_id: str) -> list[dict]:
@@ -304,7 +338,9 @@ def benign_events(seed: int = SEED) -> dict[str, list[dict]]:
         (research_agent, "research-bot-1"), (ci_runner, "ci-runner-1"), (ops_agent, "ops-agent-1"),
         (backup_service, "backup-svc"), (planner, "planner-1")]
     for make, actor in makers:
-        by_actor[actor] = make(rng, clock, actor)
+        by_actor.setdefault(actor, [])
+        for e in make(rng, clock, actor):       # a session's subagents report under their own ids
+            by_actor.setdefault(e["actor_id"], []).append(e)
     for user, geo in (("alice", "ZA"), ("bob", "ZA"), ("carol", "GB")):
         by_actor[user] = person(rng, clock, user, geo)
     deliver(by_actor, clock)
@@ -325,7 +361,8 @@ def profiled_policy() -> dict:
     p = shipped_policy()
     p["agent_permissions"]["profiles"].update({
         "dev-agent-*": {"description": "Coding agents working on the shop repository.",
-                        "allowed_tools": ["Read", "Edit", "Write", "Grep", "Glob", "Bash", "WebFetch", "WebSearch"],
+                        "allowed_tools": ["Read", "Edit", "Write", "Grep", "Glob", "Bash", "WebFetch", "WebSearch",
+                                          "Agent"],
                         "denied_targets": ["~/.ssh/*", "~/.aws/*", "/etc/*"]},
         "research-bot-*": {"description": "Reads public news and writes a daily digest.",
                            "allowed_tools": ["fetch_page"]},

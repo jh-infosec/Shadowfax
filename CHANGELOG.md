@@ -1,5 +1,43 @@
 # Changelog
 
+## Version 0.47.0
+
+Claude Code subagents, followed automatically.
+
+### What's new
+
+- **Subagents are hand-offs.** When Claude Code starts a subagent, the
+  connector reports it as a hand-off from the session to the subagent, with
+  the prompt as the message. Inside the subagent, everything is reported under
+  its own id, `<session>:<type>` (for example `ai-agent-laptop:Explore`), and
+  when it finishes, its final answer goes back to the session as a hand-off.
+  So `injection_spread` catches an injection travelling either way, with no
+  setup beyond the hooks.
+- **Two new hooks:** `PreToolUse` (on the Agent tool only) and
+  `SubagentStop`. Run `python shadowfax_agent.py claude-code --write
+  ~/.claude/settings.json` again to add them.
+- **A subagent works under its session's profile** until it has one of its
+  own, so it can't be used to get round the session's limits. The dashboard
+  and the permission check endpoint say when a profile comes from the
+  session.
+- **One `undeclared_agent` per session,** not one per subagent type.
+- **Dormancy:** an agent that was just handed work isn't reported as a
+  dormant reappearance. A subagent wakes when its session asks it to.
+- **The noise measurement** now has Explore subagents in about a third of
+  the coding sessions, about 500 more events. They add no alerts: 0.95 per
+  1,000 events as shipped and 0.4 with profiles, both within budget.
+
+### Tested
+
+- 1,216 API checks, on SQLite and on PostgreSQL. The 16 new ones cover the
+  hooks starting a subagent, its own id, its answer going back, an injection
+  spreading down into a subagent and back up out of one, the session's
+  profile applying to its subagents (and the API saying so), a profile of the
+  subagent's own, an agent that only claims a session, and dormancy with and
+  without a hand-off.
+- Eleven mutations to the subagent logic, each caught by the API suite or
+  `noise.py`.
+
 ## Version 0.46.0
 
 Following work between agents.

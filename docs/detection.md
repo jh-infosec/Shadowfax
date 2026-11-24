@@ -12,6 +12,9 @@ and runs every detector over it:
 - three coding agents working through Claude Code, reported through the real
   connector code, reading and editing files, running tests and git, and
   reading documentation
+- the Explore subagents those sessions send to look things up, about one
+  session in three, each reporting under its own id and handing its summary
+  back
 - a planner that reads the issue tracker each morning and hands each coding
   agent a task
 - a research agent reading the news, including security articles that quote
@@ -34,10 +37,10 @@ python noise.py --check   # what CI runs
 
 | | Policy as shipped | With a profile per agent |
 | --- | ---: | ---: |
-| Events | 12,088 | 12,088 |
+| Events | 12,604 | 12,604 |
 | Alerts | 12 | 5 |
-| Alerts per 1,000 events | 0.99 | 0.41 |
-| Actors with any alert | 8 of 11 | 3 of 11 |
+| Alerts per 1,000 events | 0.95 | 0.4 |
+| Actors with any alert | 8 of 14 | 3 of 14 |
 | Attacks caught | 14 of 14 | 16 of 16 |
 
 | Benign alerts by category | Policy as shipped | With a profile per agent |
@@ -50,7 +53,8 @@ python noise.py --check   # what CI runs
 What's left, and why it stays:
 
 - `undeclared_agent` is once per agent that has no profile. That's the
-  prompt to write one, and it goes away when you do.
+  prompt to write one, and it goes away when you do. A Claude Code subagent
+  doesn't get one of its own: its session's alert covers it.
 - `prompt_injection` fires once for each of the two security articles that
   quote injection phrases. It can't tell an explanation from an instruction,
   so it reports each page once. If an agent then acts on the page,

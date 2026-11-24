@@ -57,7 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-VERSION = "0.46.0"
+VERSION = "0.47.0"
 DEFAULT_URL = "http://127.0.0.1:8000"
 ACTOR_TYPE = "ai_agent"
 
@@ -678,45 +678,99 @@ def _detail(reply: Any) -> str:
 
 # -- Claude Code hooks -------------------------------------------------------------
 
-HOOK_EVENTS = ("PostToolUse", "PostToolUseFailure")
+HOOK_EVENTS = ("PostToolUse", "PostToolUseFailure", "PreToolUse", "SubagentStop")
+# v0.47: the tool Claude Code starts a subagent with ("Task" before it was
+# renamed), and the subagent type it gets when none is named.
+SUBAGENT_TOOLS = ("Agent", "Task")
+DEFAULT_SUBAGENT = "general-purpose"
+# Which tools each hook event is registered for: PreToolUse only matters for
+# starting a subagent, so it isn't run before every other tool call.
+HOOK_MATCHERS = {"PostToolUse": "*", "PostToolUseFailure": "*", "PreToolUse": "|".join(SUBAGENT_TOOLS),
+                 "SubagentStop": "*"}
+
+
+def subagent_id(parent: str, agent_type: Any) -> str:
+    """The id a Claude Code subagent reports under (v0.47): its session's
+    agent id and its type, e.g. `ai-agent-laptop:Explore`. Every run of the
+    same type shares it, so a profile can be written for it, and until one
+    is, Shadowfax judges it by its session's profile."""
+    kind = str(agent_type or DEFAULT_SUBAGENT).strip() or DEFAULT_SUBAGENT
+    return f"{parent}:{kind}"[:200]
 
 
 def hook_events(payload: dict[str, Any], agent_id: str, task: str | None = None,
-                skip_mcp: bool = False) -> list[dict[str, Any]]:
+                skip_mcp: bool = False, timestamp: str | None = None) -> list[dict[str, Any]]:
     """Shadowfax events for one Claude Code hook call.
 
     PostToolUse gives both halves at once: the call (what the tool was asked
     to do) and the result (what came back). They share a timestamp and go in
     that order, so the result is never seen before its call. PostToolUseFailure
     is the call alone, marked failed.
+
+    v0.47, subagents. Starting one (PreToolUse on the Agent tool) is a hand-off
+    from the session to the subagent, with its prompt as the message. Inside
+    the subagent, every hook carries `agent_id`, and its tool calls are
+    reported under the subagent's own id. When it finishes (SubagentStop), its
+    last message goes back to the session as a hand-off the other way. So an
+    injection is followed whichever way it travels. The Agent tool's own
+    result isn't reported as content as well: SubagentStop already carries it.
     """
     name = payload.get("hook_event_name")
-    tool = payload.get("tool_name")
-    if name not in HOOK_EVENTS or not isinstance(tool, str) or not tool:
+    if name not in HOOK_EVENTS:
         return []
-    if skip_mcp and tool.startswith("mcp__"):
-        return []
-    args = payload.get("tool_input")
+    ts = timestamp or now_iso()
     common: dict[str, Any] = {"session_id": payload.get("session_id"),
                               "tool_use_id": payload.get("tool_use_id")}
-    if payload.get("agent_type"):
+    inside = payload.get("agent_id")
+    actor = agent_id
+    if inside:
+        actor = subagent_id(agent_id, payload.get("agent_type"))
+        common.update({"subagent": payload.get("agent_type"), "subagent_run": inside, "parent_agent": agent_id})
+    elif payload.get("agent_type"):
         common["subagent"] = payload["agent_type"]
+
+    if name == "SubagentStop":
+        message = payload.get("last_assistant_message")
+        if not isinstance(message, str) or not message.strip():
+            return []
+        extra = {k: v for k, v in common.items() if v is not None and k != "tool_use_id"}
+        extra["direction"] = "result"
+        return [handoff_event(actor, agent_id, message, task=task, extra=extra, timestamp=ts)]
+
+    tool = payload.get("tool_name")
+    if not isinstance(tool, str) or not tool:
+        return []
+    args = payload.get("tool_input")
+
+    if name == "PreToolUse":
+        if tool not in SUBAGENT_TOOLS or not isinstance(args, dict):
+            return []
+        child = subagent_id(agent_id, args.get("subagent_type"))
+        message = args.get("prompt") or args.get("description") or ""
+        extra = {k: v for k, v in common.items() if v is not None}
+        extra.update({"direction": "task", "description": args.get("description")})
+        return [handoff_event(actor, child, message, task=task,
+                              extra={k: v for k, v in extra.items() if v is not None}, timestamp=ts)]
+
+    if skip_mcp and tool.startswith("mcp__"):
+        return []
     if payload.get("duration_ms") is not None:
         common["duration_ms"] = payload["duration_ms"]
     server = payload.get("mcp_server")
     if isinstance(server, dict) and server.get("name"):
         common["mcp_server"] = server.get("name")
     common = {k: v for k, v in common.items() if v is not None}
-    ts = now_iso()
     if name == "PostToolUse":
-        call = call_event(agent_id, tool, args, task=task, timestamp=ts,
+        call = call_event(actor, tool, args, task=task, timestamp=ts,
                           extra={**common, "exit_status": "ok"})
-        result = result_event(agent_id, tool, args, payload.get("tool_response"), task=task,
+        if tool in SUBAGENT_TOOLS:
+            return [call]
+        result = result_event(actor, tool, args, payload.get("tool_response"), task=task,
                               timestamp=ts, extra=common)
         return [call, result]
     failure = {**common, "exit_status": "interrupted" if payload.get("is_interrupt") else "error",
                "error": str(payload.get("error") or "")}
-    return [call_event(agent_id, tool, args, task=task, timestamp=ts, extra=failure)]
+    return [call_event(actor, tool, args, task=task, timestamp=ts, extra=failure)]
 
 
 def run_hook(stdin: Any = None, config: Config | None = None, transport: Any = None) -> int:
@@ -751,7 +805,7 @@ def claude_code_settings(python: str | None = None, script: str | None = None) -
     """
     entry = {"type": "command", "command": python or sys.executable,
              "args": [script or str(Path(__file__).resolve()), "hook"], "timeout": 15}
-    return {"hooks": {name: [{"matcher": "*", "hooks": [entry]}] for name in HOOK_EVENTS}}
+    return {"hooks": {name: [{"matcher": HOOK_MATCHERS[name], "hooks": [entry]}] for name in HOOK_EVENTS}}
 
 
 def _is_ours(hook: Any) -> bool:

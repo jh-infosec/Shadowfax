@@ -54,7 +54,8 @@ export default function PermissionsPanel({ permissions, actorType }) {
         <div className="perm-profile">
           <code>{profile}</code>
           <span className="perm-match">
-            {matched_by === "exact" ? "declared for this actor" : "matched by pattern"}
+            {matched_by === "exact" ? "declared for this actor"
+              : matched_by === "session" ? "its Claude Code session's profile" : "matched by pattern"}
           </span>
         </div>
         {description && <div className="perm-desc">{description}</div>}

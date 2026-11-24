@@ -492,7 +492,13 @@ client:
   hook always exits 0 and prints nothing: in Claude Code, exit code 2 blocks the
   tool and stdout can be read as instructions, and a monitor must do neither.
   The hook block is written in exec form (`command` plus `args`) so no shell
-  parses the paths.
+  parses the paths. Since v0.47, `PreToolUse` (matched to `Agent|Task` only)
+  turns starting a subagent into an `agent_handoff` to `<agent>:<type>` with
+  the prompt as its message; hooks fired inside a subagent carry `agent_id`
+  and are reported under that id with `metadata.parent_agent`; and
+  `SubagentStop` turns the subagent's `last_assistant_message` into a
+  hand-off back. The Agent tool's own `PostToolUse` is reported as the call
+  only, since `SubagentStop` already carries the result.
 - **An MCP stdio proxy.** Relays newline-delimited JSON-RPC between client and
   server byte for byte, observing a copy. A request is observed before it is
   forwarded, so its response can never arrive first. `tools/list` results become
@@ -695,6 +701,16 @@ own profile but outside the sender's, within `delegation_window_minutes`
 lists the receiver in `allowed_delegates`. `permissions.evaluate` judges an
 `agent_handoff` against `allowed_delegates` instead of the target lists, and
 lateral movement ignores hand-offs.
+
+Subagents (v0.47). `detectors._session_of` believes an event's
+`metadata.parent_agent` only when the actor id is `<parent>:<something>`, so
+naming a parent can't borrow anyone's standing. For such an actor,
+`permissions.resolve(actor_id, policy, session)` falls back to the session's
+profile (`matched_by: "session"`) when the subagent has none of its own;
+`undeclared_agent` is left to the session; and the API's actor and permission
+endpoints pass the session through `detectors.session_of(events)` so they
+agree with the detector. Separately, `dormant_reappearance` is skipped for any
+agent within `delegation_window_minutes` of being handed work.
 
 #### public_demo.py
 

@@ -109,7 +109,7 @@ class Resolution:
     """Which profile governs an actor, and why."""
     name: str | None
     profile: dict[str, Any] | None
-    matched_by: str | None  # "exact", "pattern", or None when undeclared
+    matched_by: str | None  # "exact", "pattern", "session" (v0.47), or None when undeclared
 
 
 @dataclass(frozen=True)
@@ -143,9 +143,10 @@ def _literal_length(pattern: str) -> int:
     return len(pattern) - pattern.count("*") - pattern.count("?")
 
 
-def resolve(actor_id: str, policy: dict[str, Any]) -> Resolution:
+def resolve(actor_id: str, policy: dict[str, Any], session: str | None = None) -> Resolution:
     """The profile for `actor_id`: an exact key first, else the most specific
-    matching pattern.
+    matching pattern, else (v0.47) the profile of the Claude Code `session`
+    that started it, when it's a subagent with none of its own.
 
     "Most specific" is the pattern with the most literal characters, so
     `recon-agent-prod-*` beats `recon-agent-*` beats `*`. Ties break on the
@@ -160,6 +161,10 @@ def resolve(actor_id: str, policy: dict[str, Any]) -> Resolution:
     matches = [p for p in profiles
                if any(c in p for c in "*?[") and fnmatch.fnmatchcase(actor_id, p)]
     if not matches:
+        if session and session != actor_id:
+            theirs = resolve(session, policy)
+            if theirs.profile is not None:
+                return Resolution(theirs.name, theirs.profile, "session")
         return Resolution(None, None, None)
     best = min(matches, key=lambda p: (-_literal_length(p), p))
     return Resolution(best, profiles[best], "pattern")
@@ -295,9 +300,9 @@ def undeclared_message(actor_id: str) -> str:
 
 # -- describing it to people ---------------------------------------------------
 
-def describe(actor_id: str, policy: dict[str, Any]) -> dict[str, Any]:
+def describe(actor_id: str, policy: dict[str, Any], session: str | None = None) -> dict[str, Any]:
     """The governing profile for an actor, shaped for the API and dashboard."""
-    r = resolve(actor_id, policy)
+    r = resolve(actor_id, policy, session)
     profile = r.profile or {}
     return {
         "enabled": enabled(policy),
@@ -310,13 +315,14 @@ def describe(actor_id: str, policy: dict[str, Any]) -> dict[str, Any]:
 
 
 def check(actor_id: str, policy: dict[str, Any], tool: str | None = None,
-          target: str | None = None, actor_type: str = GOVERNED_ACTOR_TYPE) -> dict[str, Any]:
+          target: str | None = None, actor_type: str = GOVERNED_ACTOR_TYPE,
+          session: str | None = None) -> dict[str, Any]:
     """Would this action be reported? The detector's own answer, asked ahead.
 
     Only the parts asked about are judged: asking about a tool alone does not
     fail for want of a target.
     """
-    r = resolve(actor_id, policy)
+    r = resolve(actor_id, policy, session)
     if r.profile is None:
         undeclared = actor_type == GOVERNED_ACTOR_TYPE and alerts_on_unprofiled(policy)
         return {

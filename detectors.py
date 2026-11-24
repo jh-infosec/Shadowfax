@@ -386,6 +386,25 @@ def run_for_actor(events: list[dict[str, Any]], policy: dict[str, Any],
     return alerts
 
 
+def _session_of(e: dict) -> str | None:
+    """The Claude Code session a subagent's event came from (v0.47), or None.
+    Only believed when the actor's own id says so too (`<session>:<type>`),
+    so naming a parent can't lend an unrelated agent someone else's standing."""
+    parent = (e.get("metadata") or {}).get("parent_agent")
+    if isinstance(parent, str) and parent and str(e.get("actor_id", "")).startswith(parent + ":"):
+        return parent
+    return None
+
+
+def session_of(events: list[dict]) -> str | None:
+    """The session an actor's events say it's a subagent of, if any (v0.47)."""
+    for e in events:
+        session = _session_of(e)
+        if session is not None:
+            return session
+    return None
+
+
 def start_scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | None",
                alerts: list[dict[str, Any]]):
     """A scan of one actor's events that can be resumed (v0.41).
@@ -429,6 +448,10 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
     # Agent permissions (v0.16). Resolved once: every event here is one actor's,
     # and a profile belongs to the actor, not to the event.
     grant = permissions.resolve(actor_id, policy)
+    # v0.47: a Claude Code subagent (`<session>:<type>`) with no profile of its
+    # own works under its session's, so starting one is never a way out of
+    # the session's limits. Settled by the first event that names the session.
+    session_checked = grant.profile is not None
     undeclared_reported = False
     # One alert per distinct breach, on its first occurrence. An agent that
     # retries a denied tool forty times has committed one breach forty times;
@@ -465,7 +488,10 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
         nonlocal undeclared_reported
         # Once per actor, on its first action: the finding is that nobody
         # declared this agent, which is true of the agent, not of each event.
+        # v0.47: a Claude Code subagent is covered by its session's own
+        # declaration; one undeclared_agent for the session, not one per type.
         if (not undeclared_reported and grant.profile is None
+                and _session_of(e) is None
                 and e["actor_type"] == permissions.GOVERNED_ACTOR_TYPE
                 and permissions.alerts_on_unprofiled(policy)):
             undeclared_reported = True
@@ -481,6 +507,11 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
             continue
         ts = timeutil.parse(e["timestamp"])
         meta = e.get("metadata") or {}
+        session = None if session_checked else _session_of(e)
+        if session is not None:
+            session_checked = True
+            if grant.profile is None:
+                grant = permissions.resolve(actor_id, policy, session)
 
         # Ingested findings (v0.11).
         #
@@ -814,7 +845,12 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
         # alerting on that would train an analyst to ignore the category. The
         # exemption lives in the policy rather than in a hardcoded name here, so
         # detectors stay a pure function of (events, policy).
-        if (last_seen is not None and e["actor_id"] not in PLATFORM_ACTORS
+        #
+        # v0.47: nor an agent another agent just handed work to. A subagent
+        # that runs only when its session starts it isn't reappearing on its
+        # own after a quiet week; it was asked to.
+        woken = bool(delegators) and ts - delegators[-1][0] <= delegation_window
+        if (last_seen is not None and not woken and e["actor_id"] not in PLATFORM_ACTORS
                 and e["actor_id"] not in policy.get("dormancy_exempt_actors", [])):
             gap = ts - last_seen
             if gap >= timedelta(minutes=policy.get("dormancy_threshold_minutes", 120)):

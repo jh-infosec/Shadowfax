@@ -39,7 +39,8 @@ block anything.
 - **Follows work between agents.** When one agent hands work to another,
   Shadowfax follows it: an injection one agent read and passed on is caught
   when another acts on it, and so is a restricted agent getting a
-  better-equipped one to do what it can't.
+  better-equipped one to do what it can't. Claude Code's subagents are
+  followed this way automatically.
 - **Puts it in context.** Every alert is mapped to MITRE ATT&CK or ATLAS,
   related alerts become incidents, and an attack that moves through the kill
   chain in order is flagged.
@@ -56,15 +57,16 @@ block anything.
 
 ## How well it works
 
-- **Noise:** on two weeks of ordinary work (about 12,000 events from coding
-  agents and the planner handing them work, a research agent, a CI runner, an
-  ops agent, a nightly backup and three people) it raises **0.99 alerts per 1,000 events** with the policy it
-  ships with, and **0.41** once each agent has a profile, while catching all
+- **Noise:** on two weeks of ordinary work (about 12,600 events from coding
+  agents and their subagents, the planner handing them work, a research agent,
+  a CI runner, an ops agent, a nightly backup and three people) it raises
+  **0.95 alerts per 1,000 events** with the policy it ships with, and
+  **0.4** once each agent has a profile, while catching all
   14 attacks in the same run (16 with profiles). CI fails if either number gets
   worse. [How that's measured](docs/detection.md#how-noisy-is-it).
 - **Speed:** recording an event takes about 10 ms whether the agent has 1,000
   events of history or 50,000. [The benchmark](docs/evidence.md#recording-stays-fast).
-- **Tests:** every push runs 1,200 API checks on SQLite and again on
+- **Tests:** every push runs 1,216 API checks on SQLite and again on
   PostgreSQL, 93 checks in a real browser, the desktop app's own tests, the
   scripted attack against the built image, and vulnerability and code
   scanning. [What CI checks](docs/development.md#continuous-integration).
@@ -180,6 +182,7 @@ in [ROADMAP.md](ROADMAP.md). The most recent versions:
 | 0.44 | A public demo mode, and this shorter README |
 | 0.45 | One-click hosting for the demo on Render, and code signing through SignPath |
 | 0.46 | Following work between agents: injections that spread, and confused deputies |
+| 0.47 | Claude Code subagents followed automatically, as hand-offs |
 
 ## Licence
 

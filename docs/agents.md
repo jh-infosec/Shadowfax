@@ -31,12 +31,40 @@ The agent is named after the computer unless you pass `--agent-id`. Give it a
 python shadowfax_agent.py claude-code --write ~/.claude/settings.json
 ```
 
-That adds two hooks to Claude Code's settings and leaves everything else in
-the file alone (the old file is kept as `settings.json.bak`). Restart Claude
-Code. From then on, every tool it uses is reported as a `tool_call`, and what
-the tool gave back as a `tool_result`, so a poisoned web page or file is caught
-the moment Claude reads it. Leave out `--write` to just print the settings.
-The same hooks work for agents built on the Claude Agent SDK.
+That adds Shadowfax's hooks to Claude Code's settings and leaves everything
+else in the file alone (the old file is kept as `settings.json.bak`). Restart
+Claude Code. From then on, every tool it uses is reported as a `tool_call`, and
+what the tool gave back as a `tool_result`, so a poisoned web page or file is
+caught the moment Claude reads it. Leave out `--write` to just print the
+settings. The same hooks work for agents built on the Claude Agent SDK.
+
+**Subagents.** When Claude Code sends work to a subagent (Explore, Plan, the
+general-purpose one or your own), Shadowfax sees it as one agent
+[handing work to another](#agents-that-hand-work-to-each-other), with nothing
+extra to set up:
+
+- Starting the subagent is a hand-off from the session to it, carrying the
+  prompt it was given.
+- The subagent reports under its own id, the session's id and its type, for
+  example `ai-agent-laptop:Explore`. Its events name the session they came
+  from.
+- When it finishes, its final answer goes back to the session as a hand-off
+  the other way.
+
+So an injection is followed whichever way it travels: a poisoned page the
+session read and passed down in a prompt, or one the subagent read and
+carried back up in its summary. The subagent's own reading is checked for
+injections like any other agent's.
+
+A subagent with no profile of its own works under its session's, so starting
+one is never a way round the session's limits, and it doesn't raise an
+`undeclared_agent` of its own. To give a subagent different permissions, add
+a profile under its own id. It isn't reported as dormant when its session
+starts it again after a quiet spell, since being asked is why it woke up.
+
+If you set up the hooks before v0.47, run the `claude-code --write` command
+again to add the two new ones (`PreToolUse` for the Agent tool, and
+`SubagentStop`).
 
 ![A Claude Code session reading a poisoned changelog and then running the curl it asked for, as alerts in Shadowfax](screenshots/claude-code.png)
 
@@ -159,8 +187,8 @@ What it watches for:
 ```
 
 An orchestrator handing work to many agents at once isn't counted as lateral
-movement. Claude Code's own subagents run under the same agent id as the
-session that started them; their events carry a `subagent` field.
+movement. Claude Code's own subagents are reported this way automatically:
+see [Claude Code](#claude-code).
 
 
 ## Agent permissions

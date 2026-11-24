@@ -431,3 +431,7 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       `Reporter.handoff`, an injection passed from one agent to another caught
       as `injection_spread`, a confused deputy as `delegated_escalation`, and
       `allowed_delegates` in profiles.
+- [x] Claude Code subagents (`v0.47.0`): starting one and its answer coming
+      back are reported as hand-offs automatically, each subagent under its
+      own id and its session's profile, so an injection crossing between a
+      session and its subagents is caught with no extra setup.
