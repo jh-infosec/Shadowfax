@@ -1,0 +1,17 @@
+# Shadowfax's public demo on Render (v0.45). In Render: New, then Blueprint,
+# then pick this repository. It builds the Dockerfile here and starts it in
+# demo mode on the free plan. See docs/public-demo.md.
+services:
+  - type: web
+    name: shadowfax-demo
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: SHADOWFAX_DEMO
+        value: "1"
+      # The image listens on 8000; this tells Render to send traffic there.
+      - key: PORT
+        value: "8000"

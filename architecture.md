@@ -1537,7 +1537,8 @@ demo_gif.py             docs/demo.gif           shadowfax_agent.py
 intel.py                supply_chain.py         requirements.lock
 LICENSE                 SECURITY.md             ruff.toml
 archive.py              bench.py                suppress.py
-noise.py                public_demo.py
+noise.py                public_demo.py          render.yaml
+CODE_SIGNING.md         .signpath/artifact-configuration.xml
 docs/getting-started.md docs/agents.md          docs/detection.md
 docs/investigation.md   docs/evidence.md        docs/security.md
 docs/development.md     docs/tour.md            docs/public-demo.md

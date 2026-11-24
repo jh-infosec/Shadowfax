@@ -57,7 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-VERSION = "0.44.0"
+VERSION = "0.45.0"
 DEFAULT_URL = "http://127.0.0.1:8000"
 ACTOR_TYPE = "ai_agent"
 

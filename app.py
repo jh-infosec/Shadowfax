@@ -66,7 +66,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.44.0"
+VERSION = "0.45.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -409,6 +409,8 @@ def _bootstrap_admin(conn: sqlite3.Connection) -> None:
     username = os.environ.get("SHADOWFAX_ADMIN_USERNAME") or "admin"
     password = os.environ.get("SHADOWFAX_ADMIN_PASSWORD") or None
     generate = os.environ.get("SHADOWFAX_GENERATE_ADMIN_PASSWORD", "") not in ("", "0", "false")
+    # v0.45: a public demo never starts with admin/admin, however it's run.
+    generate = generate or public_demo.ENABLED
 
     source = "environment"
     if password is None:

@@ -380,6 +380,8 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       critical and high alerts, the open critical count, and a tray icon. Locked
       to one origin, sandboxed, with Electron fuses on.
 - [ ] Code-sign the Windows installer, so SmartScreen stops warning about it.
+      `v0.45.0` has the policy page and the signing step in CI; it switches on
+      once SignPath Foundation approves the project.
 - [x] PostgreSQL support (`v0.32.0`): set `SHADOWFAX_DATABASE_URL`; SQLite is
       still the default. The whole API suite runs against both.
 - [x] Multi-user support: accounts and roles (`v0.23`, `v0.24`), two-factor
@@ -423,3 +425,5 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
 - [x] A public demo (`v0.44.0`): `SHADOWFAX_DEMO=1` adds a read-only visitor
       sign-in and replays the scripted attack every hour. The README is now
       180 lines, with the detail in guides under `docs/`.
+- [x] Hosting the demo (`v0.45.0`): `render.yaml` runs it on Render's free
+      plan in demo mode, rebuilt on every push to `main`.

@@ -1,5 +1,41 @@
 # Changelog
 
+## Version 0.45.0
+
+Getting the demo online and the installer signed.
+
+### What's new
+
+- **`render.yaml`** runs the public demo on Render's free plan: in Render,
+  choose **New**, then **Blueprint**, and pick this repository. It builds the
+  Dockerfile, starts it with `SHADOWFAX_DEMO=1` on port 8000, checks
+  `/healthz`, and rebuilds on every push to `main`. `docs/public-demo.md` has
+  the steps and what the free plan means (it sleeps after 15 idle minutes and
+  takes about a minute to wake).
+- **Code signing, ready to switch on.** SignPath Foundation signs open source
+  projects for free once they're approved. This version has what they ask
+  for:
+  - `CODE_SIGNING.md`: what's signed (only the Windows installer, only as
+    built by CI from a release), who approves it, and the desktop app's
+    privacy statement. The README links it.
+  - `.signpath/artifact-configuration.xml`, to paste into SignPath, which
+    refuses anything that isn't the installer or doesn't say it's Shadowfax.
+  - A signing step in the release job. It sends the exact installer the
+    Windows job built and tested, waits up to two hours for a manual approval,
+    and attaches the signed file in place of the unsigned one. It only runs
+    once the SignPath repository variables are set, so releases carry on
+    unsigned until then.
+
+### Tested
+
+- 1,179 API checks, on SQLite and on PostgreSQL. The 7 new ones check the
+  Render blueprint, the policy page's required wording, the artifact
+  configuration, and where the signing steps sit in the release job and what
+  switches them on. The link checker now covers `CODE_SIGNING.md` too.
+- A public demo now always generates its admin password, even when run from
+  source, where Shadowfax otherwise starts with `admin/admin`. (The Docker
+  image, which is what Render builds, already did.)
+
 ## Version 0.44.0
 
 A public demo mode, and a README short enough to read.

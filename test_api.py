@@ -1563,7 +1563,7 @@ else:
           "to a release (v0.38), and only CodeQL may write security findings (v0.40)",
           _ci.get("permissions") == {"contents": "read"}
           and _pub.get("permissions", {}).get("packages") == "write"
-          and _drel.get("permissions") == {"contents": "write"}
+          and _drel.get("permissions") == {"contents": "write", "actions": "read"}
           and _ci["jobs"]["codeql"].get("permissions") == {"contents": "read", "security-events": "write"}
           and all("permissions" not in j for n, j in _ci["jobs"].items()
                   if n not in ("publish", "desktop-release", "codeql")))
@@ -5490,7 +5490,8 @@ def _anchors44(path):
     return {_slug44(m) for m in _re44.findall(r"(?m)^#{1,6} (.+)$", text)}
 
 _broken44 = []
-for _page in [_root44 / "README.md", _root44 / "architecture.md", _root44 / "SECURITY.md"] + _guides44:
+for _page in [_root44 / "README.md", _root44 / "architecture.md", _root44 / "SECURITY.md",
+              _root44 / "CODE_SIGNING.md"] + _guides44:
     _text = _re44.sub(r"(?ms)^```.*?^```", "", _page.read_text(encoding="utf-8"))
     for _target in _re44.findall(r"\]\(([^)\s]+)\)", _text):
         if _re44.match(r"[a-z]+:", _target):
@@ -5509,6 +5510,44 @@ _ci44 = (_root44 / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8
 check("CI runs the built image in demo mode and checks it as a visitor",
       "-e SHADOWFAX_DEMO=1 shadowfax:ci" in _ci44 and "test_dashboard.py --url http://127.0.0.1:8001 --public-demo" in _ci44
       and 'test "${code}" = "403"' in _ci44)
+
+print("\n== a hosted demo and code signing (v0.45) ==")
+import yaml as _yaml45
+import xml.etree.ElementTree as _et45
+from pathlib import Path as _P45
+_root45 = _P45(__file__).parent
+_render45 = _yaml45.safe_load((_root45 / "render.yaml").read_text(encoding="utf-8"))
+_svc45 = _render45["services"][0]
+_env45 = {e["key"]: e["value"] for e in _svc45["envVars"]}
+check("render.yaml builds this repository's Dockerfile on the free plan, in demo mode, on the image's port",
+      len(_render45["services"]) == 1 and _svc45["type"] == "web" and _svc45["runtime"] == "docker"
+      and _svc45["plan"] == "free" and _svc45["healthCheckPath"] == "/healthz"
+      and _env45 == {"SHADOWFAX_DEMO": "1", "PORT": "8000"}
+      and "--port\", \"8000\"" in (_root45 / "Dockerfile").read_text(encoding="utf-8").replace("'", '"'))
+_policy45 = (_root45 / "CODE_SIGNING.md").read_text(encoding="utf-8")
+check("the code signing policy has what SignPath Foundation asks for: the credit line, the roles, a privacy statement",
+      "Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by "
+      "[SignPath Foundation](https://signpath.org)" in _policy45
+      and "Committers and reviewers:" in _policy45 and "Approvers:" in _policy45
+      and "will not transfer any information to other networked systems unless specifically requested"
+      in _policy45)
+check("and the README links it by that name", "[Code signing policy](CODE_SIGNING.md)" in _readme44)
+_ac45 = _et45.parse(_root45 / ".signpath" / "artifact-configuration.xml").getroot()
+_ns45 = "{http://signpath.io/artifact-configuration/v1}"
+_pe45 = _ac45.find(f"{_ns45}zip-file/{_ns45}pe-file")
+check("the artifact configuration signs only the Windows installer, and only if it says it's Shadowfax",
+      _pe45 is not None and _pe45.get("path") == "Shadowfax-Desktop-*-win-x64.exe"
+      and _pe45.get("product-name") == "Shadowfax" and _pe45.find(f"{_ns45}authenticode-sign") is not None)
+_rel45 = _yaml45.safe_load(_ci44)["jobs"]["desktop-release"]
+_sign45 = [st for st in _rel45["steps"] if "SIGNPATH" in str(st.get("if", ""))]
+check("signing is in the release job, after every check, switched on only once SignPath is configured",
+      len(_sign45) == 3 and all(st["if"] == "vars.SIGNPATH_ORGANIZATION_ID != ''" for st in _sign45)
+      and set(_rel45["needs"]) == {"checks", "container", "desktop", "desktop-windows"}
+      and any(st.get("uses", "").startswith("signpath/github-action-submit-signing-request@") for st in _sign45)
+      and "secrets.SIGNPATH_API_TOKEN" in str(_sign45))
+check("and the signed file replaces the unsigned one before anything is attached to the release",
+      [st.get("name") for st in _rel45["steps"]].index("Attach the signed installer instead")
+      < [st.get("name") for st in _rel45["steps"]].index("Upload them to the release"))
 
 print("\n== the public demo (v0.44) ==")
 import public_demo as _pd44
@@ -5594,6 +5633,9 @@ finally:
         os.environ.pop("ANTHROPIC_API_KEY", None)
     else:
         os.environ["ANTHROPIC_API_KEY"] = _saved44[3]
+import inspect as _insp45
+check("a public demo never falls back to admin/admin, even run from source (v0.45)",
+      "generate = generate or public_demo.ENABLED" in _insp45.getsource(app_module._bootstrap_admin))
 check("with demo mode off again, the visitor door is shut", TestClient(app).post("/auth/visitor").status_code == 404)
 
 print("\n== archiving old events (v0.41) ==")

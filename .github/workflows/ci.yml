@@ -528,9 +528,12 @@ jobs:
     if: github.event_name == 'release'
     needs: [checks, container, desktop, desktop-windows]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Long enough to approve a signing request by hand (v0.45).
+    timeout-minutes: 150
     permissions:
       contents: write
+      # v0.45: SignPath reads the unsigned installer from this run's artifacts.
+      actions: read
     steps:
       - uses: actions/checkout@v4
 
@@ -549,6 +552,41 @@ jobs:
         with:
           path: installers
           merge-multiple: true
+
+      # v0.45: code signing through SignPath Foundation (see CODE_SIGNING.md).
+      # Switched on by setting the repository variable SIGNPATH_ORGANIZATION_ID
+      # (plus SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG and the secret
+      # SIGNPATH_API_TOKEN). Until then the installer is attached unsigned. The
+      # file sent is the one the desktop-windows job built and installed.
+      - name: Send the Windows installer to SignPath
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-unsigned
+          path: installers/Shadowfax-Desktop-*-win-x64.exe
+          retention-days: 1
+
+      - name: Sign it, once it's approved in SignPath
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: signed
+
+      - name: Attach the signed installer instead
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        run: |
+          ls -la signed
+          test -n "$(ls signed/Shadowfax-Desktop-*-win-x64.exe)"
+          rm installers/Shadowfax-Desktop-*-win-x64.exe
+          cp signed/Shadowfax-Desktop-*-win-x64.exe installers/
 
       - name: Upload them to the release
         env:

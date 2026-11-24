@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The artifact configuration for SignPath (v0.45), kept here so it's reviewed
+  like any other change; paste it into the SignPath project. CI uploads the
+  installer as a GitHub artifact, which arrives as a zip with the .exe inside.
+  The installer must say it's Shadowfax, or SignPath refuses to sign it.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="Shadowfax-Desktop-*-win-x64.exe" product-name="Shadowfax">
+      <authenticode-sign/>
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

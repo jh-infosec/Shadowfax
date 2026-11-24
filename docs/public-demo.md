@@ -53,8 +53,37 @@ the server starts and never leaves the process.
 
 Any service that runs a Docker image and gives it a public HTTPS address will
 do. It's one process with a SQLite file, and nothing has to persist: the data
-is rebuilt on every start. Point it at `ghcr.io/jh-infosec/shadowfax:latest`, set
-`SHADOWFAX_DEMO=1`, and send traffic to port 8000.
+is rebuilt on every start.
+
+### On Render's free plan
+
+The repository has a `render.yaml` that sets this up. You need a Render
+account (free, no card), signed in with GitHub.
+
+1. In Render, choose **New**, then **Blueprint**.
+2. Pick the Shadowfax repository. Render reads `render.yaml` and shows one web
+   service, `shadowfax-demo`, on the free plan, with `SHADOWFAX_DEMO=1`.
+3. Choose **Apply**. Render builds the Dockerfile (a few minutes the first
+   time) and gives the service an address ending in `.onrender.com`.
+4. Open it. You should see the **Look around as a visitor** button.
+
+What the free plan means for a demo:
+
+- It goes to sleep after 15 minutes with no visitors, and the next visitor
+  waits about a minute while it wakes. The sample data is there straight
+  away, and the scripted attack replays a few seconds after that.
+- It has 512 MB of memory and a small share of a CPU, which is enough for
+  this but makes the first replay slower than on your own machine.
+- Every push to `main` rebuilds and redeploys it, so the demo always runs the
+  latest code.
+- The admin password is printed once in Render's log for the service, as
+  usual. You don't need it for the demo.
+
+### Anywhere else
+
+Point the service at the Dockerfile (or at `ghcr.io/jh-infosec/shadowfax`, once
+a release with demo mode is published), set `SHADOWFAX_DEMO=1`, and send
+traffic to port 8000.
 
 Some things to know before you share the link:
 

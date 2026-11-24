@@ -60,7 +60,7 @@ block anything.
   worse. [How that's measured](docs/detection.md#how-noisy-is-it).
 - **Speed:** recording an event takes about 10 ms whether the agent has 1,000
   events of history or 50,000. [The benchmark](docs/evidence.md#recording-stays-fast).
-- **Tests:** every push runs 1,172 API checks on SQLite and again on
+- **Tests:** every push runs 1,179 API checks on SQLite and again on
   PostgreSQL, 90 checks in a real browser, the desktop app's own tests, the
   scripted attack against the built image, and vulnerability and code
   scanning. [What CI checks](docs/development.md#continuous-integration).
@@ -126,6 +126,7 @@ There's more in [the tour](docs/tour.md).
 | [Developing and testing](docs/development.md) | The test suites, CI, releasing, screenshots |
 | [Architecture](architecture.md) | How it's built and why |
 | [Security policy](SECURITY.md) | Reporting a vulnerability |
+| [Code signing policy](CODE_SIGNING.md) | What's signed, by whom, and the desktop app's privacy statement |
 
 ## Architecture
 
@@ -173,6 +174,7 @@ in [ROADMAP.md](ROADMAP.md). The most recent versions:
 | 0.42 | Muting false positives, with a reason and an end date |
 | 0.43 | Noise measured on two weeks of ordinary work and held down in CI |
 | 0.44 | A public demo mode, and this shorter README |
+| 0.45 | One-click hosting for the demo on Render, and code signing through SignPath |
 
 ## Licence
 
