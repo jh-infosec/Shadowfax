@@ -58,6 +58,12 @@
       "url": "https://atlas.mitre.org/techniques/AML.T0053",
       "framework": "MITRE ATLAS"
     },
+    "AML.T0080.000": {
+      "name": "AI Agent Context Poisoning: Memory",
+      "tactic": "Persistence",
+      "url": "https://atlas.mitre.org/techniques/AML.T0080.000",
+      "framework": "MITRE ATLAS"
+    },
     "AML.T0110": {
       "name": "AI Agent Tool Poisoning",
       "tactic": "Persistence",

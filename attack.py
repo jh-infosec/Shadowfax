@@ -60,6 +60,8 @@ CATEGORY_TO_TECHNIQUES: dict[str, list[str]] = {
     # restricted agent using a better-equipped one (a confused deputy).
     "injection_spread": ["AML.T0051.001", "AML.T0053"],
     "delegated_escalation": ["T1548"],
+    # v0.48: an injection written into memory agents load in later sessions.
+    "memory_poisoned": ["AML.T0080.000"],
     # v0.36: prompt injection. These are MITRE ATLAS techniques (AML.*), the
     # AI-specific counterpart to ATT&CK; ATLAS's tactic names match ATT&CK's,
     # so they sit on the same kill chain.

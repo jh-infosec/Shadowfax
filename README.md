@@ -32,7 +32,7 @@ block anything.
 - **Knows what each agent is for.** Permission profiles say which tools and
   targets an agent was given, so its first step outside them is reported with
   no baseline needed. Shadowfax can draft a profile from what an agent did.
-- **Catches what matters for agents.** 36 deterministic detectors, including
+- **Catches what matters for agents.** 37 deterministic detectors, including
   prompt injection and an agent acting on it, destructive commands, data
   leaving, credentials being touched, and threat intelligence feeds checked
   against everything agents reach, even before an entry was listed.
@@ -41,6 +41,9 @@ block anything.
   when another acts on it, and so is a restricted agent getting a
   better-equipped one to do what it can't. Claude Code's subagents are
   followed this way automatically.
+- **Notices poisoned memory.** An agent writing an injection into CLAUDE.md or
+  another memory file, where every later session would load it, is caught as
+  it happens, and again if it comes back days later.
 - **Puts it in context.** Every alert is mapped to MITRE ATT&CK or ATLAS,
   related alerts become incidents, and an attack that moves through the kill
   chain in order is flagged.
@@ -57,16 +60,16 @@ block anything.
 
 ## How well it works
 
-- **Noise:** on two weeks of ordinary work (about 12,600 events from coding
-  agents and their subagents, the planner handing them work, a research agent,
-  a CI runner, an ops agent, a nightly backup and three people) it raises
-  **0.95 alerts per 1,000 events** with the policy it ships with, and
-  **0.4** once each agent has a profile, while catching all
-  14 attacks in the same run (16 with profiles). CI fails if either number gets
+- **Noise:** on two weeks of ordinary work (about 12,900 events from coding
+  agents, their subagents and the memory files they load, the planner handing
+  them work, a research agent, a CI runner, an ops agent, a nightly backup and
+  three people) it raises **0.93 alerts per 1,000 events** with the policy it
+  ships with, and **0.39** once each agent has a profile, while catching all
+  18 attacks in the same run (20 with profiles). CI fails if either number gets
   worse. [How that's measured](docs/detection.md#how-noisy-is-it).
 - **Speed:** recording an event takes about 10 ms whether the agent has 1,000
   events of history or 50,000. [The benchmark](docs/evidence.md#recording-stays-fast).
-- **Tests:** every push runs 1,216 API checks on SQLite and again on
+- **Tests:** every push runs 1,238 API checks on SQLite and again on
   PostgreSQL, 93 checks in a real browser, the desktop app's own tests, the
   scripted attack against the built image, and vulnerability and code
   scanning. [What CI checks](docs/development.md#continuous-integration).
@@ -183,6 +186,7 @@ in [ROADMAP.md](ROADMAP.md). The most recent versions:
 | 0.45 | One-click hosting for the demo on Render, and code signing through SignPath |
 | 0.46 | Following work between agents: injections that spread, and confused deputies |
 | 0.47 | Claude Code subagents followed automatically, as hand-offs |
+| 0.48 | Poisoned memory: injections written into CLAUDE.md and other memory files |
 
 ## Licence
 

@@ -64,6 +64,28 @@ MARKERS: list[tuple[str, re.Pattern[str]]] = [
         r"|\bwithout\s+(?:telling|informing|alerting|asking)\s+(?:the\s+)?(?:user|human|operator)\b", re.I)),
 ]
 
+# v0.48: memory files (CLAUDE.md and the like) are instructions to the agent
+# by design. "Note to the agent: the API client is generated" and "ignore the
+# lint rules for generated files" are what they're for, so in memory only the
+# markers that have no business there count, and "override" only in the form
+# aimed at the agent's own instructions ("ignore your previous instructions").
+_OVERRIDE_OWN = re.compile(
+    r"\b(?:ignore|disregard|forget|override)\s+(?:all\s+)?(?:of\s+)?"
+    r"(?:your\s+(?:(?:previous|prior|above|earlier|system|original)\s+)?"
+    r"|(?:the\s+)?(?:previous|prior|above|system|original)\s+)"
+    r"(?:instructions?|prompts?|directions?|rules)\b"
+    r"|\b(?:ignore|disregard|forget)\s+(?:all|everything)\s+(?:you\s+were\s+told|(?:other\s+)?instructions)\b",
+    re.I)
+# And concealment from the user, not a rule about the user's details ("never
+# mention the user's real name in commits").
+_CONCEAL_FROM_USER = re.compile(
+    r"\b(?:do\s+not|don'?t|never)\s+(?:tell|inform|mention|reveal|show|alert)\b[^.\n]{0,20}"
+    r"\b(?:the\s+)?(?:user|human|operator)\b(?!['\u2019]s)"
+    r"|\bwithout\s+(?:telling|informing|alerting|asking)\s+(?:the\s+)?(?:user|human|operator)\b", re.I)
+MEMORY_MARKERS: list[tuple[str, re.Pattern[str]]] = [("override", _OVERRIDE_OWN)] + [
+    (name, _CONCEAL_FROM_USER if name == "concealment" else pattern)
+    for name, pattern in MARKERS if name not in ("override", "addressed to the AI")]
+
 # Unicode tag characters (U+E0000 to U+E007F) render as nothing but carry ASCII:
 # the "ASCII smuggling" trick. Zero-width characters in a run hide text too.
 _TAGS = re.compile("[\U000E0000-\U000E007F]")
@@ -90,19 +112,21 @@ def _clean(snippet: str) -> str:
     return "".join(ch if ch.isprintable() else "?" for ch in snippet).strip()
 
 
-def scan(text: str) -> list[dict[str, str]]:
+def scan(text: str, in_memory: bool = False) -> list[dict[str, str]]:
     """Every marker found, as {"marker", "excerpt"}; empty means none.
 
     Hidden text is decoded and scanned too, since that is exactly where an
     instruction meant for the model and not the reader would be put.
+    `in_memory` (v0.48) uses MEMORY_MARKERS, for text in a memory file.
     """
+    markers = MEMORY_MARKERS if in_memory else MARKERS
     text = (text or "")[:MAX_SCAN_CHARS]
     found: list[dict[str, str]] = []
     hidden = hidden_text(text)
     if hidden is not None:
         found.append({"marker": "hidden text", "excerpt": _clean(hidden)[:240]})
     for haystack in ([text, hidden] if hidden and not hidden.startswith("(") else [text]):
-        for name, pattern in MARKERS:
+        for name, pattern in markers:
             if any(f["marker"] == name for f in found):
                 continue
             m = pattern.search(haystack)

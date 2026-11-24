@@ -20,6 +20,7 @@ import handoff
 import injection
 import intel
 import manifest
+import memory
 import permissions
 import timeutil
 
@@ -64,7 +65,7 @@ NATIVE_CATEGORIES: frozenset[str] = frozenset({
     "evidence_archived",
     # v0.46: agents handing work to each other: an injection passed on from
     # one agent to another, and an agent used to get round another's limits.
-    "injection_spread", "delegated_escalation",
+    "injection_spread", "delegated_escalation", "memory_poisoned",
 })
 
 INGEST_ACTOR_ID = "shadowfax-ingest"
@@ -472,7 +473,14 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
     # instructions, with the indicators in it the agent hadn't used yet; the
     # latest fingerprint of each tool's definition; tools already reported.
     own_indicators: set[str] = set()
-    injected: list[tuple[dict, set[str], str, datetime]] = []
+    # Each is (the content event, its planted indicators, what marked it, when,
+    # and for remembered memory (v0.48) a sentence saying where it came from).
+    injected: list[tuple[dict, set[str], str, datetime, str | None]] = []
+    # v0.48: memory locations this agent poisoned, by normalised location:
+    # (what it planted there, where the injection came from, when it wrote it),
+    # and the (location, evidence) pairs already reported.
+    memory_poison: dict[str, tuple[set[str], str, datetime]] = {}
+    memory_reported: set[tuple[str, str]] = set()
     tool_definitions: dict[str, str] = {}
     poisoned_reported: set[str] = set()
     injection_window = timedelta(minutes=policy.get("prompt_injection_window_minutes", 60))
@@ -661,9 +669,19 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
             if isinstance(taint, dict) and taint.get("indicators"):
                 spread.append((ts, {str(i).lower() for i in taint["indicators"]}, taint))
 
-        if e["event_type"] in (injection.EVENT_TYPE, handoff.RECEIVED):
+        if e["event_type"] in (injection.EVENT_TYPE, handoff.RECEIVED, memory.LOADED):
             text = handoff.content_text(e)
-            found = injection.scan(text)
+            # v0.48: a place this agent poisoned earlier, loaded or read again.
+            # What it planted there counts as planted, however long ago, even
+            # if it no longer reads like an injection.
+            loc = memory.loaded_location(e)
+            remembered = memory_poison.get(memory.normal(loc)) if loc else None
+            if remembered and remembered[0]:
+                planted_there, came_from, written_at = remembered
+                injected.append((e, set(planted_there), "remembered", ts,
+                    f"which it wrote into {loc[:120]} on {str(written_at)[:16]}, after reading instructions "
+                    f"aimed at an AI in {came_from[:120]}, and loaded again at {str(ts)[:19]}"))
+            found = injection.scan(text, in_memory=memory.is_memory_content(e, policy))
             if found:
                 hidden = any(f["marker"] == "hidden text" for f in found)
                 tool = (meta.get("tool") or "a tool")
@@ -674,18 +692,22 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
                 seen_key = (injection.source_of(e)[:500], injection.evidence(found))
                 if seen_key in injection_reported:
                     injected.append((e, injection.planted(injection.indicators(text), own_indicators),
-                                     injection.summary(found), ts))
+                                     injection.summary(found), ts, None))
                     continue
                 injection_reported.add(seen_key)
-                where = (f"the work handed over by '{meta.get('from', '?')}'"
-                         if e["event_type"] == handoff.RECEIVED else
-                         f"content returned to the agent by {tool} from "
-                         f"{injection.source_of(e)[:120] or 'an unnamed source'}")
+                if e["event_type"] == handoff.RECEIVED:
+                    where = f"the work handed over by '{meta.get('from', '?')}'"
+                elif e["event_type"] == memory.LOADED:
+                    where = (f"the memory file {str(loc or '?')[:120]}, loaded into the agent's instructions "
+                             f"({meta.get('load_reason') or 'loaded'}),")
+                else:
+                    where = (f"content returned to the agent by {tool} from "
+                             f"{injection.source_of(e)[:120] or 'an unnamed source'}")
                 alerts.append(_mk_alert(e, "high" if hidden else "medium", "prompt_injection",
                     f"{where} contains instructions aimed at an AI ({injection.summary(found)})",
                     evidence=injection.evidence(found)[:400]))
                 fresh = injection.planted(injection.indicators(text), own_indicators)
-                injected.append((e, fresh, injection.summary(found), ts))
+                injected.append((e, fresh, injection.summary(found), ts, None))
             continue
 
         # Acting on it (v0.36): a call that uses something which first appeared
@@ -693,6 +715,60 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
         # what the agent is known to have used.
         if e["event_type"] == "tool_call":
             text = injection.call_text(e)
+            # v0.48: writing into memory. Checked first: copying an injection
+            # into a file every later session loads is the thing to report,
+            # rather than the write as one more use of a planted URL.
+            memory_hit = False
+            for loc, written, whole in memory.writes(e, policy):
+                key_loc = memory.normal(loc)
+                found = injection.scan(written, in_memory=True)
+                inds = injection.indicators(written)
+                carried: set[str] = set()
+                came_from = None
+                recent = False
+                for src, fresh, _markers, src_ts, _note in reversed(injected):
+                    if ts - src_ts > injection_window:
+                        continue
+                    recent = True
+                    hits = fresh & inds
+                    if hits and not carried:
+                        carried, came_from = hits, injection.source_of(src) or "content it read"
+                for when, planted_here, taint in reversed(spread):
+                    if ts - when > injection_window:
+                        continue
+                    recent = True
+                    hits = planted_here & inds
+                    if hits and not carried:
+                        carried = hits
+                        came_from = f"{str(taint.get('source') or 'content')}, passed on in a hand-off"
+                if not found and not carried:
+                    if whole:
+                        memory_poison.pop(key_loc, None)
+                    continue
+                memory_hit = True
+                if came_from is None:
+                    came_from = "the text it wrote" if not recent else next(
+                        (injection.source_of(src) or "content it read"
+                         for src, _f, _m, src_ts, _n in reversed(injected) if ts - src_ts <= injection_window),
+                        "content passed on in a hand-off")
+                memory_poison[key_loc] = (carried | injection.planted(inds, own_indicators), came_from, ts)
+                evid = injection.evidence(found) if found else ", ".join(sorted(carried))
+                if (key_loc, evid) in memory_reported:
+                    continue
+                memory_reported.add((key_loc, evid))
+                place = (f"{loc[:120]}, a memory file agents load as instructions in later sessions"
+                         if memory.is_memory_file(loc, policy) else
+                         f"memory through {loc[:120]}, which agents read back in later sessions")
+                if found:
+                    what = f"instructions aimed at an AI ({injection.summary(found)})"
+                    why = (f". It had just read instructions aimed at an AI in {came_from[:120]}"
+                           if recent else "")
+                else:
+                    what = f"'{sorted(carried, key=len, reverse=True)[0][:120]}'"
+                    why = f". That was planted by instructions aimed at an AI it had just read in {came_from[:120]}"
+                alerts.append(_mk_alert(e, "critical" if carried or recent else "high", "memory_poisoned",
+                    f"wrote {what} into {place}{why}. The injection would outlive this session",
+                    discriminator=key_loc, evidence=(injection.evidence(found) if found else evid)[:400]))
             # v0.46: something an injection planted in another agent's reading,
             # passed on in a hand-off, used here. Reported instead of
             # injection_followed: this agent never read the injection itself.
@@ -704,6 +780,8 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
                 if hit:
                     spread_hit = (hit, when, taint)
                     break
+            if memory_hit:
+                spread_hit = None
             if spread_hit:
                 hit, when, taint = spread_hit
                 chain = " → ".join([str(a) for a in taint.get("via") or []] + [e["actor_id"]])
@@ -712,16 +790,17 @@ def _scan(actor_id: str, policy: dict[str, Any], intel_index: "intel.Index | Non
                     f"instructions aimed at an AI ({taint.get('markers') or 'injected content'}) in "
                     f"{str(taint.get('source') or 'content')[:120]}, read by another agent and passed "
                     f"on in a hand-off at {str(when)[:19]}; the injection spread {chain}"))
-            for src, fresh, markers, src_ts in ([] if spread_hit else reversed(injected)):
+            for src, fresh, markers, src_ts, note in ([] if spread_hit or memory_hit else reversed(injected)):
                 if ts - src_ts > injection_window:
                     continue
                 hit = next((i for i in sorted(fresh, key=len, reverse=True) if i in text), None)
                 if hit:
+                    origin = note or (f"which first appeared in content returned to it at "
+                                      f"{str(src['timestamp'])[:19]} that contained instructions aimed at "
+                                      f"an AI ({markers})")
                     alerts.append(_mk_alert(e, "critical", "injection_followed",
-                        f"called {meta.get('tool') or 'a tool'} with '{hit[:120]}', which first "
-                        f"appeared in content returned to it at {str(src['timestamp'])[:19]} that contained "
-                        f"instructions aimed at an AI ({markers}); the agent looks to be "
-                        f"following instructions planted in what it read"))
+                        f"called {meta.get('tool') or 'a tool'} with '{hit[:120]}', {origin}; the agent looks "
+                        f"to be following instructions planted in what it read"))
                     break
             own_indicators.update(injection.indicators(text))
 

@@ -435,3 +435,7 @@ setup, and setup was two processes, two package managers and a CORS allowlist.
       back are reported as hand-offs automatically, each subagent under its
       own id and its session's profile, so an injection crossing between a
       session and its subagents is caught with no extra setup.
+- [x] Poisoned memory (`v0.48.0`): an injection written into CLAUDE.md or
+      another memory file is `memory_poisoned`, memory files Claude Code
+      loads are reported by a new hook, and an injection that comes back from
+      memory days later is caught when it's acted on.

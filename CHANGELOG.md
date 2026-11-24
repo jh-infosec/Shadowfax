@@ -1,5 +1,57 @@
 # Changelog
 
+## Version 0.48.0
+
+Poisoned memory: an injection that comes back in a later session.
+
+### What's new
+
+- **`memory_poisoned`** (critical, ATLAS AML.T0080.000, AI Agent Context
+  Poisoning: Memory). An agent writes into memory (CLAUDE.md, AGENTS.md,
+  `.cursorrules`, `.claude/rules/`, a memory MCP server and the like) either
+  instructions aimed at an AI, or a URL, host, address or path that an
+  injection it read in the last hour planted. High instead of critical when
+  no injection was read just before. Write, Edit, MultiEdit, filesystem MCP
+  servers, shell redirects and memory tools all count.
+- **Memory loads are reported.** A new Claude Code hook, `InstructionsLoaded`,
+  sends each memory file Claude Code loads, with its contents, as a
+  `memory_loaded` event. Before this, Shadowfax never saw those files, since
+  Claude Code reads them itself. They're read for injections like any tool
+  result, so a poisoned CLAUDE.md is caught when any agent loads it. Run
+  `python shadowfax_agent.py claude-code --write ~/.claude/settings.json`
+  again to add the hook.
+- **Poisoned memory is remembered.** When an agent loads or reads a memory
+  file it poisoned, days later, what it planted there counts as planted, so
+  acting on it is `injection_followed`, naming the file and when it was
+  written, even if the line now reads like an ordinary note. Rewriting the
+  whole file clean clears it.
+- **Memory files are read with narrower markers.** They talk to the agent by
+  design ("note to the agent", "ignore the lint rules for generated files"),
+  so inside them only markers with no business there count. This also applies
+  when an agent reads a memory file with a tool, which used to be able to
+  raise a `prompt_injection` on an ordinary CLAUDE.md.
+- `memory_files` and `memory_tools` in the policy replace the default lists;
+  both are checked when a policy is saved.
+- **The noise measurement** loads three memory files in every coding session
+  and adds the odd note to CLAUDE.md, with no new alerts: 0.93 per 1,000
+  events as shipped, 0.39 with profiles. Four new attacks: an injection copied
+  into CLAUDE.md, a planted URL saved in the agent's own words, the same
+  through a memory server, and an injection coming back from CLAUDE.md four
+  days later. 18 caught as shipped, 20 with profiles.
+- 37 detector categories.
+
+### Tested
+
+- 1,238 API checks, on SQLite and on PostgreSQL. The 22 new ones cover what
+  counts as a memory file, the hook and reading the file, ordinary memory
+  files staying quiet, an injected one loaded and acted on, copying an
+  injection into CLAUDE.md, a planted URL in the agent's own words, a shell
+  redirect, a memory server, an ordinary note, the injection coming back days
+  later, clearing it, one passed on in a hand-off, the policy settings, and
+  arguments the connector had to shorten.
+- Sixteen mutations to the memory logic, each caught by the API suite or
+  `noise.py`.
+
 ## Version 0.47.0
 
 Claude Code subagents, followed automatically.

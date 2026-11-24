@@ -57,7 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-VERSION = "0.47.0"
+VERSION = "0.48.0"
 DEFAULT_URL = "http://127.0.0.1:8000"
 ACTOR_TYPE = "ai_agent"
 
@@ -339,7 +339,7 @@ def fit(meta: dict[str, Any], budget: int = METADATA_BUDGET) -> dict[str, Any]:
         if size <= budget:
             return meta
         candidates = [(len(json.dumps(meta[k], default=str)), k)
-                      for k in ("output", "arguments", "error", "command", "source")
+                      for k in ("output", "arguments", "content", "message", "error", "command", "source")
                       if k in meta and meta[k]]
         if not candidates:
             break
@@ -678,7 +678,7 @@ def _detail(reply: Any) -> str:
 
 # -- Claude Code hooks -------------------------------------------------------------
 
-HOOK_EVENTS = ("PostToolUse", "PostToolUseFailure", "PreToolUse", "SubagentStop")
+HOOK_EVENTS = ("PostToolUse", "PostToolUseFailure", "PreToolUse", "SubagentStop", "InstructionsLoaded")
 # v0.47: the tool Claude Code starts a subagent with ("Task" before it was
 # renamed), and the subagent type it gets when none is named.
 SUBAGENT_TOOLS = ("Agent", "Task")
@@ -686,7 +686,19 @@ DEFAULT_SUBAGENT = "general-purpose"
 # Which tools each hook event is registered for: PreToolUse only matters for
 # starting a subagent, so it isn't run before every other tool call.
 HOOK_MATCHERS = {"PostToolUse": "*", "PostToolUseFailure": "*", "PreToolUse": "|".join(SUBAGENT_TOOLS),
-                 "SubagentStop": "*"}
+                 "SubagentStop": "*", "InstructionsLoaded": "*"}
+# v0.48: how much of a memory file Claude Code loads is read and reported.
+MEMORY_READ_LIMIT = 200_000
+
+
+def read_memory_file(path: str) -> str:
+    """The text of a memory file Claude Code just loaded, or "" if it can't be
+    read. The hook runs on the agent's machine, so this is the same file."""
+    try:
+        with open(os.path.expanduser(path), "rb") as f:
+            return f.read(MEMORY_READ_LIMIT).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return ""
 
 
 def subagent_id(parent: str, agent_type: Any) -> str:
@@ -699,7 +711,8 @@ def subagent_id(parent: str, agent_type: Any) -> str:
 
 
 def hook_events(payload: dict[str, Any], agent_id: str, task: str | None = None,
-                skip_mcp: bool = False, timestamp: str | None = None) -> list[dict[str, Any]]:
+                skip_mcp: bool = False, timestamp: str | None = None,
+                read_file: Any = None) -> list[dict[str, Any]]:
     """Shadowfax events for one Claude Code hook call.
 
     PostToolUse gives both halves at once: the call (what the tool was asked
@@ -714,6 +727,12 @@ def hook_events(payload: dict[str, Any], agent_id: str, task: str | None = None,
     last message goes back to the session as a hand-off the other way. So an
     injection is followed whichever way it travels. The Agent tool's own
     result isn't reported as content as well: SubagentStop already carries it.
+
+    v0.48, memory. Claude Code reads CLAUDE.md and its other memory files
+    itself, not through a tool, so nothing else reports them. On
+    InstructionsLoaded the hook reads the file (`read_file`, by default from
+    disk) and reports it as a `memory_loaded` event with its contents, so an
+    injection planted there in an earlier session is seen when it comes back.
     """
     name = payload.get("hook_event_name")
     if name not in HOOK_EVENTS:
@@ -728,6 +747,20 @@ def hook_events(payload: dict[str, Any], agent_id: str, task: str | None = None,
         common.update({"subagent": payload.get("agent_type"), "subagent_run": inside, "parent_agent": agent_id})
     elif payload.get("agent_type"):
         common["subagent"] = payload["agent_type"]
+
+    if name == "InstructionsLoaded":
+        path = payload.get("file_path")
+        if not isinstance(path, str) or not path.strip():
+            return []
+        text = (read_file or read_memory_file)(path)
+        meta = {k: v for k, v in common.items() if v is not None and k != "tool_use_id"}
+        meta.update({"file_path": path, "memory_type": payload.get("memory_type"),
+                     "load_reason": payload.get("load_reason"), "content": text if isinstance(text, str) else "",
+                     "parent_file_path": payload.get("parent_file_path"),
+                     "trigger_file_path": payload.get("trigger_file_path"),
+                     "reported_by": f"shadowfax_agent/{VERSION}"})
+        return [make_event(actor, "memory_loaded", path, {k: v for k, v in meta.items() if v is not None},
+                           task, ts)]
 
     if name == "SubagentStop":
         message = payload.get("last_assistant_message")

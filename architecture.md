@@ -498,7 +498,10 @@ client:
   and are reported under that id with `metadata.parent_agent`; and
   `SubagentStop` turns the subagent's `last_assistant_message` into a
   hand-off back. The Agent tool's own `PostToolUse` is reported as the call
-  only, since `SubagentStop` already carries the result.
+  only, since `SubagentStop` already carries the result. Since v0.48,
+  `InstructionsLoaded` reads the memory file it names (`read_memory_file`, up
+  to 200 KB; `hook_events(read_file=...)` for tests) and sends a
+  `memory_loaded` event with the text in `metadata.content`.
 - **An MCP stdio proxy.** Relays newline-delimited JSON-RPC between client and
   server byte for byte, observing a copy. A request is observed before it is
   forwarded, so its response can never arrive first. `tools/list` results become
@@ -711,6 +714,32 @@ profile (`matched_by: "session"`) when the subagent has none of its own;
 endpoints pass the session through `detectors.session_of(events)` so they
 agree with the detector. Separately, `dormant_reappearance` is skipped for any
 agent within `delegation_window_minutes` of being handed work.
+
+#### memory.py
+
+Poisoned memory (v0.48). Pure. `is_memory_file(path, policy)` and
+`is_memory_tool(tool, policy)` against `memory_files` / `memory_tools` (code
+defaults when the key is absent). `writes(event, policy)` returns
+`(location, text, whole)` for a tool call that writes memory: a memory tool's
+whole input, a file tool's `content`/`new_string`/`edits` (from the parsed
+arguments, or from the shortened argument text plus the lifted `path` when
+the connector had to trim them), and shell redirects or `tee` into a memory
+file. `whole` is true only for a complete new file.
+
+In `detectors`, a `memory_loaded` event is content (via
+`handoff.content_text`), and content from memory (a load, or a tool result
+whose source is a memory file) is scanned with `injection.MEMORY_MARKERS`:
+the override marker only aimed at the agent's own instructions, no "addressed
+to the AI", concealment only from the user. In the tool-call branch, memory
+writes are checked before follow-through: markers in the written text, or
+indicators carried from an injected read or a tainted hand-off within the
+window, raise `memory_poisoned` (once per location and evidence) and record
+`memory_poison[location] = (planted, source, when)`; that call then skips
+`injection_spread` and `injection_followed`. A later load or read of a
+recorded location appends an `injected` entry with the remembered indicators
+and a note, which `injection_followed` uses for its message. A whole clean
+rewrite removes the record. `handoff.taint_of` treats `memory_loaded` as a
+read too.
 
 #### public_demo.py
 
@@ -1581,7 +1610,7 @@ intel.py                supply_chain.py         requirements.lock
 LICENSE                 SECURITY.md             ruff.toml
 archive.py              bench.py                suppress.py
 noise.py                public_demo.py          render.yaml
-handoff.py
+handoff.py              memory.py
 CODE_SIGNING.md         .signpath/artifact-configuration.xml
 docs/getting-started.md docs/agents.md          docs/detection.md
 docs/investigation.md   docs/evidence.md        docs/security.md

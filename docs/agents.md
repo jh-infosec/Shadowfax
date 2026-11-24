@@ -62,9 +62,17 @@ one is never a way round the session's limits, and it doesn't raise an
 a profile under its own id. It isn't reported as dormant when its session
 starts it again after a quiet spell, since being asked is why it woke up.
 
-If you set up the hooks before v0.47, run the `claude-code --write` command
-again to add the two new ones (`PreToolUse` for the Agent tool, and
-`SubagentStop`).
+**Memory files.** Claude Code loads CLAUDE.md and its other memory files
+itself, so no tool call shows them. The `InstructionsLoaded` hook reports each
+one as it's loaded, with what's in it, so an injection planted in memory in an
+earlier session is seen when it comes back. The hook reads the file on the
+agent's machine (up to 200 KB) and sends it like any tool result. Writing an
+injection into memory in the first place is
+[`memory_poisoned`](detection.md#when-the-injection-is-written-into-memory).
+
+If you set up the hooks before v0.48, run the `claude-code --write` command
+again to add the new ones (`PreToolUse` for the Agent tool, `SubagentStop`
+and `InstructionsLoaded`).
 
 ![A Claude Code session reading a poisoned changelog and then running the curl it asked for, as alerts in Shadowfax](screenshots/claude-code.png)
 

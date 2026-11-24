@@ -15,6 +15,10 @@ and runs every detector over it:
 - the Explore subagents those sessions send to look things up, about one
   session in three, each reporting under its own id and handing its summary
   back
+- the memory files every session loads (the project's CLAUDE.md, the user's
+  own and a rules file), written the way real ones are, with lines like "note
+  to the agent" and "ignore the lint rules for generated files", and the odd
+  note added to CLAUDE.md
 - a planner that reads the issue tracker each morning and hands each coding
   agent a task
 - a research agent reading the news, including security articles that quote
@@ -37,11 +41,11 @@ python noise.py --check   # what CI runs
 
 | | Policy as shipped | With a profile per agent |
 | --- | ---: | ---: |
-| Events | 12,604 | 12,604 |
+| Events | 12,851 | 12,851 |
 | Alerts | 12 | 5 |
-| Alerts per 1,000 events | 0.95 | 0.4 |
+| Alerts per 1,000 events | 0.93 | 0.39 |
 | Actors with any alert | 8 of 14 | 3 of 14 |
-| Attacks caught | 14 of 14 | 16 of 16 |
+| Attacks caught | 18 of 18 | 20 of 20 |
 
 | Benign alerts by category | Policy as shipped | With a profile per agent |
 | --- | ---: | ---: |
@@ -156,6 +160,63 @@ AML.T0053), naming every agent it passed through. The receiving agent
 doesn't also get `injection_followed`: it never read the injection itself.
 [Agents that hand work to each other](agents.md#agents-that-hand-work-to-each-other)
 covers reporting hand-offs, and `delegated_escalation`, the confused deputy.
+
+### When the injection is written into memory
+
+An injection normally lasts as long as the session that read it. Memory
+changes that. Claude Code loads CLAUDE.md into every session in a project,
+other coding agents have their own instruction files, and memory servers keep
+notes an agent reads back next time. An agent that writes what a poisoned page
+told it into one of those has made the injection part of its own instructions,
+for every later session and for every other agent working in the same place.
+MITRE ATLAS calls this
+[AML.T0080.000](https://atlas.mitre.org/techniques/AML.T0080.000), AI Agent
+Context Poisoning: Memory.
+
+| Alert | Severity | Means | ATLAS |
+| --- | --- | --- | --- |
+| `memory_poisoned` | critical, or high if no injection was read just before | the agent wrote instructions aimed at an AI, or something an injection it had just read planted, into memory | AML.T0080.000 |
+
+What counts as memory:
+
+- **Files**, by name anywhere (`CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+  `GEMINI.md`, `MEMORY.md`, `.cursorrules`, `.windsurfrules`, `.clinerules`,
+  `copilot-instructions.md`) or by place (`.claude/rules/`, `.claude/memory/`,
+  `.claude/agents/`, `.claude/commands/`, skills, `.cursor/rules/`,
+  `.github/instructions/`). Written by Write, Edit, a filesystem MCP server, or
+  a shell redirect like `echo ... >> CLAUDE.md`.
+- **Memory tools:** Claude's memory tool, a memory MCP server's tools
+  (`mcp__memory__*`), and tools named for memory (`save_memory`, `remember`).
+- Both lists can be replaced in the policy with `memory_files` and
+  `memory_tools`. Leave them out for the defaults; an empty list turns that
+  half off.
+
+How it decides:
+
+- **Memory files talk to the agent by design,** so inside them only the
+  markers that have no business there count: "ignore your previous
+  instructions" (not "ignore the lint rules"), a fake system prompt, "do not
+  tell the user", hidden text. "Note to the agent: the API client is
+  generated" is what CLAUDE.md is for. The same narrower set is used when an
+  agent reads a memory file with a tool.
+- **The stronger signal is what was carried.** A URL, host, address or path
+  that an injection the agent read in the last hour planted, written into
+  memory, is reported however it was worded.
+- **It's remembered.** When an agent that poisoned a memory file loads or reads
+  it again, days later, what it planted there counts as planted, so using it
+  raises `injection_followed`, naming the file and when it was written. That
+  holds even if the planted line now reads like an ordinary note. Rewriting
+  the whole file clean clears it; an edit elsewhere in the file doesn't.
+- **Claude Code's memory loads are seen.** Claude Code reads CLAUDE.md itself,
+  not through a tool, so until v0.48 nothing reported it. The connector's
+  `InstructionsLoaded` hook now sends each memory file Claude Code loads, with
+  what's in it, as a `memory_loaded` event, read like any other content. So an
+  injection planted in a shared CLAUDE.md is caught when any agent loads it.
+
+The honest limit: the remembering is per agent. Another agent loading a
+memory file that was poisoned in plain words, with no markers, isn't linked
+back to the injection, though its follow-through is still checked against
+anything an injection planted in its own reading.
 
 
 ## Threat intelligence
@@ -286,7 +347,7 @@ Some details worth knowing:
   Shadowfax's own detectors complete.
 - **A bad envelope is rejected whole,** with the field at fault named, so the
   person writing the other tool finds out what's wrong.
-- **Other tools can't use Shadowfax's own 36 detector categories,** so an alert
+- **Other tools can't use Shadowfax's own 37 detector categories,** so an alert
   reading `destructive_action` always means Shadowfax found it.
 - **Unvalidated findings are marked but not downgraded.** `validated: false`
   means the tool is repeating something the subject said about itself, like a

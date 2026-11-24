@@ -55,6 +55,7 @@ _CATEGORY_PHRASE = {
     "evidence_archived": "old events moved into an archive file",
     "injection_spread": "an injection passed on from another agent",
     "delegated_escalation": "an agent used to get round another's limits",
+    "memory_poisoned": "an injection written into an agent's memory",
 }
 
 

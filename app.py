@@ -56,6 +56,7 @@ import suppress
 import ledger
 import limits
 import manifest
+import memory
 import permissions
 import profile_draft
 import ratelimit
@@ -67,7 +68,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.47.0"
+VERSION = "0.48.0"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -1818,7 +1819,7 @@ def get_policy(identity: dict = Depends(require_role("viewer"))):
 def update_policy(policy: dict[str, Any], identity: dict = Depends(require_role("analyst"))):
     # Refused before it is stored, not after: a malformed permission profile
     # does not fail loudly when it runs, it quietly grants more than it says.
-    problems = permissions.validate(policy)
+    problems = permissions.validate(policy) + memory.validate(policy)
     if problems:
         raise HTTPException(400, {"message": "policy refused", "problems": problems})
     with db.get_conn() as conn:

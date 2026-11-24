@@ -48,6 +48,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import injection
+import memory
 import timeutil
 
 HANDOFF = "agent_handoff"
@@ -86,17 +87,17 @@ def taint_of(sender_events: list[dict[str, Any]], handoff_event: dict[str, Any],
         if e["event_type"] == "tool_call":
             used |= injection.indicators(injection.call_text(e))
             continue
-        if e["event_type"] not in (injection.EVENT_TYPE, RECEIVED) or at - when > window:
+        if e["event_type"] not in (injection.EVENT_TYPE, RECEIVED, memory.LOADED) or at - when > window:
             continue
         meta = e.get("metadata") or {}
         text = content_text(e)
         planted: set[str] = set()
         source, via = "?", []
-        markers = injection.scan(text)
+        markers = injection.scan(text, in_memory=e["event_type"] == memory.LOADED)
         if markers:
             planted = injection.planted(injection.indicators(text), used)
-            source = injection.source_of(e) if e["event_type"] == injection.EVENT_TYPE \
-                else f"a hand-off from {meta.get('from', '?')}"
+            source = f"a hand-off from {meta.get('from', '?')}" if e["event_type"] == RECEIVED \
+                else injection.source_of(e)
         prior = meta.get("taint") if e["event_type"] == RECEIVED else None
         if isinstance(prior, dict):
             planted |= set(prior.get("indicators") or [])
@@ -117,7 +118,8 @@ def taint_of(sender_events: list[dict[str, Any]], handoff_event: dict[str, Any],
 
 
 def content_text(event: dict[str, Any]) -> str:
-    """What an agent was given to read: a tool result, or a hand-off's message."""
+    """What an agent was given to read: a tool result, a hand-off's message, or
+    a memory file it loaded (v0.48)."""
     if event["event_type"] == RECEIVED:
         return message_of(event)
     return injection.content_of(event)

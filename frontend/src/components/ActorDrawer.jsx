@@ -81,6 +81,16 @@ export default function ActorDrawer({ detail, onClose, onDraftProfile, onSelectA
                   )}
                   {e.metadata?.message && <div className="tl-handoff-msg">{e.metadata.message}</div>}
                 </div>
+              ) : e.event_type === "memory_loaded" ? (
+                /* v0.48: a memory file Claude Code loaded into the session. */
+                <div className="tl-event tl-memory">
+                  loaded memory file {e.target}
+                  {e.metadata?.memory_type && (
+                    <span className="tl-memory-kind">
+                      {" "}({e.metadata.memory_type}{e.metadata.load_reason ? `, ${e.metadata.load_reason}` : ""})
+                    </span>
+                  )}
+                </div>
               ) : (
                 <div className="tl-event">{e.event_type} &rarr; {e.target}</div>
               )}
