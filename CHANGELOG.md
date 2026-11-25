@@ -1,5 +1,35 @@
 # Changelog
 
+## Version 0.48.1
+
+A fix found by running Shadowfax on Windows.
+
+### Fixed
+
+- **Events with a box-drawing character in them weren't stored.** On Windows
+  the Claude Code hook read its input in the system's own encoding instead of
+  UTF-8, so a file Claude had read with box-drawing characters in it (this
+  README's architecture diagram) came through with a character UTF-8 can't
+  encode. The server accepted it, then failed hashing the event into the
+  ledger, answered 500, and the connector kept the whole batch to try again,
+  forever. Three fixes:
+  - The hook reads its input as bytes and decodes them as UTF-8, which is
+    what Claude Code sends.
+  - The connector replaces any character that can't be UTF-8 before sending.
+  - The server replaces any such character in a JSON request with U+FFFD
+    before it's parsed, so one bad character is never a 500 again, from any
+    client, on any endpoint.
+- **`flush` says why events are still waiting:** the server couldn't be
+  reached, the key was refused, or the server's answer. The reason is also
+  written to `errors.log`, which used to stay empty for all of these.
+
+### Tested
+
+- 1,247 API checks, on SQLite and on PostgreSQL. The 9 new ones cover the
+  bad character in an event and in a batch, emoji kept intact, the ledger
+  still verifying, broken JSON still refused, the hook decoding UTF-8, the
+  connector's encoding, and the reason `flush` gives.
+
 ## Version 0.48.0
 
 Poisoned memory: an injection that comes back in a later session.

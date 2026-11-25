@@ -68,7 +68,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.48.0"
+VERSION = "0.48.1"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -492,6 +492,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# v0.48.1: added first, so it sits inside the size limit: text that can't be
+# stored is cleaned from a body that has already been allowed in.
+app.add_middleware(limits.CleanText)
 # Added before CORS so that CORS wraps it: a 413 the browser cannot read, for
 # want of an Access-Control-Allow-Origin header, would look like a network error.
 app.add_middleware(limits.BodySizeLimit, limit=lambda: LIMITS.max_body_bytes)

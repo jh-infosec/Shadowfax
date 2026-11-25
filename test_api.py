@@ -5906,6 +5906,60 @@ check("and they decide what counts as memory",
       [a["message"].split(" into ")[1][:13] for a in _alerts46("mem-59", "memory_poisoned")] == ["/repo/NOTES.m"])
 client.put("/policy", json=_polx48)
 
+print("\n== text that can't be stored (v0.48.1) ==")
+import io as _io481
+import limits as _lim481
+
+_raw481 = ('[{"timestamp": "2026-10-20T10:00:00", "actor_id": "enc-481", "actor_type": "ai_agent", '
+           '"event_type": "tool_result", "target": "README.md", '
+           '"metadata": {"tool": "Read", "output": "a diagram \\u00e2\\u201d\\udc90 here, and \\ud83d\\ude00"}}]')
+_r481 = client.post("/events", content=_raw481.encode(), headers={"Content-Type": "application/json"})
+check("an event carrying a character UTF-8 can't store (a lone surrogate) is accepted, not a 500",
+      _r481.status_code == 200)
+_out481 = next(e for e in client.get("/actors/enc-481").json()["events"])["metadata"]["output"]
+check("the bad character becomes U+FFFD, and a proper emoji pair is kept",
+      "�" in _out481 and "\U0001F600" in _out481 and "\udc90" not in _out481)
+check("and the ledger still verifies", client.get("/ledger/verify").json()["ok"] is True)
+_raw481b = _raw481.replace("enc-481", "enc-482").replace("tool_result", "tool_call")
+_good481 = ('[{"timestamp": "2026-10-20T10:00:00", "actor_id": "enc-483", "actor_type": "ai_agent", '
+            '"event_type": "tool_call", "target": "x", "metadata": {}}]')
+_r481b = client.post("/events", content=("[" + _raw481b[1:-1] + "," + _good481[1:-1] + "]").encode(),
+                     headers={"Content-Type": "application/json"})
+check("so one such event no longer holds up the rest of its batch",
+      _r481b.status_code == 200 and _r481b.json()["ingested"] == 2)
+check("a clean body passes through untouched, and one that isn't JSON is left for the parser to refuse",
+      _lim481.clean_json_body(_good481.encode()) == _good481.encode()
+      and _lim481.clean_json_body(b'{"a": "\\udc90"') == b'{"a": "\\udc90"')
+_r481c = client.post("/events", content=b'[{"timestamp": "x"', headers={"Content-Type": "application/json"})
+check("and broken JSON is still a 422, not a crash", _r481c.status_code == 422)
+
+class _Catch481:
+    def __init__(self, status=200):
+        self.status, self.bodies = status, []
+    def post(self, path, body):
+        self.bodies.append(body)
+        return self.status, None
+
+_cfg481 = _sa46.Config(url="http://127.0.0.1:1", api_key="k", agent_id="enc-hook",
+                       spool_dir=__import__("pathlib").Path(_tf48.mkdtemp()))
+_t481 = _Catch481()
+_payload481 = json.dumps({"hook_event_name": "PostToolUse", "session_id": "s", "tool_name": "Read",
+                          "tool_input": {"file_path": "README.md"}, "tool_response": "Browser\n    │\n    ▼ →"},
+                         ensure_ascii=False).encode("utf-8")
+_sa46.run_hook(stdin=_io481.BytesIO(_payload481), config=_cfg481, transport=_t481)
+check("the hook reads what Claude Code sends as UTF-8, whatever the system's own encoding",
+      [e["metadata"].get("output") for e in _t481.bodies[0] if e["event_type"] == "tool_result"]
+      == ["Browser\n    │\n    ▼ →"])
+check("and the connector never sends a character the server can't store",
+      json.loads(_sa46.json_bytes({"o": "box \udc90"}).decode("utf-8")) == {"o": "box ?"})
+_bad481 = _Catch481(status=500)
+_rep481 = _sa46.Reporter(config=_cfg481, transport=_bad481, background=False)
+_rep481.send(_sa46.call_event("enc-hook", "Read", {"file_path": "x"}))
+_rep481.flush()
+check("when the server answers 500, the events are kept and the reason is recorded for flush to show",
+      _rep481.problem and "answered 500" in _rep481.problem
+      and "kept 1 to send later" in (_cfg481.spool_dir / "errors.log").read_text(encoding="utf-8"))
+
 print("\n== the README and the guides (v0.44) ==")
 import re as _re44
 from pathlib import Path as _P44

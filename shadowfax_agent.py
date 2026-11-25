@@ -57,7 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-VERSION = "0.48.0"
+VERSION = "0.48.1"
 DEFAULT_URL = "http://127.0.0.1:8000"
 ACTOR_TYPE = "ai_agent"
 
@@ -145,6 +145,13 @@ def check_agent_id(agent_id: str) -> str | None:
 
 # -- talking to Shadowfax --------------------------------------------------------
 
+def json_bytes(body: Any) -> bytes:
+    """A request body as UTF-8 JSON. Anything that can't be UTF-8 (a lone
+    surrogate, from text read with the wrong encoding) becomes "?" rather than
+    reaching the server (v0.48.1)."""
+    return json.dumps(body, default=str, ensure_ascii=False).encode("utf-8", "replace")
+
+
 class HttpTransport:
     """POSTs JSON with the API key. Returns (status, body); status 0 means the
     server could not be reached at all."""
@@ -159,7 +166,7 @@ class HttpTransport:
         headers = {"User-Agent": f"shadowfax-agent/{VERSION}", "Accept": "application/json"}
         data = None
         if body is not None:
-            data = json.dumps(body, default=str).encode("utf-8")
+            data = json_bytes(body)
             headers["Content-Type"] = "application/json"
         if self.config.api_key:
             headers["X-API-Key"] = self.config.api_key
@@ -461,6 +468,7 @@ class Reporter:
         self.spool = spool or Spool(self.config.spool_dir)
         self.sent = 0
         self.dropped = 0
+        self.problem: str | None = None    # why the last send kept events back (v0.48.1)
         self._pending: list[tuple[str, Any]] = []
         self._lock = threading.Lock()
         self._queue: "queue.Queue[tuple[str, Any] | None]" | None = None
@@ -644,6 +652,7 @@ class Reporter:
                     self.sent += len(batch)
                 elif _retryable(status):
                     failed.extend(("/events", e) for e in batch)
+                    self.problem = _why_waiting(status, reply)
                 else:
                     self.dropped += len(batch)
                     self.spool.note(f"Shadowfax refused {len(batch)} event(s) with {status}: "
@@ -655,12 +664,14 @@ class Reporter:
                     self.sent += 1
                 elif _retryable(status):
                     failed.append((path, body))
+                    self.problem = _why_waiting(status, reply)
                 else:
                     self.dropped += 1
                     self.spool.note(f"Shadowfax refused a manifest with {status}: {_detail(reply)}")
                 i += 1
         if failed:
             self.spool.add(failed)
+            self.spool.note(f"kept {len(failed)} to send later: {self.problem or 'not sent'}")
 
     def _post(self, path: str, body: Any) -> tuple[int, Any]:
         try:
@@ -668,6 +679,18 @@ class Reporter:
         except Exception as exc:  # never into the agent
             self.spool.note(f"sending failed: {exc!r}")
             return 0, None
+
+
+def _why_waiting(status: int, reply: Any) -> str:
+    """Why events were kept to try again, for `flush` and errors.log (v0.48.1)."""
+    if status == 0:
+        return "Shadowfax couldn't be reached"
+    if status in (401, 403):
+        return f"Shadowfax refused the API key ({status}); run configure again with a working key"
+    if status == 429:
+        return "Shadowfax asked us to slow down (429)"
+    detail = _detail(reply) if reply is not None else ""
+    return f"Shadowfax answered {status}" + (f": {detail}" if detail else "; its own log says why")
 
 
 def _detail(reply: Any) -> str:
@@ -812,7 +835,15 @@ def run_hook(stdin: Any = None, config: Config | None = None, transport: Any = N
     monitor must not."""
     try:
         config = config or Config.load()
-        raw = (stdin or sys.stdin).read()
+        # v0.48.1: read bytes and decode them as UTF-8, which is what Claude
+        # Code sends. Reading text used the system's encoding instead (cp1252
+        # on most Windows machines), which turned box-drawing characters in a
+        # file Claude had read into characters the server couldn't store.
+        source = stdin if stdin is not None else getattr(sys.stdin, "buffer", sys.stdin)
+        raw = source.read()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        raw = raw.lstrip("\ufeff")
         payload = json.loads(raw) if raw.strip() else {}
         if not isinstance(payload, dict):
             return 0
@@ -1117,7 +1148,8 @@ def main(argv: list[str] | None = None) -> int:
             waiting = len(reporter.spool.file.read_text(encoding="utf-8").splitlines())
         except OSError:
             pass
-        print(f"sent {reporter.sent}, still waiting {waiting}")
+        print(f"sent {reporter.sent}, still waiting {waiting}"
+              + (f" ({reporter.problem})" if waiting and reporter.problem else ""))
         return 0 if waiting == 0 else 1
 
     return 2

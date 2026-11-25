@@ -136,7 +136,10 @@ decorator doesn't fit.
   seen. Something hidden in the middle of a very long page can be cut out.
 
 `python shadowfax_agent.py check` tests the connection without sending
-anything, and `python shadowfax_agent.py flush` sends whatever is waiting.
+anything, and `python shadowfax_agent.py flush` sends whatever is waiting. If
+something is still waiting afterwards, `flush` says why: Shadowfax couldn't be
+reached, the key was refused, or the server answered with an error (its own
+log has the details). The same reasons go into `~/.shadowfax/spool/errors.log`.
 
 ## Agents that hand work to each other
 

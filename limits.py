@@ -33,6 +33,7 @@ whatever proxy exposes it to other systems.
 from __future__ import annotations
 
 import json
+import re
 import os
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -155,3 +156,88 @@ async def _send_413(send: Callable[[dict], Awaitable[None]], detail: str) -> Non
                 "headers": [(b"content-type", b"application/json"),
                             (b"content-length", str(len(body)).encode())]})
     await send({"type": "http.response.body", "body": body})
+
+
+# -- text that can't be stored (v0.48.1) -------------------------------------------
+#
+# JSON can spell a character UTF-8 can't encode: a lone surrogate, "\udc90",
+# which is what text read with the wrong encoding and "surrogateescape" turns
+# into when it's sent on. Python accepts it in a str, so it got past
+# validation, and then failed where the text was finally encoded: hashing the
+# event into the ledger. One such character in a batch of events was a 500 for
+# the whole batch, and a client retrying a 500 retried it forever. Any lone
+# surrogate in a JSON body is replaced with U+FFFD before the body is parsed,
+# so the request is judged on what it says. Proper pairs (an emoji written as
+# "😀") decode to one character and are untouched.
+
+_SURROGATE_ESCAPE = re.compile(rb"\\u[dD][89a-fA-F][0-9a-fA-F]{2}")
+_LONE = re.compile("[\ud800-\udfff]")
+
+
+def clean_text(value: Any) -> Any:
+    """`value` with every lone surrogate in its strings (keys too) replaced."""
+    if isinstance(value, str):
+        return _LONE.sub("�", value)
+    if isinstance(value, list):
+        return [clean_text(v) for v in value]
+    if isinstance(value, dict):
+        return {clean_text(k): clean_text(v) for k, v in value.items()}
+    return value
+
+
+def clean_json_body(body: bytes) -> bytes:
+    """A JSON body with lone surrogates replaced; unchanged when there are none
+    or it isn't JSON at all (that is the parser's to refuse)."""
+    if not _SURROGATE_ESCAPE.search(body):
+        return body
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return body
+    cleaned = clean_text(parsed)
+    if cleaned == parsed:
+        return body
+    return json.dumps(cleaned, ensure_ascii=False).encode("utf-8")
+
+
+class CleanText:
+    """ASGI middleware applying clean_json_body to JSON requests. Sits inside
+    BodySizeLimit, so the size limit is applied to what was sent."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or scope.get("method") not in ("POST", "PUT", "PATCH"):
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or [])
+        if b"json" not in headers.get(b"content-type", b""):
+            await self.app(scope, receive, send)
+            return
+        chunks = []
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                # The client went away mid-body; let the app see that.
+                async def gone(last: dict = message) -> dict:
+                    return last
+                await self.app(scope, gone, send)
+                return
+            chunks.append(message.get("body", b""))
+            if not message.get("more_body"):
+                break
+        body = clean_json_body(b"".join(chunks))
+        sent = False
+
+        async def replay() -> dict:
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        scope = dict(scope)
+        scope["headers"] = [(k, v) for k, v in scope.get("headers") or [] if k != b"content-length"] + [
+            (b"content-length", str(len(body)).encode())]
+        await self.app(scope, replay, send)
