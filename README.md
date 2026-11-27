@@ -69,7 +69,7 @@ block anything.
   worse. [How that's measured](docs/detection.md#how-noisy-is-it).
 - **Speed:** recording an event takes about 10 ms whether the agent has 1,000
   events of history or 50,000. [The benchmark](docs/evidence.md#recording-stays-fast).
-- **Tests:** every push runs 1,247 API checks on SQLite and again on
+- **Tests:** every push runs 1,248 API checks on SQLite and again on
   PostgreSQL, 93 checks in a real browser, the desktop app's own tests, the
   scripted attack against the built image, and vulnerability and code
   scanning. [What CI checks](docs/development.md#continuous-integration).

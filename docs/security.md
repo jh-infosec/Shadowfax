@@ -135,7 +135,10 @@ without it can only reach the enrolment screen until it's set up.
 - Timestamps must be ISO 8601 and are stored in UTC.
 - Because alerts are rebuilt from the whole history, a new event dated in the
   past can make old alerts disappear. When that happens Shadowfax records which
-  alerts went and who sent the event, and raises `history_rewritten`.
+  alerts went and who sent the event, and raises `history_rewritten`. An alert
+  that only moves onto the earlier event, saying the same thing (an agent's
+  first action arriving late, for example), isn't counted: nothing it
+  concluded changed.
 - Nobody can send events as Shadowfax's own actors.
 - The CLI only sends a saved token to the server it was saved for, and doesn't
   follow redirects.

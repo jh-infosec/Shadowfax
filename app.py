@@ -27,7 +27,7 @@ import secrets
 import sqlite3
 import threading
 from pathlib import Path
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -68,7 +68,7 @@ import timeutil
 from seed_data import SAMPLE_EVENTS, DEFAULT_POLICY
 
 APP_NAME = "Shadowfax API"
-VERSION = "0.48.1"
+VERSION = "0.48.2"
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -801,9 +801,22 @@ def _rescan_actor(conn: sqlite3.Connection, actor_id: str,
     else:
         if retired is not None:
             after = {a["id"] for a in alerts}
-            retired.extend({"id": r["id"], "category": r["category"], "severity": r["severity"]}
-                           for r in conn.execute("SELECT id, category, severity FROM alerts WHERE actor_id = ?",
-                                                 (actor_id,)) if r["id"] not in after)
+            # v0.48.2: a finding that only moved isn't retired. An earlier event
+            # arriving late moves a once-per-actor alert like undeclared_agent
+            # onto it, with the same words; nothing the engine concluded
+            # changed, so it isn't history being rewritten. Matched one for one,
+            # so two copies of a finding becoming one still counts the other.
+            before = conn.execute("SELECT id, category, severity, message FROM alerts WHERE actor_id = ?",
+                                  (actor_id,)).fetchall()
+            known = {r["id"] for r in before}
+            moved = Counter((a["category"], a["message"]) for a in alerts if a["id"] not in known)
+            for r in before:
+                if r["id"] in after:
+                    continue
+                if moved[(r["category"], r["message"])] > 0:
+                    moved[(r["category"], r["message"])] -= 1
+                    continue
+                retired.append({"id": r["id"], "category": r["category"], "severity": r["severity"]})
         db.replace_alerts_for_actor(conn, actor_id, alerts)
     _scan_stored(actor_id, len(alerts))
     # Queued in the same transaction as the alerts themselves, so a crash

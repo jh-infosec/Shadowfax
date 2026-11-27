@@ -1,5 +1,24 @@
 # Changelog
 
+## Version 0.48.2
+
+### Fixed
+
+- **`history_rewritten` no longer fires when an alert only moves.** An
+  agent's earlier events arriving after its later ones (a backlog sent once
+  the server was reachable again) moved its `undeclared_agent` alert onto the
+  earlier event. That retired the old alert and raised a new one with the same
+  words, and the retirement was reported as history being rewritten. Now an
+  alert that comes back on another event with the same category and message
+  isn't counted as retired, matched one for one. One that really disappears
+  or changes is still reported, as before. Found running Shadowfax on Windows.
+
+### Tested
+
+- 1,248 API checks, on SQLite and on PostgreSQL, with one new check for an
+  alert that only moves. Two mutations to the rule (a moved alert counted as
+  retired, nothing ever counted) are both caught.
+
 ## Version 0.48.1
 
 A fix found by running Shadowfax on Windows.

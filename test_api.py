@@ -3116,6 +3116,17 @@ client.post("/events", json=[_ev(actor_id="user-jsmith", actor_type="human",
                                  timestamp="2026-08-01T02:10:00")])
 check("an out-of-order event that changes no conclusion raises nothing",
       len(client.get("/alerts", params={"category": ["history_rewritten"]}).json()) == _n_rw + 1)
+# v0.48.2: a late, earlier event moves a once-per-actor alert onto itself.
+client.post("/events", json=[_ev(actor_id="late-agent-48", actor_type="ai_agent", event_type="tool_call",
+                                 target="README.md", timestamp="2026-08-05T10:05:00")])
+_ud48 = client.get("/alerts", params={"actor_id": "late-agent-48", "category": ["undeclared_agent"]}).json()
+client.post("/events", json=[_ev(actor_id="late-agent-48", actor_type="ai_agent", event_type="tool_call",
+                                 target="notes.txt", timestamp="2026-08-05T10:00:00")])
+_ud48b = client.get("/alerts", params={"actor_id": "late-agent-48", "category": ["undeclared_agent"]}).json()
+check("a finding that only moves to an earlier event, same words, isn't rewritten history (v0.48.2)",
+      len(_ud48) == len(_ud48b) == 1 and _ud48[0]["id"] != _ud48b[0]["id"]
+      and _ud48b[0]["timestamp"].startswith("2026-08-05T10:00")
+      and len(client.get("/alerts", params={"category": ["history_rewritten"]}).json()) == _n_rw + 1)
 _pol = client.get("/policy").json()
 _pol2 = json.loads(json.dumps(_pol)); _pol2["brute_force_max_failures"] = 99
 client.put("/policy", json=_pol2); client.put("/policy", json=_pol)
